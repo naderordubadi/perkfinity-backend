@@ -1,0 +1,163 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String       @id @default(uuid())
+  email_enc   Bytes?
+  phone_enc   Bytes?
+  created_at  DateTime     @default(now())
+  last_active DateTime?
+  redemptions Redemption[]
+  activations Activation[]
+  events      Event[]
+}
+
+model Merchant {
+  id                String             @id @default(uuid())
+  business_name     String
+  legal_name        String?
+  status            String             @default("active")
+  subscription_tier String             @default("free")
+  created_at        DateTime           @default(now())
+  updated_at        DateTime           @updatedAt
+  campaigns         Campaign[]
+  locations         MerchantLocation[]
+  users             MerchantUser[]
+  qr_codes          QrCode[]
+  subscriptions     Subscription[]
+  events            Event[]
+  audit_logs        AuditLog[]
+}
+
+model MerchantLocation {
+  id            String     @id @default(uuid())
+  merchant_id   String
+  merchant      Merchant   @relation(fields: [merchant_id], references: [id])
+  location_name String?
+  address       String?
+  city          String?
+  state         String?
+  postal_code   String?
+  country       String     @default("US")
+  timezone      String?
+  is_active     Boolean    @default(true)
+  created_at    DateTime   @default(now())
+  qr_codes      QrCode[]
+  campaigns     Campaign[]
+  events        Event[]
+}
+
+model MerchantUser {
+  id            String       @id @default(uuid())
+  merchant_id   String
+  merchant      Merchant     @relation(fields: [merchant_id], references: [id])
+  email         String       @unique
+  password_hash String
+  role          String       @default("owner")
+  status        String       @default("active")
+  created_at    DateTime     @default(now())
+  redemptions   Redemption[]
+}
+
+model Campaign {
+  id                            String            @id @default(uuid())
+  merchant_id                   String
+  merchant                      Merchant          @relation(fields: [merchant_id], references: [id])
+  location_id                   String?
+  location                      MerchantLocation? @relation(fields: [location_id], references: [id])
+  title                         String            @default("Instant Discount")
+  discount_percentage           Int
+  terms                         String?
+  redemption_time_limit_minutes Int               @default(15)
+  start_at                      DateTime?
+  end_at                        DateTime?
+  status                        String            @default("active")
+  created_at                    DateTime          @default(now())
+  updated_at                    DateTime          @updatedAt
+  redemptions                   Redemption[]
+  activations                   Activation[]
+  events                        Event[]
+}
+
+model QrCode {
+  id          String            @id @default(uuid())
+  merchant_id String
+  merchant    Merchant          @relation(fields: [merchant_id], references: [id])
+  location_id String?
+  location    MerchantLocation? @relation(fields: [location_id], references: [id])
+  public_code String            @unique
+  status      String            @default("active")
+  created_at  DateTime          @default(now())
+}
+
+model Activation {
+  id              String   @id @default(uuid())
+  user_id         String
+  user            User     @relation(fields: [user_id], references: [id])
+  campaign_id     String
+  campaign        Campaign @relation(fields: [campaign_id], references: [id])
+  idempotency_key String?  @unique
+  created_at      DateTime @default(now())
+}
+
+model Redemption {
+  id                           String        @id @default(uuid())
+  user_id                      String
+  user                         User          @relation(fields: [user_id], references: [id])
+  campaign_id                  String
+  campaign                     Campaign      @relation(fields: [campaign_id], references: [id])
+  token                        String        @unique
+  issued_at                    DateTime      @default(now())
+  expires_at                   DateTime
+  redeemed                     Boolean       @default(false)
+  redeemed_at                  DateTime?
+  redeemed_by_merchant_user_id String?
+  redeemed_by                  MerchantUser? @relation(fields: [redeemed_by_merchant_user_id], references: [id])
+}
+
+model Subscription {
+  id                       String    @id @default(uuid())
+  merchant_id              String
+  merchant                 Merchant  @relation(fields: [merchant_id], references: [id])
+  provider                 String?
+  provider_customer_id     String?
+  provider_subscription_id String?
+  status                   String    @default("inactive")
+  current_period_end       DateTime?
+  created_at               DateTime  @default(now())
+}
+
+model Event {
+  id          String            @id @default(uuid())
+  event_name  String
+  user_id     String?
+  user        User?             @relation(fields: [user_id], references: [id])
+  merchant_id String?
+  merchant    Merchant?         @relation(fields: [merchant_id], references: [id])
+  campaign_id String?
+  campaign    Campaign?         @relation(fields: [campaign_id], references: [id])
+  location_id String?
+  location    MerchantLocation? @relation(fields: [location_id], references: [id])
+  metadata    Json              @default("{}")
+  created_at  DateTime          @default(now())
+}
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  actor_type  String
+  actor_id    String?
+  merchant_id String?
+  merchant    Merchant? @relation(fields: [merchant_id], references: [id])
+  action      String
+  target_type String?
+  target_id   String?
+  metadata    Json      @default("{}")
+  created_at  DateTime  @default(now())
+}
+
