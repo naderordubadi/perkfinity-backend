@@ -1,26 +1,11 @@
-import { buildApp } from '../src/app.js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-let appInstance: Awaited<ReturnType<typeof buildApp>> | null = null;
-let startupError: string | null = null;
-
-async function getApp() {
-  if (startupError) throw new Error(startupError);
-  if (!appInstance) {
-    try {
-      appInstance = await buildApp();
-      await appInstance.ready();
-    } catch (err: any) {
-      startupError = err?.message || String(err);
-      throw err;
-    }
-  }
-  return appInstance;
-}
-
+// Dynamic import so any crash in src/ is caught by try/catch
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const app = await getApp();
+    const { buildApp } = await import('../src/app.js');
+    const app = await buildApp();
+    await app.ready();
 
     const response = await app.inject({
       method: req.method as any,
@@ -31,16 +16,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     res.status(response.statusCode);
     Object.entries(response.headers).forEach(([key, value]) => {
-      if (value !== undefined) {
-        res.setHeader(key, value as string);
-      }
+      if (value !== undefined) res.setHeader(key, value as string);
     });
-    res.end(response.body);
+    return res.end(response.body);
+
   } catch (err: any) {
     res.status(500).json({
-      error: 'STARTUP_ERROR',
-      message: err?.message || String(err),
-      env_keys_present: Object.keys(process.env).filter(k => !k.startsWith('npm_') && !k.startsWith('NVM_'))
+      error: err?.message || String(err),
+      stack: err?.stack?.split('\n').slice(0, 8),
+      env: {
+        DATABASE_URL: process.env.DATABASE_URL ? 'SET' : 'MISSING',
+        JWT_SECRET: process.env.JWT_SECRET ? 'SET' : 'MISSING',
+        PII_ENCRYPTION_KEY: process.env.PII_ENCRYPTION_KEY ? 'SET' : 'MISSING',
+        NODE_ENV: process.env.NODE_ENV,
+      }
     });
   }
 }
