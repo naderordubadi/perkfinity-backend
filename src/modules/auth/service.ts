@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import argon2 from 'argon2';
+import bcrypt from 'bcryptjs';
 import { logAudit } from '../audit/service.js';
 import { env } from '../../config/env.js';
 
@@ -7,7 +7,7 @@ export class AuthService {
   constructor(private prisma: PrismaClient, private jwt: any) { }
 
   async registerMerchant(data: any) {
-    const password_hash = await argon2.hash(data.password);
+    const password_hash = await bcrypt.hash(data.password, 12);
     const merchant = await this.prisma.merchant.create({
       data: {
         business_name: data.business_name,
@@ -50,7 +50,7 @@ export class AuthService {
       return null;
     }
 
-    const valid = await argon2.verify(merchantUser.password_hash, data.password);
+    const valid = await bcrypt.compare(data.password, merchantUser.password_hash);
     if (!valid) {
       return null;
     }
