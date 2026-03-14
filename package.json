@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Perkfinity Backend",
   "main": "src/server.ts",
-  "type": "module",
   "scripts": {
     "postinstall": "prisma generate",
     "dev": "tsx watch src/server.ts",
