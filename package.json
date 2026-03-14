@@ -43,6 +43,7 @@
     "@types/node": "^20.5.9",
     "@types/uuid": "^9.0.3",
     "@types/node-cron": "^3.0.8",
+    "@vercel/node": "^3.0.0",
     "ts-node": "^10.9.1",
     "tsx": "^3.12.7",
     "typescript": "^5.2.2",
