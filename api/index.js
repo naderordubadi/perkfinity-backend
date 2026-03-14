@@ -11,11 +11,13 @@ const crypto = require('crypto');
 const ALLOWED_ORIGINS = [
   'https://perkfinity.net',
   'https://www.perkfinity.net',
+  'null', // Allows local file:// based HTML testing
 ];
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes(origin) ? origin : 'https://perkfinity.net');
+  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:'));
+  res.setHeader('Access-Control-Allow-Origin', isAllowed ? origin : '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
