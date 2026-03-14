@@ -118,7 +118,7 @@ module.exports = async function handler(req, res) {
           merchantUser,
           accessToken,
           qr_public_code: public_code,
-          qr_url: `https://app.perkfinity.net/qr/${public_code}`,
+          qr_url: `https://perkfinity-app.vercel.app/qr/${public_code}`,
         }
       });
     }
