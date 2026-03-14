@@ -153,6 +153,103 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { merchantUser: safeUser, accessToken } });
     }
 
+    // ── GET /api/v1/qr/resolve/:code ──────────────────────────────
+    const qrMatch = url.match(/\/api\/v1\/qr\/resolve\/([a-zA-Z0-9_-]+)/);
+    if (method === 'GET' && qrMatch) {
+      const public_code = qrMatch[1];
+      const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
+      if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
+      
+      const [merchant] = await sql`SELECT id, business_name FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [location] = await sql`SELECT address, city, state, postal_code FROM "MerchantLocation" WHERE merchant_id = ${qrCode.merchant_id} AND is_active = true LIMIT 1`;
+      const [campaign] = await sql`SELECT * FROM "Campaign" WHERE merchant_id = ${qrCode.merchant_id} AND status = 'active' ORDER BY created_at DESC LIMIT 1`;
+      
+      return send(res, 200, { success: true, data: { qrCode, merchant, location, campaign } });
+    }
+
+    // ── POST /api/v1/consumers/signup ─────────────────────────────
+    if (method === 'POST' && url.endsWith('/consumers/signup')) {
+      const data = req.body || {};
+      if (!data.email || !data.password) return send(res, 400, { success: false, error: 'Missing email or password' });
+      
+      const existing = await sql`SELECT id FROM "User" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
+      if (existing.length > 0) return send(res, 400, { success: false, error: 'User already exists' });
+      
+      const hash = await bcrypt.hash(data.password, 12);
+      const [user] = await sql`
+        INSERT INTO "User" (id, email, password_hash, created_at, last_active)
+        VALUES (gen_random_uuid()::text, ${data.email.toLowerCase()}, ${hash}, NOW(), NOW())
+        RETURNING id, email
+      `;
+      
+      const JWT_SECRET = process.env.JWT_SECRET;
+      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      return send(res, 201, { success: true, data: { user, accessToken: token } });
+    }
+
+    // ── POST /api/v1/consumers/login ──────────────────────────────
+    if (method === 'POST' && url.endsWith('/consumers/login')) {
+      const data = req.body || {};
+      if (!data.email || !data.password) return send(res, 400, { success: false, error: 'Missing credentials' });
+      
+      const [user] = await sql`SELECT * FROM "User" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
+      if (!user || !(await bcrypt.compare(data.password, user.password_hash))) {
+        return send(res, 401, { success: false, error: 'Invalid credentials' });
+      }
+      
+      await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
+      const JWT_SECRET = process.env.JWT_SECRET;
+      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      const { password_hash: _pw, ...safeUser } = user;
+      return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
+    }
+
+    // ── PUT /api/v1/consumers/profile ─────────────────────────────
+    if (method === 'PUT' && url.endsWith('/consumers/profile')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      
+      const data = req.body || {};
+      const [user] = await sql`
+        UPDATE "User"
+        SET full_name = COALESCE(${data.full_name}, full_name),
+            phone_number = COALESCE(${data.phone_number}, phone_number),
+            city = COALESCE(${data.city}, city),
+            zip_code = COALESCE(${data.zip_code}, zip_code),
+            location_sharing_enabled = COALESCE(${data.location_sharing_enabled}, location_sharing_enabled),
+            push_notifications_enabled = COALESCE(${data.push_notifications_enabled}, push_notifications_enabled),
+            last_active = NOW()
+        WHERE id = ${payload.userId}
+        RETURNING id, email, full_name, phone_number, city, zip_code, location_sharing_enabled, push_notifications_enabled
+      `;
+      return send(res, 200, { success: true, data: { user } });
+    }
+
+    // ── POST /api/v1/campaigns/:id/activate ───────────────────────
+    const activateMatch = url.match(/\/api\/v1\/campaigns\/([a-zA-Z0-9_-]+)\/activate/);
+    if (method === 'POST' && activateMatch) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      
+      const campaignId = activateMatch[1];
+      const code = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6 chars
+      
+      const [redemption] = await sql`
+        INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed)
+        VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false)
+        RETURNING *
+      `;
+      return send(res, 201, { success: true, data: { activation: redemption } });
+    }
+
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
 
   } catch (err) {
