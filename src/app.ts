@@ -11,6 +11,7 @@ import authRoutes from './modules/auth/routes.js';
 import qrRoutes from './modules/qr/routes.js';
 import campaignRoutes from './modules/campaigns/routes.js';
 import redemptionRoutes from './modules/redemptions/routes.js';
+import merchantRoutes from './modules/merchants/routes.js';
 import analyticsRoutes from './modules/analytics/routes.js';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
@@ -26,9 +27,11 @@ export async function buildApp() {
   // 1. Helmet (security headers)
   await app.register(helmet);
 
-  // 2. CORS (restrict to dashboard origin in production)
+  // 2. CORS (restrict to known origins in production)
   await app.register(cors, {
-    origin: env.NODE_ENV === 'production' ? 'https://dashboard.perkfinity.com' : true,
+    origin: env.NODE_ENV === 'production'
+      ? ['https://dashboard.perkfinity.com', 'https://perkfinity.net', 'https://www.perkfinity.net']
+      : true,
     credentials: true,
     allowedHeaders: ['Authorization', 'Content-Type', 'Accept', 'Origin', 'User-Agent', 'Idempotency-Key']
   });
@@ -72,6 +75,7 @@ export async function buildApp() {
   await app.register(qrRoutes, { prefix: '/api/v1/qr' });
   await app.register(campaignRoutes, { prefix: '/api/v1/campaigns' });
   await app.register(redemptionRoutes, { prefix: '/api/v1/redemptions' });
+  await app.register(merchantRoutes, { prefix: '/api/v1/merchants' });
   await app.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
 
   // Task A14 - Health Check
