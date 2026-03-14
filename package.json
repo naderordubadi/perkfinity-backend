@@ -5,6 +5,7 @@
   "main": "src/server.ts",
   "type": "module",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "tsx watch src/server.ts",
     "build": "tsc --noEmit && tsc",
     "start": "node dist/server.js",
