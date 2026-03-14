@@ -1,22 +1,17 @@
 {
   "name": "perkfinity-backend",
   "version": "2.0.0",
-  "description": "Perkfinity Backend — Vercel Serverless",
+  "description": "Perkfinity Backend — Vercel Serverless + Neon",
   "main": "api/index.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc --noEmit",
-    "start": "node dist/server.js",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio",
-    "vercel-build": "prisma generate"
+    "vercel-build": "echo 'No build needed'"
   },
   "dependencies": {
-    "@prisma/client": "^5.2.0",
+    "@neondatabase/serverless": "^0.10.4",
     "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
-    "prisma": "^5.2.0"
+    "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

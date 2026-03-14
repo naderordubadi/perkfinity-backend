@@ -1,148 +1,119 @@
 /**
- * Perkfinity Backend — Vercel Serverless API Handler
- * Single CommonJS handler — no framework, no compilation needed.
- * Stack: @prisma/client (Neon PostgreSQL) + bcryptjs + jsonwebtoken
+ * Perkfinity Backend — Vercel Serverless + Neon
+ * Uses @neondatabase/serverless: HTTP-based, no TCP, no build step, works everywhere.
  */
 
-const { PrismaClient } = require('@prisma/client');
+const { neon } = require('@neondatabase/serverless');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 
-// Prisma singleton for connection reuse across warm lambda invocations
-let _prisma;
-function getPrisma() {
-  if (!_prisma) {
-    _prisma = new PrismaClient({
-      datasources: { db: { url: process.env.DATABASE_URL } }
-    });
-  }
-  return _prisma;
-}
-
 const ALLOWED_ORIGINS = [
   'https://perkfinity.net',
   'https://www.perkfinity.net',
-  'https://dashboard.perkfinity.com',
 ];
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-  const allowed = ALLOWED_ORIGINS.includes(origin);
-  res.setHeader('Access-Control-Allow-Origin', allowed ? origin : 'https://perkfinity.net');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-idempotency-key');
+  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes(origin) ? origin : 'https://perkfinity.net');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Vary', 'Origin');
 }
 
-function json(res, status, data) {
+function send(res, status, data) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(data));
 }
 
-function getJwtSecret() {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) throw new Error('JWT_SECRET environment variable is not set');
-  return secret;
-}
-
 module.exports = async function handler(req, res) {
   setCors(req, res);
-
-  if (req.method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.end();
-    return;
-  }
+  if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
 
   const url = (req.url || '/').split('?')[0];
-  const method = req.method || 'GET';
-  const prisma = getPrisma();
+  const method = req.method;
 
   try {
+    const DATABASE_URL = process.env.DATABASE_URL;
+    if (!DATABASE_URL) {
+      return send(res, 500, { success: false, error: 'DATABASE_URL is not set in Vercel environment variables' });
+    }
+    const sql = neon(DATABASE_URL);
 
-    // ── GET /health ──────────────────────────────────────────────
-    if ((url === '/' || url === '/health' || url.endsWith('/health')) && method === 'GET') {
-      await prisma.$queryRaw`SELECT 1`;
-      return json(res, 200, { ok: true, status: 'healthy', timestamp: new Date().toISOString() });
+    // ── Health check ──────────────────────────────────────────────
+    if (method === 'GET' && (url === '/' || url === '/health' || url.endsWith('/health'))) {
+      await sql`SELECT 1`;
+      return send(res, 200, { ok: true, status: 'healthy', db: 'connected', timestamp: new Date().toISOString() });
     }
 
-    // ── POST /api/v1/merchants/signup ────────────────────────────
-    if (url.endsWith('/merchants/signup') && method === 'POST') {
+    // ── POST /api/v1/merchants/signup ─────────────────────────────
+    if (method === 'POST' && url.endsWith('/merchants/signup')) {
       const data = req.body || {};
-
       if (!data.name || !data.email || !data.password) {
-        return json(res, 400, { success: false, error: 'Missing required fields: name, email, password' });
+        return send(res, 400, { success: false, error: 'Missing required fields: name, email, password' });
       }
 
-      // Hash password
+      const email = data.email.toLowerCase();
+
+      // Check duplicate
+      const existing = await sql`SELECT id FROM "MerchantUser" WHERE email = ${email} LIMIT 1`;
+      if (existing.length > 0) {
+        return send(res, 400, { success: false, error: 'A merchant with this email already exists.' });
+      }
+
       const password_hash = await bcrypt.hash(data.password, 12);
+      const now = new Date();
+      const oneYear = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
-      // Create merchant + owner user in one transaction
-      const merchant = await prisma.merchant.create({
-        data: {
-          business_name: data.name,
-          subscription_tier: data.tier || 'trial',
-          users: {
-            create: { email: data.email.toLowerCase(), password_hash, role: 'owner' }
-          }
-        },
-        include: { users: true }
-      });
+      // Insert merchant
+      const [merchant] = await sql`
+        INSERT INTO "Merchant" (id, business_name, subscription_tier, status, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.tier || 'trial'}, 'active', ${now}, ${now})
+        RETURNING id, business_name, subscription_tier
+      `;
 
-      const merchantUser = merchant.users[0];
+      // Insert owner user
+      const [merchantUser] = await sql`
+        INSERT INTO "MerchantUser" (id, merchant_id, email, password_hash, role, status, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${email}, ${password_hash}, 'owner', 'active', ${now})
+        RETURNING id, merchant_id, email, role, status, created_at
+      `;
 
-      // Create primary location
-      await prisma.merchantLocation.create({
-        data: {
-          merchant_id: merchant.id,
-          address: `${data.address || ''}${data.suite ? ', ' + data.suite : ''}`.trim(),
-          city: data.city || '',
-          state: data.state || '',
-          postal_code: data.zip || '',
-          country: 'US',
-        }
-      });
+      // Insert location
+      const address = `${data.address || ''}${data.suite ? ', ' + data.suite : ''}`.trim();
+      await sql`
+        INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, is_active, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${address}, ${data.city || ''}, ${data.state || ''}, ${data.zip || ''}, 'US', true, ${now})
+      `;
 
-      // Create welcome campaign
-      const perkTitle = data.perk || 'Welcome Perk';
-      await prisma.campaign.create({
-        data: {
-          merchant_id: merchant.id,
-          title: perkTitle,
-          discount_percentage: 10,
-          status: 'active',
-          start_at: new Date(),
-          end_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        }
-      });
+      // Insert welcome campaign
+      await sql`
+        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, status, start_at, end_at, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.perk || 'Welcome Perk'}, 10, 'active', ${now}, ${oneYear}, ${now}, ${now})
+      `;
 
-      // Generate QR code
+      // Insert QR code
       const public_code = crypto.randomBytes(9).toString('base64url');
-      await prisma.qrCode.create({
-        data: { merchant_id: merchant.id, public_code, status: 'active' }
-      });
+      await sql`
+        INSERT INTO "QrCode" (id, merchant_id, public_code, status, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${public_code}, 'active', ${now})
+      `;
 
-      // Sign JWT
+      const JWT_SECRET = process.env.JWT_SECRET;
+      if (!JWT_SECRET) return send(res, 500, { success: false, error: 'JWT_SECRET not configured' });
+
       const accessToken = jwt.sign(
         { userId: merchantUser.id, merchantId: merchant.id, role: merchantUser.role },
-        getJwtSecret(),
+        JWT_SECRET,
         { expiresIn: '8h' }
       );
 
-      const { password_hash: _pw, ...safeUser } = merchantUser;
-
-      return json(res, 201, {
+      return send(res, 201, {
         success: true,
         data: {
-          merchant: {
-            id: merchant.id,
-            business_name: merchant.business_name,
-            subscription_tier: merchant.subscription_tier,
-          },
-          merchantUser: safeUser,
+          merchant,
+          merchantUser,
           accessToken,
           qr_public_code: public_code,
           qr_url: `https://app.perkfinity.net/qr/${public_code}`,
@@ -150,54 +121,46 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── POST /api/v1/auth/login ──────────────────────────────────
-    if ((url.endsWith('/auth/login') || url.endsWith('/merchants/login')) && method === 'POST') {
+    // ── POST /api/v1/auth/login ────────────────────────────────────
+    if (method === 'POST' && (url.endsWith('/auth/login') || url.endsWith('/merchants/login'))) {
       const data = req.body || {};
-
       if (!data.email || !data.password) {
-        return json(res, 400, { success: false, error: 'email and password are required' });
+        return send(res, 400, { success: false, error: 'email and password are required' });
       }
 
-      const user = await prisma.merchantUser.findUnique({
-        where: { email: data.email.toLowerCase() },
-        include: { merchant: { select: { id: true, business_name: true, subscription_tier: true, status: true } } }
-      });
+      const [user] = await sql`
+        SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status
+        FROM "MerchantUser" u
+        JOIN "Merchant" m ON m.id = u.merchant_id
+        WHERE u.email = ${data.email.toLowerCase()}
+        LIMIT 1
+      `;
 
       if (!user || !(await bcrypt.compare(data.password, user.password_hash))) {
-        return json(res, 401, { success: false, error: 'Invalid email or password' });
+        return send(res, 401, { success: false, error: 'Invalid email or password' });
       }
 
+      const JWT_SECRET = process.env.JWT_SECRET;
       const accessToken = jwt.sign(
         { userId: user.id, merchantId: user.merchant_id, role: user.role },
-        getJwtSecret(),
+        JWT_SECRET,
         { expiresIn: '8h' }
       );
 
       const { password_hash: _pw, ...safeUser } = user;
-      return json(res, 200, { success: true, data: { merchantUser: safeUser, accessToken } });
+      return send(res, 200, { success: true, data: { merchantUser: safeUser, accessToken } });
     }
 
-    // ── 404 ──────────────────────────────────────────────────────
-    return json(res, 404, { success: false, error: `No route: ${method} ${url}` });
+    return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
 
   } catch (err) {
-    console.error('[perkfinity-api] Error:', err.message, err.stack);
-
-    if (err.code === 'P2002') {
-      return json(res, 400, { success: false, error: 'A merchant with this email already exists.' });
-    }
-    if (err.code === 'P2025') {
-      return json(res, 404, { success: false, error: 'Record not found.' });
-    }
-
-    return json(res, 500, {
+    console.error('[perkfinity]', err.message);
+    return send(res, 500, {
       success: false,
-      error: err.message || 'Internal server error',
-      // Include env check to help diagnose missing vars in Vercel
-      _debug: {
-        DATABASE_URL: process.env.DATABASE_URL ? '✓ SET' : '✗ MISSING',
-        JWT_SECRET: process.env.JWT_SECRET ? '✓ SET' : '✗ MISSING',
-        NODE_ENV: process.env.NODE_ENV,
+      error: err.message,
+      _env: {
+        DATABASE_URL: process.env.DATABASE_URL ? 'SET' : 'MISSING',
+        JWT_SECRET: process.env.JWT_SECRET ? 'SET' : 'MISSING',
       }
     });
   }
