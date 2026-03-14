@@ -94,8 +94,7 @@ export class QrService {
     // Generate raw QR code options (high error correction for center logo)
     const qrDataUrl = await qrcode.default.toDataURL(url, {
       errorCorrectionLevel: 'H',
-      type: 'image/jpeg',
-      quality: 0.9,
+      type: 'image/png',
       margin: 2,
       scale: 10,
       color: {
