@@ -4,8 +4,8 @@
   "description": "Perkfinity Backend",
   "main": "src/server.ts",
   "scripts": {
-    "postinstall": "prisma generate",
     "dev": "tsx watch src/server.ts",
+    "vercel-build": "prisma generate",
     "build": "tsc --noEmit && tsc",
     "start": "node dist/server.js",
     "db:migrate": "prisma migrate dev",
