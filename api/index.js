@@ -180,6 +180,32 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { qrCode, merchant, location, campaign } });
     }
 
+    // ── GET /api/v1/merchants/:id/profile ─────────────────────────
+    const getProfileMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/profile/);
+    if (method === 'GET' && getProfileMatch) {
+      const merchantId = getProfileMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const [merchantData] = await sql`
+        SELECT m.business_name, l.address, l.city, l.state, l.postal_code, u.email
+        FROM "Merchant" m
+        JOIN "MerchantUser" u ON u.merchant_id = m.id
+        LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
+        WHERE m.id = ${merchantId} AND u.id = ${payload.userId}
+        LIMIT 1
+      `;
+      
+      if (!merchantData) return send(res, 404, { success: false, error: 'Profile not found' });
+      return send(res, 200, { success: true, data: merchantData });
+    }
+
     // ── POST /api/v1/consumers/signup ─────────────────────────────
     if (method === 'POST' && url.endsWith('/consumers/signup')) {
       const data = req.body || {};
@@ -349,6 +375,7 @@ module.exports = async function handler(req, res) {
       const data = req.body || {};
       if (!data.current_password) return send(res, 400, { success: false, error: 'Current password is required to save changes' });
       
+      // Update Password & Email (MerchantUser Table)
       const [user] = await sql`SELECT * FROM "MerchantUser" WHERE id = ${payload.userId} LIMIT 1`;
       if (!user || !(await bcrypt.compare(data.current_password, user.password_hash))) {
         return send(res, 401, { success: false, error: 'Incorrect current password' });
@@ -375,7 +402,25 @@ module.exports = async function handler(req, res) {
         WHERE id = ${payload.userId}
       `;
 
-      return send(res, 200, { success: true, message: 'Profile updated successfully' });
+      // Update Merchant Details
+      if (data.business_name) {
+         await sql`UPDATE "Merchant" SET business_name = ${data.business_name} WHERE id = ${merchantId}`;
+      }
+
+      // Update Location Details (assuming 1 location for now per merchant, based on onboarding signup logic)
+      if (data.address || data.city || data.state || data.zip) {
+         await sql`
+           UPDATE "MerchantLocation" 
+           SET 
+             address = COALESCE(${data.address}, address),
+             city = COALESCE(${data.city}, city),
+             state = COALESCE(${data.state}, state),
+             postal_code = COALESCE(${data.zip}, postal_code)
+           WHERE merchant_id = ${merchantId}
+        `;
+      }
+
+      return send(res, 200, { success: true, message: 'Profile updated successfully', new_business_name: data.business_name });
     }
 
     if (url === '/api/v1/migrate-task2' && method === 'GET') {
