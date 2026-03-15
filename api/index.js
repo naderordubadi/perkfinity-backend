@@ -204,6 +204,26 @@ module.exports = async function handler(req, res) {
       `;
       
       if (!merchantData) return send(res, 404, { success: false, error: 'Profile not found' });
+      
+      // Fetch associated active QR code
+      const [qrData] = await sql`
+        SELECT public_code FROM "QrCode"
+        WHERE merchant_id = ${merchantId} AND status = 'active'
+        LIMIT 1
+      `;
+      
+      // Fetch associated welcome (or active) campaign perk
+      const [campaignData] = await sql`
+        SELECT title FROM "Campaign"
+        WHERE merchant_id = ${merchantId} AND status = 'active'
+        ORDER BY created_at ASC
+        LIMIT 1
+      `;
+
+      merchantData.qr_public_code = qrData ? qrData.public_code : null;
+      merchantData.qr_url = qrData ? `https://perkfinity-app.vercel.app/qr/${qrData.public_code}` : null;
+      merchantData.perk = campaignData ? campaignData.title : 'Welcome Perk';
+
       return send(res, 200, { success: true, data: merchantData });
     }
 
