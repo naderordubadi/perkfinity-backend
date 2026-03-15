@@ -333,16 +333,15 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: membersResult });
     }
 
-    // ── GET /api/v1/migrate-task2 (TEMPORARY) ─────────────────────
     if (url === '/api/v1/migrate-task2' && method === 'GET') {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "logo_url" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "city" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "zip_code" TEXT`;
       await sql`
         CREATE TABLE IF NOT EXISTS "MerchantMember" (
-          id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-          merchant_id UUID NOT NULL REFERENCES "Merchant"("id") ON DELETE CASCADE,
-          user_id UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+          id TEXT DEFAULT gen_random_uuid()::text PRIMARY KEY,
+          merchant_id TEXT NOT NULL REFERENCES "Merchant"("id") ON DELETE CASCADE,
+          user_id TEXT NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
           created_at TIMESTAMP DEFAULT NOW(),
           UNIQUE(merchant_id, user_id)
         )
