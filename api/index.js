@@ -333,6 +333,51 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: membersResult });
     }
 
+    // ── PUT /api/v1/merchants/:id/profile ─────────────────────────
+    const profileMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/profile/);
+    if (method === 'PUT' && profileMatch) {
+      const merchantId = profileMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+      
+      const data = req.body || {};
+      if (!data.current_password) return send(res, 400, { success: false, error: 'Current password is required to save changes' });
+      
+      const [user] = await sql`SELECT * FROM "MerchantUser" WHERE id = ${payload.userId} LIMIT 1`;
+      if (!user || !(await bcrypt.compare(data.current_password, user.password_hash))) {
+        return send(res, 401, { success: false, error: 'Incorrect current password' });
+      }
+
+      let newEmail = user.email;
+      if (data.email && data.email.toLowerCase() !== user.email) {
+         newEmail = data.email.toLowerCase();
+         // Check if email already used
+         const existing = await sql`SELECT id FROM "MerchantUser" WHERE email = ${newEmail} LIMIT 1`;
+         if (existing.length > 0) return send(res, 400, { success: false, error: 'Email already in use' });
+      }
+
+      let newHash = user.password_hash;
+      if (data.new_password && data.new_password.length >= 8) {
+         newHash = await bcrypt.hash(data.new_password, 12);
+      } else if (data.new_password && data.new_password.length > 0) {
+         return send(res, 400, { success: false, error: 'New password must be at least 8 characters' });
+      }
+
+      await sql`
+        UPDATE "MerchantUser" 
+        SET email = ${newEmail}, password_hash = ${newHash} 
+        WHERE id = ${payload.userId}
+      `;
+
+      return send(res, 200, { success: true, message: 'Profile updated successfully' });
+    }
+
     if (url === '/api/v1/migrate-task2' && method === 'GET') {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "logo_url" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "city" TEXT`;
