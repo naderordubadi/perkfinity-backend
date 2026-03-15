@@ -11,17 +11,21 @@ model User {
   id          String       @id @default(uuid())
   email_enc   Bytes?
   phone_enc   Bytes?
+  city        Bytes?
+  postal_code Bytes?
   created_at  DateTime     @default(now())
   last_active DateTime?
   redemptions Redemption[]
   activations Activation[]
   events      Event[]
+  memberships MerchantMember[]
 }
 
 model Merchant {
   id                String             @id @default(uuid())
   business_name     String
   legal_name        String?
+  logo_url          String?
   status            String             @default("active")
   subscription_tier String             @default("free")
   created_at        DateTime           @default(now())
@@ -33,6 +37,8 @@ model Merchant {
   subscriptions     Subscription[]
   events            Event[]
   audit_logs        AuditLog[]
+  merchant_logos    MerchantLogo?
+  members           MerchantMember[]
 }
 
 model MerchantLocation {

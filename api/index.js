@@ -131,7 +131,7 @@ module.exports = async function handler(req, res) {
       }
 
       const [user] = await sql`
-        SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status
+        SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status, m.logo_url
         FROM "MerchantUser" u
         JOIN "Merchant" m ON m.id = u.merchant_id
         WHERE u.email = ${data.email.toLowerCase()}
@@ -173,7 +173,7 @@ module.exports = async function handler(req, res) {
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
       
-      const [merchant] = await sql`SELECT id, business_name FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, logo_url FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
       const [location] = await sql`SELECT address, city, state, postal_code FROM "MerchantLocation" WHERE merchant_id = ${qrCode.merchant_id} AND is_active = true LIMIT 1`;
       const [campaign] = await sql`SELECT * FROM "Campaign" WHERE merchant_id = ${qrCode.merchant_id} AND status = 'active' ORDER BY created_at DESC LIMIT 1`;
       
@@ -255,12 +255,99 @@ module.exports = async function handler(req, res) {
       const campaignId = activateMatch[1];
       const code = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6 chars
       
+      // Auto-join merchant member
+      const [campaign] = await sql`SELECT merchant_id FROM "Campaign" WHERE id = ${campaignId}`;
+      if (campaign) {
+        await sql`
+           INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
+           VALUES (gen_random_uuid()::text, ${campaign.merchant_id}, ${payload.userId}, NOW())
+           ON CONFLICT DO NOTHING
+        `;
+      }
+      
       const [redemption] = await sql`
         INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed)
-        VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false)
+        VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '15 minutes', false)
         RETURNING *
       `;
       return send(res, 201, { success: true, data: { activation: redemption } });
+    }
+
+    // ── POST /api/v1/merchants/:id/logo ───────────────────────────
+    const logoMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/logo/);
+    if (method === 'POST' && logoMatch) {
+      const merchantId = logoMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+      
+      const data = req.body || {};
+      if (!data.logo_url) return send(res, 400, { success: false, error: 'Missing logo_url' });
+      
+      await sql`UPDATE "Merchant" SET logo_url = ${data.logo_url} WHERE id = ${merchantId}`;
+      return send(res, 200, { success: true, message: 'Logo successfully updated' });
+    }
+
+    // ── GET /api/v1/merchants/:id/members ─────────────────────────
+    const membersMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/members/);
+    if (method === 'GET' && membersMatch) {
+      const merchantId = membersMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+      
+      const membersResult = await sql`
+        SELECT 
+          u.id as user_id, u.city, u.zip_code, u.full_name,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'id', r.id,
+                'campaign_title', c.title,
+                'token', r.token,
+                'redeemed', r.redeemed,
+                'expires_at', r.expires_at
+              )
+            ) FILTER (WHERE r.id IS NOT NULL), '[]'
+          ) as promotions
+        FROM "MerchantMember" mm
+        JOIN "User" u ON u.id = mm.user_id
+        LEFT JOIN "Redemption" r ON r.user_id = u.id AND r.campaign_id IN (
+           SELECT id FROM "Campaign" WHERE merchant_id = ${merchantId}
+        )
+        LEFT JOIN "Campaign" c ON c.id = r.campaign_id
+        WHERE mm.merchant_id = ${merchantId}
+        GROUP BY u.id, u.city, u.zip_code, u.full_name
+      `;
+      
+      return send(res, 200, { success: true, data: membersResult });
+    }
+
+    // ── GET /api/v1/migrate-task2 (TEMPORARY) ─────────────────────
+    if (url === '/api/v1/migrate-task2' && method === 'GET') {
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "logo_url" TEXT`;
+      await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "city" TEXT`;
+      await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "zip_code" TEXT`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS "MerchantMember" (
+          id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+          merchant_id UUID NOT NULL REFERENCES "Merchant"("id") ON DELETE CASCADE,
+          user_id UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+          created_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE(merchant_id, user_id)
+        )
+      `;
+      return send(res, 200, { success: true, message: "Task 2 DB migrated!" });
     }
 
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
