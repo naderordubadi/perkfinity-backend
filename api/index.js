@@ -70,8 +70,8 @@ module.exports = async function handler(req, res) {
 
       // Insert merchant
       const [merchant] = await sql`
-        INSERT INTO "Merchant" (id, business_name, subscription_tier, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.tier || 'trial'}, 'active', ${now}, ${now})
+        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, subscription_tier, status, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''}, ${data.website || ''}, ${data.tier || 'trial'}, 'active', ${now}, ${now})
         RETURNING id, business_name, subscription_tier
       `;
 
@@ -83,10 +83,11 @@ module.exports = async function handler(req, res) {
       `;
 
       // Insert location
-      const address = `${data.address || ''}${data.suite ? ', ' + data.suite : ''}`.trim();
+      const address = data.address || '';
+      const suite = data.suite || '';
       await sql`
-        INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, is_active, created_at)
-        VALUES (gen_random_uuid()::text, ${merchant.id}, ${address}, ${data.city || ''}, ${data.state || ''}, ${data.zip || ''}, 'US', true, ${now})
+        INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${address}, ${suite}, ${data.city || ''}, ${data.state || ''}, ${data.zip || ''}, 'US', true, ${now})
       `;
 
       // Insert welcome campaign
@@ -194,7 +195,7 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
-        SELECT m.business_name, l.address, l.city, l.state, l.postal_code, u.email
+        SELECT m.business_name, m.contact_name, m.phone, m.website, l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
         LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
@@ -403,16 +404,25 @@ module.exports = async function handler(req, res) {
       `;
 
       // Update Merchant Details
-      if (data.business_name) {
-         await sql`UPDATE "Merchant" SET business_name = ${data.business_name} WHERE id = ${merchantId}`;
+      if (data.business_name || data.contact_name || data.phone || data.website !== undefined) {
+         await sql`
+           UPDATE "Merchant" 
+           SET 
+             business_name = COALESCE(${data.business_name}, business_name),
+             contact_name = COALESCE(${data.contact_name}, contact_name),
+             phone = COALESCE(${data.phone}, phone),
+             website = COALESCE(${data.website}, website)
+           WHERE id = ${merchantId}
+         `;
       }
 
       // Update Location Details (assuming 1 location for now per merchant, based on onboarding signup logic)
-      if (data.address || data.city || data.state || data.zip) {
+      if (data.address || data.suite !== undefined || data.city || data.state || data.zip) {
          await sql`
            UPDATE "MerchantLocation" 
            SET 
              address = COALESCE(${data.address}, address),
+             suite = COALESCE(${data.suite}, suite),
              city = COALESCE(${data.city}, city),
              state = COALESCE(${data.state}, state),
              postal_code = COALESCE(${data.zip}, postal_code)
@@ -421,6 +431,14 @@ module.exports = async function handler(req, res) {
       }
 
       return send(res, 200, { success: true, message: 'Profile updated successfully', new_business_name: data.business_name });
+    }
+
+    if (url === '/api/v1/migrate-task3' && method === 'GET') {
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "contact_name" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "phone" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "website" TEXT`;
+      await sql`ALTER TABLE "MerchantLocation" ADD COLUMN IF NOT EXISTS "suite" TEXT`;
+      return send(res, 200, { success: true, message: "Task 3 DB fields added!" });
     }
 
     if (url === '/api/v1/migrate-task2' && method === 'GET') {
