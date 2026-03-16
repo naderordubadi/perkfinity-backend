@@ -289,6 +289,24 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { user } });
     }
 
+    // ── GET /api/v1/consumers/campaigns ───────────────────────────
+    if (method === 'GET' && url.endsWith('/consumers/campaigns')) {
+       // Optional: This could be protected, but since it's just available merchants/campaigns, 
+       // keeping it public or semi-public is often fine. Here we assume we just return 
+       // active merchants and their active campaigns.
+       
+       const campaigns = await sql`
+         SELECT 
+           c.id, c.title as discount, c.merchant_id, 
+           m.business_name as merchant_name, m.logo_url
+         FROM "Campaign" c
+         JOIN "Merchant" m ON m.id = c.merchant_id
+         WHERE c.status = 'active' AND m.status = 'active'
+       `;
+       
+       return send(res, 200, { success: true, data: campaigns });
+    }
+
     // ── POST /api/v1/campaigns/:id/activate ───────────────────────
     const activateMatch = url.match(/\/api\/v1\/campaigns\/([a-zA-Z0-9_-]+)\/activate/);
     if (method === 'POST' && activateMatch) {
