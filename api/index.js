@@ -345,6 +345,34 @@ module.exports = async function handler(req, res) {
        return send(res, 200, { success: true, data: campaigns });
     }
 
+    // ── GET /api/v1/consumers/history ─────────────────────────────
+    if (method === 'GET' && url.endsWith('/consumers/history')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const history = await sql`
+        SELECT
+          r.id,
+          r.token,
+          r.issued_at,
+          r.expires_at,
+          r.redeemed,
+          r.redeemed_at,
+          c.title as campaign_title,
+          m.business_name as merchant_name
+        FROM "Redemption" r
+        JOIN "Campaign" c ON c.id = r.campaign_id
+        JOIN "Merchant" m ON m.id = c.merchant_id
+        WHERE r.user_id = ${payload.userId}
+        ORDER BY r.issued_at DESC
+      `;
+
+      return send(res, 200, { success: true, data: history });
+    }
+
     // ── POST /api/v1/campaigns/:id/activate ───────────────────────
     const activateMatch = url.match(/\/api\/v1\/campaigns\/([a-zA-Z0-9_-]+)\/activate/);
     if (method === 'POST' && activateMatch) {
