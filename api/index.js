@@ -535,6 +535,20 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: 'Profile updated successfully', new_business_name: data.business_name });
     }
 
+    if (url === '/api/v1/update-test-profiles-mission-viejo' && method === 'GET') {
+      const addresses = ["1", "2", "3", "4", "5"];
+      for (const num of addresses) {
+        const email = `ryan.mission.viejo${num}@gmail.com`;
+        const fullName = `Ryan Testuser ${num}`;
+        await sql`
+          UPDATE "User"
+          SET full_name = ${fullName}, city = 'Mission Viejo', zip_code = '92692'
+          WHERE email = ${email}
+        `;
+      }
+      return send(res, 200, { success: true, message: "Profiles successfully updated." });
+    }
+
     if (url === '/api/v1/migrate-task3' && method === 'GET') {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "contact_name" TEXT`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "phone" TEXT`;
