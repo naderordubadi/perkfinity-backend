@@ -474,6 +474,8 @@ module.exports = async function handler(req, res) {
                 'id', COALESCE(r.id, c.id),
                 'campaign_title', c.title,
                 'token', r.token,
+                'expires_at', r.expires_at,
+                'redeemed_at', r.redeemed_at,
                 'status', CASE 
                   WHEN r.id IS NULL THEN 'Created'
                   WHEN r.redeemed = true THEN 'Redeemed'
