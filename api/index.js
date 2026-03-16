@@ -337,7 +337,7 @@ module.exports = async function handler(req, res) {
            q.public_code as qr_code
          FROM "Campaign" c
          JOIN "Merchant" m ON m.id = c.merchant_id
-         LEFT JOIN "Location" l ON l.merchant_id = m.id
+         LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id
          LEFT JOIN "QrCode" q ON q.merchant_id = m.id AND q.status = 'active'
          WHERE c.status = 'active' AND m.status = 'active'
        `;
