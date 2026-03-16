@@ -244,6 +244,23 @@ module.exports = async function handler(req, res) {
       
       const JWT_SECRET = process.env.JWT_SECRET;
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      
+      // Auto-join merchant member if qrCode was provided during signup
+      if (data.qrCode) {
+        try {
+          const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${data.qrCode}`;
+          if (qrData) {
+            await sql`
+              INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
+              VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${user.id}, NOW())
+              ON CONFLICT DO NOTHING
+            `;
+          }
+        } catch (e) {
+          console.error("Optional auto-enrollment failed during signup", e);
+        }
+      }
+      
       return send(res, 201, { success: true, data: { user, accessToken: token } });
     }
 
@@ -260,6 +277,23 @@ module.exports = async function handler(req, res) {
       await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
       const JWT_SECRET = process.env.JWT_SECRET;
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      
+      // Auto-join merchant member if qrCode was provided during login
+      if (data.qrCode) {
+        try {
+          const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${data.qrCode}`;
+          if (qrData) {
+            await sql`
+              INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
+              VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${user.id}, NOW())
+              ON CONFLICT DO NOTHING
+            `;
+          }
+        } catch (e) {
+          console.error("Optional auto-enrollment failed during login", e);
+        }
+      }
+      
       const { password_hash: _pw, ...safeUser } = user;
       return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
     }
