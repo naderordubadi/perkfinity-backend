@@ -338,6 +338,34 @@ module.exports = async function handler(req, res) {
       return send(res, 201, { success: true, data: { activation: redemption } });
     }
 
+    // ── POST /api/v1/campaigns/redeem ──────────────────────────────
+    if (method === 'POST' && url.endsWith('/campaigns/redeem')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      
+      const data = req.body || {};
+      if (!data.token) return send(res, 400, { success: false, error: 'Missing redemption token' });
+      
+      const [existing] = await sql`SELECT * FROM "Redemption" WHERE token = ${data.token} AND user_id = ${payload.userId}`;
+      if (!existing) return send(res, 404, { success: false, error: 'Redemption token not found' });
+      if (existing.redeemed) return send(res, 400, { success: false, error: 'Offer already redeemed' });
+      if (new Date(existing.expires_at) < new Date()) return send(res, 400, { success: false, error: 'Offer expired' });
+      
+      // Allow manual consumer redemption (saving merchant_user_id as null because it was a self-serve redemption)
+      const [updated] = await sql`
+        UPDATE "Redemption"
+        SET redeemed = true, redeemed_at = NOW()
+        WHERE id = ${existing.id}
+        RETURNING *
+      `;
+      
+      return send(res, 200, { success: true, data: { redemption: updated } });
+    }
+
     // ── POST /api/v1/merchants/:id/logo ───────────────────────────
     const logoMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/logo/);
     if (method === 'POST' && logoMatch) {
