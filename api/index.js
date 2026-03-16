@@ -405,20 +405,22 @@ module.exports = async function handler(req, res) {
           COALESCE(
             json_agg(
               json_build_object(
-                'id', r.id,
+                'id', COALESCE(r.id, c.id),
                 'campaign_title', c.title,
                 'token', r.token,
-                'redeemed', r.redeemed,
-                'expires_at', r.expires_at
+                'status', CASE 
+                  WHEN r.id IS NULL THEN 'Created'
+                  WHEN r.redeemed = true THEN 'Redeemed'
+                  WHEN r.expires_at < NOW() THEN 'Expired'
+                  ELSE 'Pending'
+                END
               )
-            ) FILTER (WHERE r.id IS NOT NULL), '[]'
+            ) FILTER (WHERE c.id IS NOT NULL), '[]'
           ) as promotions
         FROM "MerchantMember" mm
         JOIN "User" u ON u.id = mm.user_id
-        LEFT JOIN "Redemption" r ON r.user_id = u.id AND r.campaign_id IN (
-           SELECT id FROM "Campaign" WHERE merchant_id = ${merchantId}
-        )
-        LEFT JOIN "Campaign" c ON c.id = r.campaign_id
+        LEFT JOIN "Campaign" c ON c.merchant_id = mm.merchant_id AND c.status = 'active'
+        LEFT JOIN "Redemption" r ON r.campaign_id = c.id AND r.user_id = u.id
         WHERE mm.merchant_id = ${merchantId}
         GROUP BY u.id, u.city, u.zip_code, u.full_name
       `;
