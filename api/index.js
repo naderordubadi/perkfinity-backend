@@ -46,7 +46,7 @@ module.exports = async function handler(req, res) {
     // ── Health check ──────────────────────────────────────────────
     if (method === 'GET' && (url === '/' || url === '/health' || url.endsWith('/health'))) {
       await sql`SELECT 1`;
-      return send(res, 200, { ok: true, status: 'healthy', db: 'connected', timestamp: new Date().toISOString() });
+      return send(res, 200, { ok: true, status: 'healthy', db: 'connected', version: 'test-2026', timestamp: new Date().toISOString() });
     }
 
     // ── POST /api/v1/merchants/signup ─────────────────────────────
