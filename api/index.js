@@ -332,7 +332,7 @@ module.exports = async function handler(req, res) {
       
       const [redemption] = await sql`
         INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed)
-        VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '15 minutes', false)
+        VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false)
         RETURNING *
       `;
       return send(res, 201, { success: true, data: { activation: redemption } });
