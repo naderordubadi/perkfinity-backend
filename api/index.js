@@ -524,16 +524,21 @@ module.exports = async function handler(req, res) {
        // active merchants and their active campaigns.
        
        const campaigns = await sql`
-         SELECT 
-           c.id, c.title as discount, c.merchant_id, 
-           m.business_name as merchant_name, m.logo_url,
+         SELECT DISTINCT ON (m.id)
+           m.id as id,
+           m.business_name as merchant_name,
+           m.logo_url,
            l.postal_code as zip_code,
-           q.public_code as qr_code
+           q.public_code as qr_code,
+           c.title as discount,
+           (SELECT COUNT(*) FROM "Campaign" c2
+            WHERE c2.merchant_id = m.id AND c2.status = 'active') as offer_count
          FROM "Campaign" c
          JOIN "Merchant" m ON m.id = c.merchant_id
-         LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id
+         LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
          LEFT JOIN "QrCode" q ON q.merchant_id = m.id AND q.status = 'active'
          WHERE c.status = 'active' AND m.status = 'active'
+         ORDER BY m.id, c.created_at DESC
        `;
        
        return send(res, 200, { success: true, data: campaigns });
