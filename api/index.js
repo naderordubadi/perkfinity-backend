@@ -724,9 +724,10 @@ module.exports = async function handler(req, res) {
 
       const history = await sql`
         SELECT c.id, c.title, c.status, c.start_at, c.end_at, c.created_at,
-               a.metadata
+               (SELECT a.metadata FROM "AuditLog" a
+                WHERE a.target_id = c.id AND a.action = 'promotion_created'
+                ORDER BY a.created_at DESC LIMIT 1) as metadata
         FROM "Campaign" c
-        LEFT JOIN "AuditLog" a ON a.target_id = c.id AND a.action = 'promotion_created'
         WHERE c.merchant_id = ${hMerchantId}
         ORDER BY c.created_at DESC
         LIMIT 50
