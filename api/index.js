@@ -595,27 +595,33 @@ module.exports = async function handler(req, res) {
         `;
       }
       
-      // UPDATE the existing assignment → 'pending' (handles both 'created' and stuck 'pending' rows)
-      // This prevents duplicate rows if cancel-activation didn't fully complete
+      // UPDATE the most-recent non-redeemed Redemption row → 'pending'
+      // Use CTE + LIMIT 1 to guarantee only ONE row is touched (avoids @unique token violation)
       const updated = await sql`
+        WITH target AS (
+          SELECT id FROM "Redemption"
+          WHERE user_id = ${payload.userId}
+            AND campaign_id = ${campaignId}
+            AND status != 'redeemed'
+            AND redeemed = false
+          ORDER BY issued_at DESC
+          LIMIT 1
+        )
         UPDATE "Redemption"
         SET expires_at = NOW() + INTERVAL '5 minutes',
             status = 'pending',
             issued_at = NOW(),
             token = ${code}
-        WHERE user_id = ${payload.userId}
-          AND campaign_id = ${campaignId}
-          AND status != 'redeemed'
-          AND redeemed = false
+        FROM target
+        WHERE "Redemption".id = target.id
         RETURNING *
       `;
 
       let redemption;
       if (updated.length > 0) {
-        // Take the first match (there should only ever be one per user/campaign)
         redemption = updated[0];
       } else {
-        // True fallback: genuinely no prior assignment row — insert fresh
+        // True fallback: no prior assignment row at all — insert fresh
         const [inserted] = await sql`
           INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
           VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false, 'pending')
@@ -639,24 +645,40 @@ module.exports = async function handler(req, res) {
 
       const cancelCampaignId = cancelActivateMatch[1];
 
-      // Revert status from 'pending' → 'created', restore expires_at to campaign end date
-      // Keep the existing token unchanged — it will be overwritten on next activation
+      // Revert the most-recent pending Redemption → 'created', restore expires_at to campaign end date
+      // Then delete any extra duplicate rows (cleanup from previous bug)
       const cancelled = await sql`
+        WITH target AS (
+          SELECT id FROM "Redemption"
+          WHERE user_id    = ${payload.userId}
+            AND campaign_id = ${cancelCampaignId}
+            AND status      = 'pending'
+            AND redeemed    = false
+          ORDER BY issued_at DESC
+          LIMIT 1
+        )
         UPDATE "Redemption"
         SET status = 'created',
             expires_at = (SELECT end_at FROM "Campaign" WHERE id = ${cancelCampaignId})
-        WHERE user_id    = ${payload.userId}
-          AND campaign_id = ${cancelCampaignId}
-          AND status      = 'pending'
-          AND redeemed    = false
+        FROM target
+        WHERE "Redemption".id = target.id
         RETURNING *
       `;
 
-      if (cancelled.length === 0) {
-        // Nothing to cancel — could already be expired/redeemed. Still OK, return gracefully.
-        return send(res, 200, { success: true, data: { message: 'Nothing to cancel' } });
+      // Delete any leftover duplicate non-redeemed rows for the same user/campaign
+      // (keeping only the one we just reverted, identified by token)
+      if (cancelled.length > 0) {
+        await sql`
+          DELETE FROM "Redemption"
+          WHERE user_id    = ${payload.userId}
+            AND campaign_id = ${cancelCampaignId}
+            AND id         != ${cancelled[0].id}
+            AND redeemed    = false
+        `;
       }
-      return send(res, 200, { success: true, data: { cancelled: cancelled[0] } });
+
+      // Return 200 regardless — nothing to cancel is still a success from the user's perspective
+      return send(res, 200, { success: true, data: { cancelled: cancelled[0] || null } });
     }
 
     // ── POST /api/v1/campaigns/redeem ──────────────────────────────
