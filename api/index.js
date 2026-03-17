@@ -595,7 +595,8 @@ module.exports = async function handler(req, res) {
         `;
       }
       
-      // UPDATE the existing 'created' assignment → 'pending' (avoids duplicate rows)
+      // UPDATE the existing assignment → 'pending' (handles both 'created' and stuck 'pending' rows)
+      // This prevents duplicate rows if cancel-activation didn't fully complete
       const updated = await sql`
         UPDATE "Redemption"
         SET expires_at = NOW() + INTERVAL '5 minutes',
@@ -604,15 +605,17 @@ module.exports = async function handler(req, res) {
             token = ${code}
         WHERE user_id = ${payload.userId}
           AND campaign_id = ${campaignId}
-          AND status = 'created'
+          AND status != 'redeemed'
+          AND redeemed = false
         RETURNING *
       `;
 
       let redemption;
       if (updated.length > 0) {
+        // Take the first match (there should only ever be one per user/campaign)
         redemption = updated[0];
       } else {
-        // Fallback: insert fresh (old flow — no prior 'created' assignment)
+        // True fallback: genuinely no prior assignment row — insert fresh
         const [inserted] = await sql`
           INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
           VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false, 'pending')
@@ -637,20 +640,21 @@ module.exports = async function handler(req, res) {
       const cancelCampaignId = cancelActivateMatch[1];
 
       // Revert status from 'pending' → 'created', restore expires_at to campaign end date
+      // Keep the existing token unchanged — it will be overwritten on next activation
       const cancelled = await sql`
-        UPDATE "Redemption" r
+        UPDATE "Redemption"
         SET status = 'created',
-            token  = '',
             expires_at = (SELECT end_at FROM "Campaign" WHERE id = ${cancelCampaignId})
-        WHERE r.user_id    = ${payload.userId}
-          AND r.campaign_id = ${cancelCampaignId}
-          AND r.status      = 'pending'
-          AND r.redeemed    = false
-        RETURNING r.*
+        WHERE user_id    = ${payload.userId}
+          AND campaign_id = ${cancelCampaignId}
+          AND status      = 'pending'
+          AND redeemed    = false
+        RETURNING *
       `;
 
       if (cancelled.length === 0) {
-        return send(res, 404, { success: false, error: 'No pending redemption found to cancel' });
+        // Nothing to cancel — could already be expired/redeemed. Still OK, return gracefully.
+        return send(res, 200, { success: true, data: { message: 'Nothing to cancel' } });
       }
       return send(res, 200, { success: true, data: { cancelled: cancelled[0] } });
     }
