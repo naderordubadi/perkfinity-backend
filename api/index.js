@@ -43,6 +43,17 @@ module.exports = async function handler(req, res) {
     }
     const sql = neon(DATABASE_URL);
 
+    // ── One-time migration: add status column to Redemption ───────
+    if (!global._redemptionMigrated) {
+      try {
+        await sql`ALTER TABLE "Redemption" ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'`;
+        await sql`UPDATE "Redemption" SET status='redeemed' WHERE redeemed=true AND status='pending'`;
+        await sql`UPDATE "Redemption" SET status='expired' WHERE redeemed=false AND expires_at < NOW() AND status='pending'`;
+        await sql`UPDATE "Redemption" SET status='created' WHERE redeemed=false AND expires_at > NOW() + INTERVAL '1 day' AND status='pending'`;
+        global._redemptionMigrated = true;
+      } catch (migErr) { /* column may already exist or non-critical */ }
+    }
+
     // ── Health check ──────────────────────────────────────────────
     if (method === 'GET' && (url === '/' || url === '/health' || url.endsWith('/health'))) {
       await sql`SELECT 1`;
@@ -330,24 +341,7 @@ module.exports = async function handler(req, res) {
         RETURNING id, title, status, start_at, end_at
       `;
 
-      // Save full promotion config to AuditLog for record-keeping
-      await sql`
-        INSERT INTO "AuditLog" (id, actor_type, actor_id, merchant_id, action, target_type, target_id, metadata, created_at)
-        VALUES (
-          gen_random_uuid()::text,
-          'merchant_user',
-          ${decoded.userId},
-          ${targetMerchantId},
-          'promotion_created',
-          'Campaign',
-          ${campaign.id},
-          ${JSON.stringify({ type: data.type, condition: data.condition, delivery: data.delivery, audience: data.audience, expires_at: expiresAt.toISOString() })}::jsonb,
-          ${now}
-        )
-      `;
-
-      // ── Audience-based Redemption creation (Created status) ──────
-      // Query qualifying members based on audience type
+      // ── Audience-based Redemption creation (status='created') ────
       let qualifyingUsers = [];
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
@@ -357,48 +351,57 @@ module.exports = async function handler(req, res) {
           SELECT DISTINCT mm.user_id FROM "MerchantMember" mm WHERE mm.merchant_id = ${targetMerchantId}
         `;
       } else if (data.audience === 'redeemed_30') {
+        // Members who actually redeemed (not just assigned) within last 30 days
         qualifyingUsers = await sql`
           SELECT DISTINCT r.user_id FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
-          WHERE c.merchant_id = ${targetMerchantId} AND r.redeemed = true AND r.redeemed_at >= ${thirtyDaysAgo}
+          WHERE c.merchant_id = ${targetMerchantId}
+            AND (r.status = 'redeemed' OR r.redeemed = true)
+            AND r.redeemed_at >= ${thirtyDaysAgo}
         `;
       } else if (data.audience === 'expired_30') {
+        // Members whose activations expired (went to store but window closed) in last 30 days
         qualifyingUsers = await sql`
           SELECT DISTINCT r.user_id FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
-          WHERE c.merchant_id = ${targetMerchantId} AND r.redeemed = false AND r.expires_at < NOW() AND r.expires_at >= ${thirtyDaysAgo}
+          WHERE c.merchant_id = ${targetMerchantId}
+            AND (r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW() AND r.expires_at >= ${thirtyDaysAgo} AND COALESCE(r.status,'pending') != 'created'))
         `;
       } else if (data.audience === 'never_redeemed') {
+        // Members with no real activity (ignore 'created' assignments — they haven't acted yet)
         qualifyingUsers = await sql`
           SELECT mm.user_id FROM "MerchantMember" mm
           WHERE mm.merchant_id = ${targetMerchantId}
             AND NOT EXISTS (
               SELECT 1 FROM "Redemption" r2 JOIN "Campaign" c2 ON c2.id = r2.campaign_id
               WHERE c2.merchant_id = ${targetMerchantId} AND r2.user_id = mm.user_id
+                AND r2.status IN ('pending', 'redeemed', 'expired')
             )
         `;
       } else if (data.audience === 'redeemed_90') {
         qualifyingUsers = await sql`
           SELECT DISTINCT r.user_id FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
-          WHERE c.merchant_id = ${targetMerchantId} AND r.redeemed = true AND r.redeemed_at >= ${ninetyDaysAgo}
+          WHERE c.merchant_id = ${targetMerchantId}
+            AND (r.status = 'redeemed' OR r.redeemed = true)
+            AND r.redeemed_at >= ${ninetyDaysAgo}
         `;
       }
 
-      // Insert one Redemption ("Created" status) per qualifying member
+      // Insert one Redemption with status='created' per qualifying member
       let assignedCount = 0;
       for (const u of qualifyingUsers) {
         try {
           await sql`
-            INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed)
-            VALUES (gen_random_uuid()::text, ${u.user_id}, ${campaign.id}, gen_random_uuid()::text, ${now}, ${expiresAt}, false)
+            INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
+            VALUES (gen_random_uuid()::text, ${u.user_id}, ${campaign.id}, gen_random_uuid()::text, ${now}, ${expiresAt}, false, 'created')
             ON CONFLICT DO NOTHING
           `;
           assignedCount++;
-        } catch (insertErr) { /* skip if conflict */ }
+        } catch (insertErr) { /* skip on conflict */ }
       }
 
-      // Save full promotion config to AuditLog for record-keeping
+      // Save promotion config to AuditLog (single entry, after assignment)
       await sql`
         INSERT INTO "AuditLog" (id, actor_type, actor_id, merchant_id, action, target_type, target_id, metadata, created_at)
         VALUES (
@@ -416,8 +419,6 @@ module.exports = async function handler(req, res) {
 
       return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, message: `Promotion created and assigned to ${assignedCount} member(s) via ${data.delivery}.` } });
     }
-
-    // Helper comment placeholder removed
 
     // ── POST /api/v1/consumers/signup ─────────────────────────────
 
@@ -589,11 +590,32 @@ module.exports = async function handler(req, res) {
         `;
       }
       
-      const [redemption] = await sql`
-        INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed)
-        VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false)
+      // UPDATE the existing 'created' assignment → 'pending' (avoids duplicate rows)
+      const updated = await sql`
+        UPDATE "Redemption"
+        SET expires_at = NOW() + INTERVAL '5 minutes',
+            status = 'pending',
+            issued_at = NOW(),
+            token = ${code}
+        WHERE user_id = ${payload.userId}
+          AND campaign_id = ${campaignId}
+          AND status = 'created'
         RETURNING *
       `;
+
+      let redemption;
+      if (updated.length > 0) {
+        redemption = updated[0];
+      } else {
+        // Fallback: insert fresh (old flow — no prior 'created' assignment)
+        const [inserted] = await sql`
+          INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
+          VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false, 'pending')
+          RETURNING *
+        `;
+        redemption = inserted;
+      }
+
       return send(res, 201, { success: true, data: { activation: redemption } });
     }
 
@@ -659,34 +681,57 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
       
       const membersResult = await sql`
-        SELECT 
+        SELECT
           u.id as user_id, u.city, u.zip_code, u.full_name,
           COALESCE(
             json_agg(
               json_build_object(
-                'id', COALESCE(r.id, c.id),
+                'id', r.id,
                 'campaign_title', c.title,
                 'token', r.token,
                 'expires_at', r.expires_at,
                 'redeemed_at', r.redeemed_at,
-                'status', CASE 
-                  WHEN r.id IS NULL THEN 'Created'
-                  WHEN r.redeemed = true THEN 'Redeemed'
-                  WHEN r.expires_at < NOW() THEN 'Expired'
-                  ELSE 'Pending'
+                'status', CASE
+                  WHEN r.status = 'redeemed' OR r.redeemed = true THEN 'Redeemed'
+                  WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW() AND COALESCE(r.status,'') != 'created') THEN 'Expired'
+                  WHEN r.status = 'pending' THEN 'Pending'
+                  ELSE 'Created'
                 END
               )
-            ) FILTER (WHERE c.id IS NOT NULL), '[]'
+            ) FILTER (WHERE r.id IS NOT NULL AND c.id IS NOT NULL), '[]'
           ) as promotions
         FROM "MerchantMember" mm
         JOIN "User" u ON u.id = mm.user_id
-        LEFT JOIN "Campaign" c ON c.merchant_id = mm.merchant_id AND c.status = 'active'
-        LEFT JOIN "Redemption" r ON r.campaign_id = c.id AND r.user_id = u.id
+        LEFT JOIN "Redemption" r ON r.user_id = u.id
+        LEFT JOIN "Campaign" c ON c.id = r.campaign_id AND c.merchant_id = mm.merchant_id AND c.status = 'active'
         WHERE mm.merchant_id = ${merchantId}
         GROUP BY u.id, u.city, u.zip_code, u.full_name
       `;
       
       return send(res, 200, { success: true, data: membersResult });
+    }
+
+    // ── GET /api/v1/merchants/:id/promotions/history ──────────────
+    const promoHistoryMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/promotions\/history/);
+    if (method === 'GET' && promoHistoryMatch) {
+      const hMerchantId = promoHistoryMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let hPayload;
+      try { hPayload = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET); }
+      catch (e) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (hPayload.merchantId !== hMerchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const history = await sql`
+        SELECT c.id, c.title, c.status, c.start_at, c.end_at, c.created_at,
+               a.metadata
+        FROM "Campaign" c
+        LEFT JOIN "AuditLog" a ON a.target_id = c.id AND a.action = 'promotion_created'
+        WHERE c.merchant_id = ${hMerchantId}
+        ORDER BY c.created_at DESC
+        LIMIT 50
+      `;
+      return send(res, 200, { success: true, data: history });
     }
 
     // ── PUT /api/v1/merchants/:id/profile ─────────────────────────
