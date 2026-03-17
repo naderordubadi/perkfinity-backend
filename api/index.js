@@ -52,8 +52,35 @@ module.exports = async function handler(req, res) {
     // ── POST /api/v1/merchants/signup ─────────────────────────────
     if (method === 'POST' && url.endsWith('/merchants/signup')) {
       const data = req.body || {};
-      if (!data.name || !data.email || !data.password) {
-        return send(res, 400, { success: false, error: 'Missing required fields: name, email, password' });
+
+      // Validate all required fields
+      const missing = [];
+      if (!data.name)        missing.push('Store Name');
+      if (!data.contactName) missing.push('Contact Name');
+      if (!data.phone)       missing.push('Phone Number');
+      if (!data.email)       missing.push('Email');
+      if (!data.password)    missing.push('Password');
+      if (!data.address)     missing.push('Street Address');
+      if (!data.city)        missing.push('City');
+      if (!data.state)       missing.push('State');
+      if (!data.zip)         missing.push('ZIP Code');
+
+      if (missing.length > 0) {
+        return send(res, 400, { success: false, error: `Missing required fields: ${missing.join(', ')}` });
+      }
+
+      // Validate formats
+      const phoneRegex = /^\d{3}-\d{3}-\d{4}$/;
+      if (!phoneRegex.test(data.phone)) {
+        return send(res, 400, { success: false, error: 'Phone number must be in xxx-xxx-xxxx format.' });
+      }
+      const zipRegex = /^\d{5}$/;
+      if (!zipRegex.test(data.zip)) {
+        return send(res, 400, { success: false, error: 'ZIP Code must be a 5-digit number.' });
+      }
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(data.email)) {
+        return send(res, 400, { success: false, error: 'Please provide a valid email address.' });
       }
 
       const email = data.email.toLowerCase();
@@ -68,10 +95,10 @@ module.exports = async function handler(req, res) {
       const now = new Date();
       const oneYear = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
-      // Insert merchant
+      // Insert merchant (required fields used directly; optional fields use || '')
       const [merchant] = await sql`
         INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, subscription_tier, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''}, ${data.website || ''}, ${data.tier || 'trial'}, 'active', ${now}, ${now})
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.tier || 'trial'}, 'active', ${now}, ${now})
         RETURNING id, business_name, subscription_tier
       `;
 
@@ -82,13 +109,12 @@ module.exports = async function handler(req, res) {
         RETURNING id, merchant_id, email, role, status, created_at
       `;
 
-      // Insert location
-      const address = data.address || '';
-      const suite = data.suite || '';
+      // Insert location (required fields direct; suite is optional)
       await sql`
         INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-        VALUES (gen_random_uuid()::text, ${merchant.id}, ${address}, ${suite}, ${data.city || ''}, ${data.state || ''}, ${data.zip || ''}, 'US', true, ${now})
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
       `;
+
 
       // Insert welcome campaign
       await sql`
