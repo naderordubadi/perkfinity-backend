@@ -624,6 +624,37 @@ module.exports = async function handler(req, res) {
       return send(res, 201, { success: true, data: { activation: redemption } });
     }
 
+    // ── POST /api/v1/campaigns/:id/cancel-activation ───────────────
+    const cancelActivateMatch = url.match(/\/api\/v1\/campaigns\/([a-zA-Z0-9_-]+)\/cancel-activation/);
+    if (method === 'POST' && cancelActivateMatch) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const cancelCampaignId = cancelActivateMatch[1];
+
+      // Revert status from 'pending' → 'created', restore expires_at to campaign end date
+      const cancelled = await sql`
+        UPDATE "Redemption" r
+        SET status = 'created',
+            token  = '',
+            expires_at = (SELECT end_at FROM "Campaign" WHERE id = ${cancelCampaignId})
+        WHERE r.user_id    = ${payload.userId}
+          AND r.campaign_id = ${cancelCampaignId}
+          AND r.status      = 'pending'
+          AND r.redeemed    = false
+        RETURNING r.*
+      `;
+
+      if (cancelled.length === 0) {
+        return send(res, 404, { success: false, error: 'No pending redemption found to cancel' });
+      }
+      return send(res, 200, { success: true, data: { cancelled: cancelled[0] } });
+    }
+
     // ── POST /api/v1/campaigns/redeem ──────────────────────────────
     if (method === 'POST' && url.endsWith('/campaigns/redeem')) {
       const authHeader = req.headers.authorization;
