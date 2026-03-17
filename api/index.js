@@ -253,7 +253,65 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: merchantData });
     }
 
+    // ── POST /api/v1/merchants/:id/promotions ──────────────────────
+    const promoMatch = url.match(/^\/api\/v1\/merchants\/([^/]+)\/promotions$/);
+    if (method === 'POST' && promoMatch) {
+      const auth = req.headers.authorization;
+      if (!auth || !auth.startsWith('Bearer ')) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const JWT_SECRET = process.env.JWT_SECRET;
+      let decoded;
+      try { decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET); } catch(e) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const targetMerchantId = promoMatch[1];
+      if (decoded.merchantId !== targetMerchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const data = req.body || {};
+      if (!data.title || !data.type || !data.delivery || !data.audience) {
+        return send(res, 400, { success: false, error: 'Missing required fields: title, type, delivery, audience' });
+      }
+
+      const now = new Date();
+      const expiresAt = data.expires_at ? new Date(data.expires_at) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+      // Save as a Campaign so it appears in member campaign queries
+      const [campaign] = await sql`
+        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, start_at, end_at, created_at, updated_at)
+        VALUES (
+          gen_random_uuid()::text,
+          ${targetMerchantId},
+          ${data.title},
+          0,
+          ${data.condition_detail || ''},
+          'active',
+          ${now},
+          ${expiresAt},
+          ${now},
+          ${now}
+        )
+        RETURNING id, title, status, start_at, end_at
+      `;
+
+      // Save full promotion config to AuditLog for record-keeping
+      await sql`
+        INSERT INTO "AuditLog" (id, actor_type, actor_id, merchant_id, action, target_type, target_id, metadata, created_at)
+        VALUES (
+          gen_random_uuid()::text,
+          'merchant_user',
+          ${decoded.userId},
+          ${targetMerchantId},
+          'promotion_created',
+          'Campaign',
+          ${campaign.id},
+          ${JSON.stringify({ type: data.type, condition: data.condition, delivery: data.delivery, audience: data.audience, expires_at: expiresAt.toISOString() })}::jsonb,
+          ${now}
+        )
+      `;
+
+      return send(res, 201, { success: true, data: { campaign, message: `Promotion queued for delivery via ${data.delivery} to audience: ${data.audience}` } });
+    }
+
     // ── POST /api/v1/consumers/signup ─────────────────────────────
+
     if (method === 'POST' && url.endsWith('/consumers/signup')) {
       const data = req.body || {};
       if (!data.email || !data.password) return send(res, 400, { success: false, error: 'Missing email or password' });
