@@ -726,7 +726,9 @@ module.exports = async function handler(req, res) {
         SELECT c.id, c.title, c.status, c.start_at, c.end_at, c.created_at,
                (SELECT a.metadata FROM "AuditLog" a
                 WHERE a.target_id = c.id AND a.action = 'promotion_created'
-                ORDER BY a.created_at DESC LIMIT 1) as metadata
+                ORDER BY a.created_at DESC LIMIT 1) as metadata,
+               (SELECT COUNT(*) FROM "Redemption" r
+                WHERE r.campaign_id = c.id AND (r.status = 'redeemed' OR r.redeemed = true)) as redeemed_count
         FROM "Campaign" c
         WHERE c.merchant_id = ${hMerchantId}
         ORDER BY c.created_at DESC
