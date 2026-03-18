@@ -247,7 +247,9 @@ module.exports = async function handler(req, res) {
         campaigns = await sql`
           SELECT id, title, discount_percentage, terms, status, start_at, end_at
           FROM "Campaign"
-          WHERE merchant_id = ${qrCode.merchant_id} AND status = 'active'
+          WHERE merchant_id = ${qrCode.merchant_id}
+            AND status = 'active'
+            AND discount_percentage >= 0
           ORDER BY created_at DESC
           LIMIT 5
         `;
@@ -291,7 +293,9 @@ module.exports = async function handler(req, res) {
       // Fetch associated welcome (or active) campaign perk
       const [campaignData] = await sql`
         SELECT title FROM "Campaign"
-        WHERE merchant_id = ${merchantId} AND status = 'active'
+        WHERE merchant_id = ${merchantId}
+          AND status = 'active'
+          AND discount_percentage >= 0
         ORDER BY created_at ASC
         LIMIT 1
       `;
@@ -323,14 +327,16 @@ module.exports = async function handler(req, res) {
       const now = new Date();
       const expiresAt = data.expires_at ? new Date(data.expires_at) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-      // Save as a Campaign so it appears in member campaign queries
+      // Save as a Campaign so it appears in campaign history.
+      // Announcements use discount_percentage = -1 as a permanent type marker
+      // so they can be filtered out anywhere Redemption rows are not sufficient.
       const [campaign] = await sql`
         INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, start_at, end_at, created_at, updated_at)
         VALUES (
           gen_random_uuid()::text,
           ${targetMerchantId},
           ${data.title},
-          0,
+          ${data.type === 'announcement' ? -1 : 0},
           ${data.condition_detail || ''},
           'active',
           ${now},
@@ -342,6 +348,8 @@ module.exports = async function handler(req, res) {
       `;
 
       // ── Audience-based Redemption creation (status='created') ────
+      // Announcements skip Redemption rows — they are broadcast-only.
+      // We still count the qualifying audience for the AuditLog / history.
       let qualifyingUsers = [];
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
@@ -351,7 +359,6 @@ module.exports = async function handler(req, res) {
           SELECT DISTINCT mm.user_id FROM "MerchantMember" mm WHERE mm.merchant_id = ${targetMerchantId}
         `;
       } else if (data.audience === 'redeemed_30') {
-        // Members who actually redeemed (not just assigned) within last 30 days
         qualifyingUsers = await sql`
           SELECT DISTINCT r.user_id FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
@@ -360,7 +367,6 @@ module.exports = async function handler(req, res) {
             AND r.redeemed_at >= ${thirtyDaysAgo}
         `;
       } else if (data.audience === 'expired_30') {
-        // Members whose activations expired (went to store but window closed) in last 30 days
         qualifyingUsers = await sql`
           SELECT DISTINCT r.user_id FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
@@ -368,7 +374,6 @@ module.exports = async function handler(req, res) {
             AND (r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW() AND r.expires_at >= ${thirtyDaysAgo} AND COALESCE(r.status,'pending') != 'created'))
         `;
       } else if (data.audience === 'never_redeemed') {
-        // Members with no real activity (ignore 'created' assignments — they haven't acted yet)
         qualifyingUsers = await sql`
           SELECT mm.user_id FROM "MerchantMember" mm
           WHERE mm.merchant_id = ${targetMerchantId}
@@ -388,17 +393,21 @@ module.exports = async function handler(req, res) {
         `;
       }
 
-      // Insert one Redemption with status='created' per qualifying member
-      let assignedCount = 0;
-      for (const u of qualifyingUsers) {
-        try {
-          await sql`
-            INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
-            VALUES (gen_random_uuid()::text, ${u.user_id}, ${campaign.id}, gen_random_uuid()::text, ${now}, ${expiresAt}, false, 'created')
-            ON CONFLICT DO NOTHING
-          `;
-          assignedCount++;
-        } catch (insertErr) { /* skip on conflict */ }
+      // For announcements: count the audience but do NOT create Redemption rows.
+      // Member list and consumer app are Redemption-driven, so they won't see this campaign.
+      let assignedCount = qualifyingUsers.length;
+      if (data.type !== 'announcement') {
+        assignedCount = 0;
+        for (const u of qualifyingUsers) {
+          try {
+            await sql`
+              INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
+              VALUES (gen_random_uuid()::text, ${u.user_id}, ${campaign.id}, gen_random_uuid()::text, ${now}, ${expiresAt}, false, 'created')
+              ON CONFLICT DO NOTHING
+            `;
+            assignedCount++;
+          } catch (insertErr) { /* skip on conflict */ }
+        }
       }
 
       // Save promotion config to AuditLog (single entry, after assignment)
