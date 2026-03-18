@@ -214,9 +214,9 @@ module.exports = async function handler(req, res) {
       }
       const zip = zipParam.trim();
 
-
+      // Correlated subqueries: one row per merchant, no DISTINCT ON row-multiplication risk
       const merchants = await sql`
-        SELECT DISTINCT ON (m.id)
+        SELECT
           m.id,
           m.business_name,
           m.logo_url,
@@ -224,22 +224,27 @@ module.exports = async function handler(req, res) {
           l.city,
           l.state,
           l.postal_code,
-          c.title  AS welcome_perk,
-          q.public_code
+          (SELECT c.title
+             FROM "Campaign" c
+            WHERE c.merchant_id = m.id
+              AND c.status = 'active'
+              AND c.discount_percentage >= 0
+            ORDER BY c.created_at ASC
+            LIMIT 1) AS welcome_perk,
+          (SELECT q.public_code
+             FROM "QrCode" q
+            WHERE q.merchant_id = m.id
+              AND q.status = 'active'
+            LIMIT 1) AS public_code
         FROM "Merchant" m
         JOIN "MerchantLocation" l
-          ON l.merchant_id = m.id AND l.is_active = true
-        LEFT JOIN "Campaign" c
-          ON c.merchant_id = m.id
-         AND c.status = 'active'
-         AND c.discount_percentage >= 0
-        LEFT JOIN "QrCode" q
-          ON q.merchant_id = m.id AND q.status = 'active'
-        WHERE l.postal_code = ${zip}
-        ORDER BY m.id, c.created_at ASC
+          ON l.merchant_id = m.id
+         AND l.is_active = true
+        WHERE TRIM(l.postal_code) = TRIM(${zip})
+        ORDER BY m.business_name ASC
       `;
 
-      return send(res, 200, { success: true, zip, data: merchants });
+      return send(res, 200, { success: true, zip, count: merchants.length, data: merchants });
     }
 
     // ── GET /api/v1/qr/resolve/:code ──────────────────────────────
