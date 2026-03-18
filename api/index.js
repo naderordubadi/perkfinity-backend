@@ -204,8 +204,44 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: "User table fully migrated!" });
     }
 
+    // ── GET /api/v1/merchants/search?zip=XXXXX ────────────────────
+    if (method === 'GET' && url.startsWith('/api/v1/merchants/search')) {
+      const zipParam = new URL('http://x' + url).searchParams.get('zip');
+      if (!zipParam || !/^\d{5}$/.test(zipParam.trim())) {
+        return send(res, 400, { success: false, error: 'Please provide a valid 5-digit ZIP code.' });
+      }
+      const zip = zipParam.trim();
+
+      const merchants = await sql`
+        SELECT DISTINCT ON (m.id)
+          m.id,
+          m.business_name,
+          m.logo_url,
+          l.address,
+          l.city,
+          l.state,
+          l.postal_code,
+          c.title  AS welcome_perk,
+          q.public_code
+        FROM "Merchant" m
+        JOIN "MerchantLocation" l
+          ON l.merchant_id = m.id AND l.is_active = true
+        LEFT JOIN "Campaign" c
+          ON c.merchant_id = m.id
+         AND c.status = 'active'
+         AND c.discount_percentage >= 0
+        LEFT JOIN "QrCode" q
+          ON q.merchant_id = m.id AND q.status = 'active'
+        WHERE l.postal_code = ${zip}
+        ORDER BY m.id, c.created_at ASC
+      `;
+
+      return send(res, 200, { success: true, zip, data: merchants });
+    }
+
     // ── GET /api/v1/qr/resolve/:code ──────────────────────────────
     const qrMatch = url.match(/\/api\/v1\/qr\/resolve\/([a-zA-Z0-9_-]+)/);
+
     if (method === 'GET' && qrMatch) {
       const public_code = qrMatch[1];
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
