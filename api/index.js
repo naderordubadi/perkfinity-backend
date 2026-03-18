@@ -206,11 +206,14 @@ module.exports = async function handler(req, res) {
 
     // ── GET /api/v1/merchants/search?zip=XXXXX ────────────────────
     if (method === 'GET' && url.startsWith('/api/v1/merchants/search')) {
-      const zipParam = new URL('http://x' + url).searchParams.get('zip');
+      // NOTE: `url` at line 36 strips the query string, so parse from req.url directly
+      const qs = (req.url || '').split('?')[1] || '';
+      const zipParam = new URLSearchParams(qs).get('zip');
       if (!zipParam || !/^\d{5}$/.test(zipParam.trim())) {
         return send(res, 400, { success: false, error: 'Please provide a valid 5-digit ZIP code.' });
       }
       const zip = zipParam.trim();
+
 
       const merchants = await sql`
         SELECT DISTINCT ON (m.id)
