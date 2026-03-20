@@ -11,6 +11,8 @@ const crypto = require('crypto');
 const ALLOWED_ORIGINS = [
   'https://perkfinity.net',
   'https://www.perkfinity.net',
+  'capacitor://localhost',   // Capacitor iOS WKWebView origin
+  'https://localhost',       // Capacitor iOS fallback
   'null', // Allows local file:// based HTML testing
 ];
 
@@ -53,6 +55,16 @@ module.exports = async function handler(req, res) {
         global._redemptionMigrated = true;
       } catch (migErr) { /* column may already exist or non-critical */ }
     }
+
+    // ── One-time migration: add social login columns to User ──────
+    if (!global._userSocialMigrated) {
+      try {
+        await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS apple_sub TEXT UNIQUE`;
+        await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS google_sub TEXT UNIQUE`;
+        global._userSocialMigrated = true;
+      } catch (migErr) { /* columns may already exist */ }
+    }
+
 
     // ── Health check ──────────────────────────────────────────────
     if (method === 'GET' && (url === '/' || url === '/health' || url.endsWith('/health'))) {
@@ -471,6 +483,58 @@ module.exports = async function handler(req, res) {
       `;
 
       return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, message: `Promotion created and assigned to ${assignedCount} member(s) via ${data.delivery}.` } });
+    }
+
+    // ── POST /api/v1/consumers/apple-signin ────────────────────────
+    if (method === 'POST' && url.endsWith('/consumers/apple-signin')) {
+      const data = req.body || {};
+      if (!data.identityToken) return send(res, 400, { success: false, error: 'Missing identityToken' });
+
+      // Decode the Apple JWT payload (we trust Apple; full sig verification requires fetching Apple public keys)
+      let appleSub, appleEmail;
+      try {
+        const payloadBase64 = data.identityToken.split('.')[1];
+        const payloadJson = Buffer.from(payloadBase64, 'base64').toString('utf8');
+        const applePayload = JSON.parse(payloadJson);
+        appleSub = applePayload.sub;   // stable unique Apple user ID
+        appleEmail = applePayload.email; // only present on first sign-in
+      } catch (e) {
+        return send(res, 400, { success: false, error: 'Invalid Apple identity token' });
+      }
+
+      if (!appleSub) return send(res, 400, { success: false, error: 'Could not extract Apple user ID' });
+
+      const JWT_SECRET = process.env.JWT_SECRET;
+      if (!JWT_SECRET) return send(res, 500, { success: false, error: 'JWT_SECRET not configured' });
+
+      // Find existing user by apple_sub, or by email, or create new
+      let [user] = await sql`SELECT * FROM "User" WHERE apple_sub = ${appleSub} LIMIT 1`;
+
+      if (!user && appleEmail) {
+        [user] = await sql`SELECT * FROM "User" WHERE email = ${appleEmail.toLowerCase()} LIMIT 1`;
+        if (user) {
+          // Link the Apple sub to the existing email account
+          await sql`UPDATE "User" SET apple_sub = ${appleSub} WHERE id = ${user.id}`;
+        }
+      }
+
+      if (!user) {
+        // Create new user
+        const email = appleEmail ? appleEmail.toLowerCase() : `apple_${appleSub}@perkfinity.internal`;
+        const fullName = data.fullName || '';
+        [user] = await sql`
+          INSERT INTO "User" (id, email, apple_sub, full_name, created_at, last_active)
+          VALUES (gen_random_uuid()::text, ${email}, ${appleSub}, ${fullName}, NOW(), NOW())
+          ON CONFLICT (email) DO UPDATE SET apple_sub = ${appleSub}, last_active = NOW()
+          RETURNING *
+        `;
+      } else {
+        await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
+      }
+
+      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      const { password_hash: _pw, ...safeUser } = user;
+      return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
     }
 
     // ── POST /api/v1/consumers/signup ─────────────────────────────
