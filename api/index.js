@@ -537,6 +537,54 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
     }
 
+    // ── POST /api/v1/consumers/google-signin ───────────────────────
+    if (method === 'POST' && url.endsWith('/consumers/google-signin')) {
+      const data = req.body || {};
+      if (!data.idToken) return send(res, 400, { success: false, error: 'Missing idToken' });
+
+      let googleSub, googleEmail, googleName;
+      try {
+        const payloadBase64 = data.idToken.split('.')[1];
+        const payloadJson = Buffer.from(payloadBase64, 'base64').toString('utf8');
+        const googlePayload = JSON.parse(payloadJson);
+        googleSub = googlePayload.sub;
+        googleEmail = googlePayload.email;
+        googleName = googlePayload.name || '';
+      } catch (e) {
+        return send(res, 400, { success: false, error: 'Invalid Google ID token' });
+      }
+
+      if (!googleSub) return send(res, 400, { success: false, error: 'Could not extract Google user ID' });
+
+      const JWT_SECRET = process.env.JWT_SECRET;
+      if (!JWT_SECRET) return send(res, 500, { success: false, error: 'JWT_SECRET not configured' });
+
+      let [user] = await sql`SELECT * FROM "User" WHERE google_sub = ${googleSub} LIMIT 1`;
+
+      if (!user && googleEmail) {
+        [user] = await sql`SELECT * FROM "User" WHERE email = ${googleEmail.toLowerCase()} LIMIT 1`;
+        if (user) {
+          await sql`UPDATE "User" SET google_sub = ${googleSub} WHERE id = ${user.id}`;
+        }
+      }
+
+      if (!user) {
+        const email = googleEmail ? googleEmail.toLowerCase() : `google_${googleSub}@perkfinity.internal`;
+        [user] = await sql`
+          INSERT INTO "User" (id, email, google_sub, full_name, created_at, last_active)
+          VALUES (gen_random_uuid()::text, ${email}, ${googleSub}, ${googleName}, NOW(), NOW())
+          ON CONFLICT (email) DO UPDATE SET google_sub = ${googleSub}, last_active = NOW()
+          RETURNING *
+        `;
+      } else {
+        await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
+      }
+
+      const gtoken = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      const { password_hash: _gpw, ...safeGUser } = user;
+      return send(res, 200, { success: true, data: { user: safeGUser, accessToken: gtoken } });
+    }
+
     // ── POST /api/v1/consumers/signup ─────────────────────────────
 
     if (method === 'POST' && url.endsWith('/consumers/signup')) {
