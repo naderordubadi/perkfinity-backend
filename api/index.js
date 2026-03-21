@@ -25,6 +25,38 @@ function setCors(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 }
 
+async function autoEnrollUser(sql, userId, publicCode) {
+  if (!publicCode || !userId) return;
+  try {
+    const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${publicCode} AND status = 'active'`;
+    if (!qrData) return;
+    
+    // 1. Add to member list
+    await sql`
+      INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
+      VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${userId}, NOW())
+      ON CONFLICT DO NOTHING
+    `;
+
+    // 2. Assign all missing active campaigns as 'created' (Pending Offers)
+    await sql`
+      INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
+      SELECT gen_random_uuid()::text, ${userId}, c.id, gen_random_uuid()::text, NOW(), c.end_at, false, 'created'
+      FROM "Campaign" c
+      WHERE c.merchant_id = ${qrData.merchant_id}
+        AND c.status = 'active'
+        AND c.discount_percentage >= 0
+        AND NOT EXISTS (
+          SELECT 1 FROM "Redemption" r2 
+          WHERE r2.campaign_id = c.id 
+            AND r2.user_id = ${userId}
+        )
+    `;
+  } catch (e) {
+    console.error("Auto-enrollment failed during auth", e);
+  }
+}
+
 function send(res, status, data) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
@@ -558,6 +590,7 @@ module.exports = async function handler(req, res) {
       }
 
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      await autoEnrollUser(sql, user.id, data.qrCode);
       const { password_hash: _pw, ...safeUser } = user;
       return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
     }
@@ -606,6 +639,7 @@ module.exports = async function handler(req, res) {
       }
 
       const gtoken = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      await autoEnrollUser(sql, user.id, data.qrCode);
       const { password_hash: _gpw, ...safeGUser } = user;
       return send(res, 200, { success: true, data: { user: safeGUser, accessToken: gtoken } });
     }
@@ -629,21 +663,7 @@ module.exports = async function handler(req, res) {
       const JWT_SECRET = process.env.JWT_SECRET;
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
       
-      // Auto-join merchant member if qrCode was provided during signup
-      if (data.qrCode) {
-        try {
-          const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${data.qrCode}`;
-          if (qrData) {
-            await sql`
-              INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
-              VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${user.id}, NOW())
-              ON CONFLICT DO NOTHING
-            `;
-          }
-        } catch (e) {
-          console.error("Optional auto-enrollment failed during signup", e);
-        }
-      }
+      await autoEnrollUser(sql, user.id, data.qrCode);
       
       return send(res, 201, { success: true, data: { user, accessToken: token } });
     }
@@ -662,21 +682,7 @@ module.exports = async function handler(req, res) {
       const JWT_SECRET = process.env.JWT_SECRET;
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
       
-      // Auto-join merchant member if qrCode was provided during login
-      if (data.qrCode) {
-        try {
-          const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${data.qrCode}`;
-          if (qrData) {
-            await sql`
-              INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
-              VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${user.id}, NOW())
-              ON CONFLICT DO NOTHING
-            `;
-          }
-        } catch (e) {
-          console.error("Optional auto-enrollment failed during login", e);
-        }
-      }
+      await autoEnrollUser(sql, user.id, data.qrCode);
       
       const { password_hash: _pw, ...safeUser } = user;
       return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
