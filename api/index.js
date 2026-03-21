@@ -278,6 +278,27 @@ module.exports = async function handler(req, res) {
         try {
           const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
           const userId = decoded.userId;
+          // Auto-enroll the user into the merchant's member list if they aren't already
+          await sql`
+            INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
+            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, NOW())
+            ON CONFLICT DO NOTHING
+          `;
+
+          // Auto-assign any active campaigns for this merchant that the user doesn't already have
+          await sql`
+            INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
+            SELECT gen_random_uuid()::text, ${userId}, c.id, gen_random_uuid()::text, NOW(), c.end_at, false, 'created'
+            FROM "Campaign" c
+            WHERE c.merchant_id = ${qrCode.merchant_id}
+              AND c.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM "Redemption" r2 
+                WHERE r2.campaign_id = c.id 
+                  AND r2.user_id = ${userId}
+              )
+          `;
+
           // Find Redemption rows for this user + this merchant that are in 'created' status
           // (assigned to user, not yet activated — 'created' is the canonical pending state)
           const memberCampaigns = await sql`
