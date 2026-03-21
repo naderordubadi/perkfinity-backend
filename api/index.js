@@ -278,20 +278,24 @@ module.exports = async function handler(req, res) {
         try {
           const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
           const userId = decoded.userId;
-          // Find Redemption rows for this user + this merchant that are not yet redeemed and not expired
+          // Find Redemption rows for this user + this merchant that are in 'created' status
+          // (assigned to user, not yet activated — 'created' is the canonical pending state)
           const memberCampaigns = await sql`
-            SELECT c.id, c.title, c.discount_percentage, c.terms, c.status, c.start_at, c.end_at,
-                   r.id as redemption_id, r.token, r.expires_at as redemption_expires_at, r.redeemed
+            SELECT c.id, c.title, c.discount_percentage, c.terms, c.status as campaign_status,
+                   c.start_at, c.end_at,
+                   r.id as redemption_id, r.token, r.expires_at as redemption_expires_at,
+                   r.redeemed, r.status as redemption_status
             FROM "Redemption" r
             JOIN "Campaign" c ON c.id = r.campaign_id
             WHERE r.user_id = ${userId}
               AND c.merchant_id = ${qrCode.merchant_id}
+              AND r.status = 'created'
               AND r.redeemed = false
-              AND r.expires_at > NOW()
               AND c.status = 'active'
             ORDER BY c.created_at ASC
           `;
-          campaigns = memberCampaigns;
+          // Remap so frontend sees c.status field as usual
+          campaigns = memberCampaigns.map(row => ({ ...row, status: row.campaign_status }));
         } catch (jwtErr) {
           // Token invalid or expired — fall through to public campaigns
         }
