@@ -324,6 +324,7 @@ module.exports = async function handler(req, res) {
             FROM "Campaign" c
             WHERE c.merchant_id = ${qrCode.merchant_id}
               AND c.status = 'active'
+              AND c.discount_percentage >= 0
               AND NOT EXISTS (
                 SELECT 1 FROM "Redemption" r2 
                 WHERE r2.campaign_id = c.id 
@@ -345,6 +346,7 @@ module.exports = async function handler(req, res) {
               AND r.status = 'created'
               AND r.redeemed = false
               AND c.status = 'active'
+              AND c.discount_percentage >= 0
             ORDER BY c.created_at ASC
           `;
           // Remap so frontend sees c.status field as usual
