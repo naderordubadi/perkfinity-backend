@@ -690,6 +690,24 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
     }
 
+    // ── POST /api/v1/consumers/forgot-password ─────────────────────
+    if (method === 'POST' && url.endsWith('/consumers/forgot-password')) {
+      const data = req.body || {};
+      if (!data.email) return send(res, 400, { success: false, error: 'Email is required' });
+
+      const [user] = await sql`SELECT id, email, password_hash, apple_sub, google_sub FROM "User" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
+
+      // If user exists and signed up via email (has password_hash), send reset email
+      if (user && user.password_hash) {
+        // TODO: Generate a reset token, save it to DB, and send email via Microsoft SMTP
+        // For now, just log so we can verify the endpoint works
+        console.log(`[FORGOT-PASSWORD] Reset requested for: ${user.email} (user: ${user.id})`);
+      }
+
+      // Always return success to not leak whether the email exists
+      return send(res, 200, { success: true, message: 'If an account exists with that email, a reset link has been sent.' });
+    }
+
     // ── PUT /api/v1/consumers/profile ─────────────────────────────
     if (method === 'PUT' && url.endsWith('/consumers/profile')) {
       const authHeader = req.headers.authorization;
