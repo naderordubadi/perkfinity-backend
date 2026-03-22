@@ -471,8 +471,8 @@ module.exports = async function handler(req, res) {
       `;
 
       // ── Audience-based Redemption creation (status='created') ────
-      // Announcements skip Redemption rows — they are broadcast-only.
-      // We still count the qualifying audience for the AuditLog / history.
+      // We create Redemption rows for all campaigns, including announcements,
+      // so they appear in the merchant member list. The app filters out announcements from the activate UI.
       let qualifyingUsers = [];
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
@@ -515,22 +515,18 @@ module.exports = async function handler(req, res) {
             AND r.redeemed_at >= ${ninetyDaysAgo}
         `;
       }
-
-      // For announcements: count the audience but do NOT create Redemption rows.
-      // Member list and consumer app are Redemption-driven, so they won't see this campaign.
-      let assignedCount = qualifyingUsers.length;
-      if (data.type !== 'announcement') {
-        assignedCount = 0;
-        for (const u of qualifyingUsers) {
-          try {
-            await sql`
-              INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
-              VALUES (gen_random_uuid()::text, ${u.user_id}, ${campaign.id}, gen_random_uuid()::text, ${now}, ${expiresAt}, false, 'created')
-              ON CONFLICT DO NOTHING
-            `;
-            assignedCount++;
-          } catch (insertErr) { /* skip on conflict */ }
-        }
+      // Create Redemption rows for all qualifying users, including announcements
+      // so they appear in the merchant member list. The app filters out announcements from the activate UI.
+      let assignedCount = 0;
+      for (const u of qualifyingUsers) {
+        try {
+          await sql`
+            INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
+            VALUES (gen_random_uuid()::text, ${u.user_id}, ${campaign.id}, gen_random_uuid()::text, ${now}, ${expiresAt}, false, 'created')
+            ON CONFLICT DO NOTHING
+          `;
+          assignedCount++;
+        } catch (insertErr) { /* skip on conflict */ }
       }
 
       // Save promotion config to AuditLog (single entry, after assignment)
