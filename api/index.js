@@ -211,7 +211,7 @@ module.exports = async function handler(req, res) {
 
       // ── GET /api/v1/debug/redemp ──────────────────────────────────────
       if (url.endsWith('/debug/redemp')) {
-        const rs = await sql`SELECT id, user_id, campaign_id, status, redeemed, expires_at, issued_at FROM "Redemption" WHERE campaign_id = '1f6bf8f7-57a3-4649-b909-932cdc5e9fe6' ORDER BY issued_at DESC`;
+        const rs = await sql`SELECT id, user_id, campaign_id, status, redeemed, expires_at, issued_at FROM "Redemption" WHERE user_id = '705527ab-29c3-45bb-bfba-2142ed793543' AND campaign_id = '1f6bf8f7-57a3-4649-b909-932cdc5e9fe6' ORDER BY issued_at DESC`;
         return send(res, 200, { success: true, data: rs });
       }
 
