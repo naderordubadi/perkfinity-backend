@@ -1007,6 +1007,7 @@ module.exports = async function handler(req, res) {
                 'expires_at', r.expires_at,
                 'redeemed_at', r.redeemed_at,
                 'status', CASE
+                  WHEN c.discount_percentage = -1 THEN 'Announcement'
                   WHEN r.status = 'redeemed' OR r.redeemed = true THEN 'Redeemed'
                   WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW()) THEN 'Expired'
                   WHEN r.status = 'pending' THEN 'Pending'
