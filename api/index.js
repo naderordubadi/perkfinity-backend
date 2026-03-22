@@ -209,6 +209,12 @@ module.exports = async function handler(req, res) {
       });
     }
 
+      // ── GET /api/v1/debug/redemp ──────────────────────────────────────
+      if (url.endsWith('/debug/redemp')) {
+        const rs = await sql`SELECT id, user_id, campaign_id, status, redeemed, expires_at, issued_at FROM "Redemption" ORDER BY issued_at DESC LIMIT 30`;
+        return send(res, 200, { success: true, data: rs });
+      }
+
     // ── POST /api/v1/auth/login ────────────────────────────────────
     if (method === 'POST' && (url.endsWith('/auth/login') || url.endsWith('/merchants/login'))) {
       const data = req.body || {};
