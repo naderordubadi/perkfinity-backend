@@ -849,6 +849,39 @@ module.exports = async function handler(req, res) {
       return send(res, 201, { success: true, data: { activation: redemption } });
     }
 
+    // ── POST /api/v1/campaigns/:id/expire ─────────────────────────
+    const expireMatch = url.match(/\/api\/v1\/campaigns\/([a-zA-Z0-9_-]+)\/expire/);
+    if (method === 'POST' && expireMatch) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const expireCampaignId = expireMatch[1];
+
+      // Set the most-recent pending Redemption → 'expired'
+      const expired = await sql`
+        WITH target AS (
+          SELECT id FROM "Redemption"
+          WHERE user_id    = ${payload.userId}
+            AND campaign_id = ${expireCampaignId}
+            AND status      = 'pending'
+            AND redeemed    = false
+          ORDER BY issued_at DESC
+          LIMIT 1
+        )
+        UPDATE "Redemption"
+        SET status = 'expired'
+        FROM target
+        WHERE "Redemption".id = target.id
+        RETURNING *
+      `;
+
+      return send(res, 200, { success: true, data: { expired: expired[0] || null } });
+    }
+
     // ── POST /api/v1/campaigns/:id/cancel-activation ───────────────
     const cancelActivateMatch = url.match(/\/api\/v1\/campaigns\/([a-zA-Z0-9_-]+)\/cancel-activation/);
     if (method === 'POST' && cancelActivateMatch) {
