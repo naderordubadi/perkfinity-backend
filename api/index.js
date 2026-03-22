@@ -85,6 +85,9 @@ module.exports = async function handler(req, res) {
         await sql`UPDATE "Redemption" SET status='redeemed' WHERE redeemed=true AND status='pending'`;
         await sql`UPDATE "Redemption" SET status='expired' WHERE redeemed=false AND expires_at < NOW() AND status='pending'`;
         await sql`UPDATE "Redemption" SET status='created' WHERE redeemed=false AND expires_at > NOW() + INTERVAL '1 day' AND status='pending'`;
+        // Add campaign_type column so announcements are always identifiable
+        await sql`ALTER TABLE "Campaign" ADD COLUMN IF NOT EXISTS campaign_type TEXT DEFAULT 'perk'`;
+        await sql`UPDATE "Campaign" SET campaign_type='announcement' WHERE discount_percentage = -1 AND campaign_type IS DISTINCT FROM 'announcement'`;
         global._redemptionMigrated = true;
       } catch (migErr) { /* column may already exist or non-critical */ }
     }
@@ -450,7 +453,7 @@ module.exports = async function handler(req, res) {
       // Announcements use discount_percentage = -1 as a permanent type marker
       // so they can be filtered out anywhere Redemption rows are not sufficient.
       const [campaign] = await sql`
-        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, start_at, end_at, created_at, updated_at)
+        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, start_at, end_at, campaign_type, created_at, updated_at)
         VALUES (
           gen_random_uuid()::text,
           ${targetMerchantId},
@@ -460,6 +463,7 @@ module.exports = async function handler(req, res) {
           'active',
           ${now},
           ${expiresAt},
+          ${data.type === 'announcement' ? 'announcement' : 'perk'},
           ${now},
           ${now}
         )
@@ -1007,7 +1011,7 @@ module.exports = async function handler(req, res) {
                 'expires_at', r.expires_at,
                 'redeemed_at', r.redeemed_at,
                 'status', CASE
-                  WHEN c.discount_percentage = -1 THEN 'Announcement'
+                  WHEN c.campaign_type = 'announcement' OR c.discount_percentage = -1 THEN 'Announcement'
                   WHEN r.status = 'redeemed' OR r.redeemed = true THEN 'Redeemed'
                   WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW()) THEN 'Expired'
                   WHEN r.status = 'pending' THEN 'Pending'
