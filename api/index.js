@@ -897,9 +897,10 @@ module.exports = async function handler(req, res) {
       const cancelCampaignId = cancelActivateMatch[1];
 
       // Revert the most-recent pending Redemption → 'created', restore expires_at to campaign end date
-      // GUARD: Only cancel if activated more than 10 seconds ago.
+      // GUARD: Only cancel if activated more than 2 seconds ago.
       // React's route transition causes a spurious cancel-activation within 0.5-0.8s
-      // of activation — the time guard silently ignores those.
+      // of activation — the 2s guard silently ignores those while still allowing
+      // legitimate cancels from tab navigation or app backgrounding.
       const cancelled = await sql`
         WITH target AS (
           SELECT id FROM "Redemption"
@@ -907,7 +908,7 @@ module.exports = async function handler(req, res) {
             AND campaign_id = ${cancelCampaignId}
             AND status      = 'pending'
             AND redeemed    = false
-            AND issued_at   < NOW() - INTERVAL '10 seconds'
+            AND issued_at   < NOW() - INTERVAL '2 seconds'
           ORDER BY issued_at DESC
           LIMIT 1
         )
