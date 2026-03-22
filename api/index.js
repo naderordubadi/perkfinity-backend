@@ -45,6 +45,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
       FROM "Campaign" c
       WHERE c.merchant_id = ${qrData.merchant_id}
         AND c.status = 'active'
+        AND c.end_at > NOW()
         AND c.discount_percentage >= 0
         AND NOT EXISTS (
           SELECT 1 FROM "Redemption" r2 
@@ -324,6 +325,7 @@ module.exports = async function handler(req, res) {
             FROM "Campaign" c
             WHERE c.merchant_id = ${qrCode.merchant_id}
               AND c.status = 'active'
+              AND c.end_at > NOW()
               AND c.discount_percentage >= 0
               AND NOT EXISTS (
                 SELECT 1 FROM "Redemption" r2 
@@ -346,6 +348,7 @@ module.exports = async function handler(req, res) {
               AND r.status = 'created'
               AND r.redeemed = false
               AND c.status = 'active'
+              AND c.end_at > NOW()
               AND c.discount_percentage >= 0
             ORDER BY c.created_at ASC
           `;
@@ -364,6 +367,7 @@ module.exports = async function handler(req, res) {
           FROM "Campaign"
           WHERE merchant_id = ${qrCode.merchant_id}
             AND status = 'active'
+            AND end_at > NOW()
             AND discount_percentage >= 0
           ORDER BY created_at DESC
           LIMIT 5
@@ -748,12 +752,12 @@ module.exports = async function handler(req, res) {
            q.public_code as qr_code,
            c.title as discount,
            (SELECT COUNT(*) FROM "Campaign" c2
-            WHERE c2.merchant_id = m.id AND c2.status = 'active') as offer_count
+            WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count
          FROM "Campaign" c
          JOIN "Merchant" m ON m.id = c.merchant_id
          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
          LEFT JOIN "QrCode" q ON q.merchant_id = m.id AND q.status = 'active'
-         WHERE c.status = 'active' AND m.status = 'active'
+         WHERE c.status = 'active' AND m.status = 'active' AND c.end_at > NOW()
          ORDER BY m.id, c.created_at DESC
        `;
        
@@ -1004,7 +1008,7 @@ module.exports = async function handler(req, res) {
                 'redeemed_at', r.redeemed_at,
                 'status', CASE
                   WHEN r.status = 'redeemed' OR r.redeemed = true THEN 'Redeemed'
-                  WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW() AND COALESCE(r.status,'') != 'created') THEN 'Expired'
+                  WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW()) THEN 'Expired'
                   WHEN r.status = 'pending' THEN 'Pending'
                   ELSE 'Created'
                 END
