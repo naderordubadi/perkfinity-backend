@@ -78,17 +78,15 @@ module.exports = async function handler(req, res) {
     }
     const sql = neon(DATABASE_URL);
 
-    // ── One-time migration: add status column to Redemption ───────
-    if (!global._redemptionMigrated) {
+    // ── One-time migration: campaign_type column ───────────────────
+    // NOTE: status column on Redemption already exists in production.
+    // Do NOT bulk-update statuses here — it runs on every Vercel cold start
+    // and would revert valid 'pending' rows back to 'created'.
+    if (!global._campaignTypeMigrated) {
       try {
-        await sql`ALTER TABLE "Redemption" ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'`;
-        await sql`UPDATE "Redemption" SET status='redeemed' WHERE redeemed=true AND status='pending'`;
-        await sql`UPDATE "Redemption" SET status='expired' WHERE redeemed=false AND expires_at < NOW() AND status='pending'`;
-        await sql`UPDATE "Redemption" SET status='created' WHERE redeemed=false AND expires_at > NOW() + INTERVAL '1 day' AND status='pending'`;
-        // Add campaign_type column so announcements are always identifiable
         await sql`ALTER TABLE "Campaign" ADD COLUMN IF NOT EXISTS campaign_type TEXT DEFAULT 'perk'`;
         await sql`UPDATE "Campaign" SET campaign_type='announcement' WHERE discount_percentage = -1 AND campaign_type IS DISTINCT FROM 'announcement'`;
-        global._redemptionMigrated = true;
+        global._campaignTypeMigrated = true;
       } catch (migErr) { /* column may already exist or non-critical */ }
     }
 
@@ -209,6 +207,11 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ── GET /api/v1/debug/status (TEMPORARY — remove after verification) ──
+    if (url.endsWith('/debug/status')) {
+      const rs = await sql`SELECT id, user_id, campaign_id, status, redeemed, expires_at, issued_at FROM "Redemption" ORDER BY issued_at DESC LIMIT 20`;
+      return send(res, 200, { success: true, data: rs });
+    }
 
     // ── POST /api/v1/auth/login ────────────────────────────────────
     if (method === 'POST' && (url.endsWith('/auth/login') || url.endsWith('/merchants/login'))) {
@@ -955,7 +958,7 @@ module.exports = async function handler(req, res) {
       // Allow manual consumer redemption (saving merchant_user_id as null because it was a self-serve redemption)
       const [updated] = await sql`
         UPDATE "Redemption"
-        SET redeemed = true, redeemed_at = NOW()
+        SET redeemed = true, redeemed_at = NOW(), status = 'redeemed'
         WHERE id = ${existing.id}
         RETURNING *
       `;
