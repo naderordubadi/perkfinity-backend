@@ -211,7 +211,7 @@ module.exports = async function handler(req, res) {
 
       // ── GET /api/v1/debug/redemp ──────────────────────────────────────
       if (url.endsWith('/debug/redemp')) {
-        const rs = await sql`SELECT id, user_id, campaign_id, status, redeemed, expires_at, issued_at FROM "Redemption" ORDER BY issued_at DESC LIMIT 30`;
+        const rs = await sql`SELECT id, user_id, campaign_id, status, redeemed, expires_at, issued_at FROM "Redemption" WHERE status != 'created' ORDER BY issued_at DESC LIMIT 50`;
         return send(res, 200, { success: true, data: rs });
       }
 
