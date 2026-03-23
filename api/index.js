@@ -394,7 +394,7 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
-        SELECT m.business_name, m.contact_name, m.phone, m.website, l.address, l.suite, l.city, l.state, l.postal_code, u.email
+        SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
         LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
@@ -1057,7 +1057,7 @@ module.exports = async function handler(req, res) {
       if (!data.logo_url) return send(res, 400, { success: false, error: 'Missing logo_url' });
       
       await sql`UPDATE "Merchant" SET logo_url = ${data.logo_url} WHERE id = ${merchantId}`;
-      return send(res, 200, { success: true, message: 'Logo successfully updated' });
+      return send(res, 200, { success: true, data: { logo_url: data.logo_url } });
     }
 
     // ── GET /api/v1/merchants/:id/members ─────────────────────────
