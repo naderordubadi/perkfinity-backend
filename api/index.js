@@ -730,8 +730,21 @@ module.exports = async function handler(req, res) {
       const data = req.body || {};
       if (!data.email || !data.password) return send(res, 400, { success: false, error: 'Missing email or password' });
       
-      const existing = await sql`SELECT id FROM "User" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
-      if (existing.length > 0) return send(res, 400, { success: false, error: 'User already exists' });
+      const [existing] = await sql`SELECT id, password_hash FROM "User" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
+      
+      if (existing) {
+        if (existing.password_hash) {
+          // User already fully signed up — suggest login
+          return send(res, 400, { success: false, error: 'An account with this email already exists. Please use Log In instead.' });
+        }
+        // User was auto-created (via Apple/Google sign-in or auto-enrollment) — let them set a password
+        const hash = await bcrypt.hash(data.password, 12);
+        await sql`UPDATE "User" SET password_hash = ${hash}, last_active = NOW() WHERE id = ${existing.id}`;
+        const JWT_SECRET = process.env.JWT_SECRET;
+        const token = jwt.sign({ userId: existing.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+        await autoEnrollUser(sql, existing.id, data.qrCode);
+        return send(res, 200, { success: true, data: { user: { id: existing.id, email: data.email.toLowerCase() }, accessToken: token } });
+      }
       
       const hash = await bcrypt.hash(data.password, 12);
       const [user] = await sql`
