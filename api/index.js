@@ -570,7 +570,7 @@ module.exports = async function handler(req, res) {
           const condLine = data.condition_detail || '';
           const expiryStr = data.expires_at ? `Offer expires: ${new Date(data.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}` : '';
           const isAnnouncement = data.type === 'announcement';
-          const emailSubject = isAnnouncement ? `📢 ${headline}` : `🎉 ${headline} — ${storeName}`;
+          const emailSubject = isAnnouncement ? `📢 ${headline} — ${storeName}` : `🎉 ${headline} — ${storeName}`;
 
           const emailHtml = `
             <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
