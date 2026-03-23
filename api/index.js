@@ -7,6 +7,7 @@ const { neon } = require('@neondatabase/serverless');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 
 const ALLOWED_ORIGINS = [
   'https://perkfinity.net',
@@ -542,8 +543,83 @@ module.exports = async function handler(req, res) {
           ${now}
         )
       `;
+      // ── Send emails via Brevo ────────────────────────────────────
+      let emailSent = 0;
+      let emailFailed = 0;
+      const BREVO_KEY = process.env.BREVO_API_KEY;
+      if (BREVO_KEY && qualifyingUsers.length > 0) {
+        try {
+          // Fetch merchant info for the email template
+          const [merchantInfo] = await sql`
+            SELECT m.business_name, m.logo_url, l.address, l.city, l.state, l.postal_code
+            FROM "Merchant" m
+            LEFT JOIN "Location" l ON l.merchant_id = m.id
+            WHERE m.id = ${targetMerchantId}
+            LIMIT 1
+          `;
+          const storeName = merchantInfo?.business_name || 'Your Local Store';
+          const logoUrl = merchantInfo?.logo_url || '';
+          const storeAddr = merchantInfo ? [merchantInfo.address, merchantInfo.city, merchantInfo.state, merchantInfo.postal_code].filter(Boolean).join(', ') : '';
 
-      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, message: `Promotion created and assigned to ${assignedCount} member(s) via ${data.delivery}.` } });
+          // Fetch all qualifying users' emails
+          const userIds = qualifyingUsers.map(u => u.user_id);
+          const users = await sql`SELECT id, email FROM "User" WHERE id = ANY(${userIds}) AND email IS NOT NULL`;
+
+          // Build email subject and HTML
+          const headline = data.title || 'New Offer';
+          const condLine = data.condition_detail || '';
+          const expiryStr = data.expires_at ? `Offer expires: ${new Date(data.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}` : '';
+          const isAnnouncement = data.type === 'announcement';
+          const emailSubject = isAnnouncement ? `📢 ${headline}` : `🎉 ${headline} — ${storeName}`;
+
+          const emailHtml = `
+            <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
+              <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
+                ${logoUrl ? `<img src="${logoUrl}" alt="${storeName}" style="width:56px; height:56px; border-radius:50%; margin-bottom:10px; border:2px solid rgba(255,255,255,0.3);"/>` : ''}
+                <div style="color:#fff; font-size:18px; font-weight:700;">${storeName}</div>
+              </div>
+              <div style="padding:28px 24px;">
+                <div style="background:#f8f7ff; border:1.5px solid rgba(91,63,165,0.15); border-radius:12px; padding:20px; margin-bottom:18px; text-align:center;">
+                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5b3fa5; margin-bottom:8px;">${isAnnouncement ? '📢 Store Announcement' : 'Exclusive Offer For You'}</div>
+                  <div style="font-size:20px; font-weight:700; color:#1a1a2e; margin-bottom:6px;">${headline}</div>
+                  ${!isAnnouncement && condLine ? `<div style="font-size:13px; color:#555; margin-bottom:6px;">${condLine}</div>` : ''}
+                  ${!isAnnouncement && expiryStr ? `<div style="font-size:12px; color:#888;">${expiryStr}</div>` : ''}
+                  ${isAnnouncement && condLine ? `<div style="font-size:13px; color:#333; margin-top:10px; line-height:1.5;">${condLine}</div>` : ''}
+                </div>
+                ${!isAnnouncement ? '<div style="font-size:13px; color:#555; text-align:center; margin-bottom:18px;">When you are in the store, scan the Perkfinity QR code before you order to activate your perk.</div>' : ''}
+                ${storeAddr ? `<div style="font-size:12px; color:#888; text-align:center;">📍 ${storeName}, ${storeAddr}</div>` : ''}
+              </div>
+              <div style="background:#f5f5f5; padding:14px; text-align:center; font-size:11px; color:#aaa;">Sent via Perkfinity Rewards</div>
+            </div>
+          `;
+
+          // Configure Brevo client
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+
+          // Send to each user (Brevo free tier: 300/day)
+          for (const user of users) {
+            if (!user.email) continue;
+            try {
+              const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+              sendSmtpEmail.sender = { name: storeName, email: 'noreply@perkfinity.net' };
+              sendSmtpEmail.to = [{ email: user.email }];
+              sendSmtpEmail.subject = emailSubject;
+              sendSmtpEmail.htmlContent = emailHtml;
+              await emailApi.sendTransacEmail(sendSmtpEmail);
+              emailSent++;
+            } catch (emailErr) {
+              emailFailed++;
+              console.error(`Brevo email failed for user ${user.id}:`, emailErr.message || emailErr);
+            }
+          }
+        } catch (brevoErr) {
+          console.error('Brevo setup error:', brevoErr.message || brevoErr);
+        }
+      }
+
+      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, email_sent: emailSent, email_failed: emailFailed, message: `Promotion created and assigned to ${assignedCount} member(s). ${emailSent} email(s) sent.` } });
     }
 
     // ── POST /api/v1/consumers/apple-signin ────────────────────────
