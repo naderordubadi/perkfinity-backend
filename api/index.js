@@ -39,7 +39,9 @@ async function autoEnrollUser(sql, userId, publicCode) {
       ON CONFLICT DO NOTHING
     `;
 
-    // 2. Assign all missing active campaigns as 'created' (Pending Offers)
+    // 2. Assign only welcome campaigns (not merchant-targeted promotions) to new members.
+    //    Targeted promotions have an AuditLog entry (action='promotion_created');
+    //    welcome campaigns created at merchant signup do not.
     await sql`
       INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
       SELECT gen_random_uuid()::text, ${userId}, c.id, gen_random_uuid()::text, NOW(), c.end_at, false, 'created'
@@ -52,6 +54,11 @@ async function autoEnrollUser(sql, userId, publicCode) {
           SELECT 1 FROM "Redemption" r2 
           WHERE r2.campaign_id = c.id 
             AND r2.user_id = ${userId}
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM "AuditLog" al
+          WHERE al.target_id = c.id
+            AND al.action = 'promotion_created'
         )
     `;
   } catch (e) {
@@ -320,7 +327,8 @@ module.exports = async function handler(req, res) {
             ON CONFLICT DO NOTHING
           `;
 
-          // Auto-assign any active campaigns for this merchant that the user doesn't already have
+          // Auto-assign only welcome campaigns (not merchant-targeted promotions) to new members.
+          // Targeted promotions have an AuditLog entry; welcome campaigns do not.
           await sql`
             INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
             SELECT gen_random_uuid()::text, ${userId}, c.id, gen_random_uuid()::text, NOW(), c.end_at, false, 'created'
@@ -333,6 +341,11 @@ module.exports = async function handler(req, res) {
                 SELECT 1 FROM "Redemption" r2 
                 WHERE r2.campaign_id = c.id 
                   AND r2.user_id = ${userId}
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM "AuditLog" al
+                WHERE al.target_id = c.id
+                  AND al.action = 'promotion_created'
               )
           `;
 
