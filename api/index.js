@@ -1486,6 +1486,19 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: 'Profile updated successfully', new_business_name: data.business_name });
     }
 
+    // ── TEMP DEBUG: check push token registration ──────────────────
+    if (url === '/api/v1/debug/push-tokens' && method === 'GET') {
+      const rows = await sql`
+        SELECT email,
+               CASE WHEN push_token IS NOT NULL THEN 'SET' ELSE 'NULL' END as push_status,
+               LEFT(push_token, 20) as token_preview
+        FROM "User"
+        ORDER BY created_at DESC
+        LIMIT 20
+      `;
+      return send(res, 200, { success: true, data: rows });
+    }
+
     if (url === '/api/v1/update-test-profiles-mission-viejo' && method === 'GET') {
       const addresses = ["1", "2", "3", "4", "5"];
       for (const num of addresses) {
