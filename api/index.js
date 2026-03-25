@@ -278,9 +278,9 @@ module.exports = async function handler(req, res) {
             sendSmtpEmail.to = [{ email: data.email.toLowerCase() }];
             sendSmtpEmail.subject = 'Reset your Perkfinity Password';
             
-            const resetLink = \`https://perkfinity.net/reset-password.html?token=\${rawToken}\`;
+            const resetLink = `https://perkfinity.net/reset-password.html?token=${rawToken}`;
             
-            sendSmtpEmail.htmlContent = \`
+            sendSmtpEmail.htmlContent = `
               <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
                 <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
                   <div style="color:#fff; font-size:24px; font-weight:800;">Perkfinity</div>
@@ -288,15 +288,15 @@ module.exports = async function handler(req, res) {
                 <div style="padding:28px 24px;">
                   <div style="font-size:20px; font-weight:700; color:#1a1a2e; margin-bottom:16px;">Password Reset Request</div>
                   <p style="font-size:15px; color:#555; line-height:1.6; margin-bottom:24px;">
-                    We received a request to reset the password for your Merchant Dashboard. Click the button below to choose a new password. This link will expire in 1 hour.
+                    We received a request to reset the password for your Perkfinity merchant account. Click the button below to choose a new password. This link will expire in 1 hour.
                   </p>
                   <div style="text-align:center; margin-bottom:24px;">
-                    <a href="\${resetLink}" style="display:inline-block; background:#5b3fa5; color:#fff; font-weight:600; text-decoration:none; padding:14px 28px; border-radius:10px;">Reset Password</a>
+                    <a href="${resetLink}" style="display:inline-block; background:#5b3fa5; color:#fff; font-weight:600; text-decoration:none; padding:14px 28px; border-radius:10px;">Reset Password</a>
                   </div>
                   <p style="font-size:13px; color:#aaa; text-align:center;">If you did not request this, you can safely ignore this email.</p>
                 </div>
               </div>
-            \`;
+            `;
             
             await emailApi.sendTransacEmail(sendSmtpEmail);
           } catch (brevoErr) {
@@ -919,9 +919,9 @@ module.exports = async function handler(req, res) {
             sendSmtpEmail.to = [{ email: data.email.toLowerCase() }];
             sendSmtpEmail.subject = 'Reset your Perkfinity Member Password';
             
-            const resetLink = \`https://perkfinity.net/member-reset-password.html?token=\${rawToken}\`;
+            const resetLink = `https://perkfinity.net/member-reset-password.html?token=${rawToken}`;
             
-            sendSmtpEmail.htmlContent = \`
+            sendSmtpEmail.htmlContent = `
               <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
                 <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
                   <div style="color:#fff; font-size:24px; font-weight:800;">Perkfinity</div>
@@ -932,15 +932,15 @@ module.exports = async function handler(req, res) {
                     We received a request to reset the password for your Perkfinity member account. Click the button below to choose a new password. This link will expire in 1 hour.
                   </p>
                   <div style="text-align:center; margin-bottom:24px;">
-                    <a href="\${resetLink}" style="display:inline-block; background:#5b3fa5; color:#fff; font-weight:600; text-decoration:none; padding:14px 28px; border-radius:10px;">Reset Password</a>
+                    <a href="${resetLink}" style="display:inline-block; background:#5b3fa5; color:#fff; font-weight:600; text-decoration:none; padding:14px 28px; border-radius:10px;">Reset Password</a>
                   </div>
                   <p style="font-size:13px; color:#aaa; text-align:center;">If you did not request this, you can safely ignore this email.</p>
                 </div>
               </div>
-            \`;
+            `;
             
             await emailApi.sendTransacEmail(sendSmtpEmail);
-            console.log(\`[FORGOT-PASSWORD] Member reset email sent for: \${user.email}\`);
+            console.log(`[FORGOT-PASSWORD] Member reset email sent for: ${user.email}`);
           } catch (brevoErr) {
             console.error('Brevo consumer reset email failed:', brevoErr.message || brevoErr);
           }
