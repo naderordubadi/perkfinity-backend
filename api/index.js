@@ -747,7 +747,7 @@ module.exports = async function handler(req, res) {
                   </div>
                 </div>
                 <!-- "When in store" banner -->
-                ${!isAnnouncement ? `<div style="background:rgba(107,193,122,0.12); border:1px solid rgba(107,193,122,0.3); border-radius:10px; padding:12px 18px; text-align:center; margin:0 auto 16px; max-width:400px;"><p style="font-size:14px; color:#1a6b2b; margin:0; font-weight:500;">When you are in the store, scan the Perkfinity QR code before you order to activate your perk.</p></div>` : ''}
+                ${!isAnnouncement ? `<div style="background:rgba(107,193,122,0.12); border:1px solid rgba(107,193,122,0.3); border-radius:10px; padding:12px 18px; text-align:center; margin:0 auto 16px; max-width:400px;"><p style="font-size:14px; color:#1a6b2b; margin:0; font-weight:500;">When you are in the store, scan the Perkfinity QR code<br>before you order to activate your perk.</p></div>` : ''}
                 <!-- Expiry pill badge: matches preview -->
                 ${!isAnnouncement && expiryStr ? `<div style="text-align:center; margin-bottom:16px;"><span style="font-size:12px; color:#999; background:#f8f8f8; padding:6px 14px; border-radius:20px; display:inline-block;">${expiryStr}</span></div>` : ''}
                 <hr style="border:none; border-top:1px solid #f0f0f0; margin:16px 0;">
