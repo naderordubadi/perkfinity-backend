@@ -245,6 +245,97 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { merchantUser: safeUser, accessToken } });
     }
 
+    // ── POST /api/v1/merchants/forgot-password ─────────────────────
+    if (method === 'POST' && url.endsWith('/merchants/forgot-password')) {
+      const data = req.body || {};
+      if (!data.email) return send(res, 400, { success: false, error: 'Email is required' });
+
+      // Find the merchant user
+      const [user] = await sql`SELECT id, merchant_id, role FROM "MerchantUser" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
+      
+      if (user) {
+        // Generate a fast token
+        const rawToken = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+        // Save token to DB
+        await sql`
+          UPDATE "MerchantUser" 
+          SET reset_token = ${rawToken}, reset_expires_at = ${expiresAt}
+          WHERE id = ${user.id}
+        `;
+
+        // Send email via Brevo
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY) {
+          try {
+            const brevoClient = SibApiV3Sdk.ApiClient.instance;
+            brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+            const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+            
+            const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+            sendSmtpEmail.sender = { name: 'Perkfinity', email: 'noreply@perkfinity.net' };
+            sendSmtpEmail.to = [{ email: data.email.toLowerCase() }];
+            sendSmtpEmail.subject = 'Reset your Perkfinity Password';
+            
+            const resetLink = \`https://perkfinity.net/reset-password.html?token=\${rawToken}\`;
+            
+            sendSmtpEmail.htmlContent = \`
+              <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
+                <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
+                  <div style="color:#fff; font-size:24px; font-weight:800;">Perkfinity</div>
+                </div>
+                <div style="padding:28px 24px;">
+                  <div style="font-size:20px; font-weight:700; color:#1a1a2e; margin-bottom:16px;">Password Reset Request</div>
+                  <p style="font-size:15px; color:#555; line-height:1.6; margin-bottom:24px;">
+                    We received a request to reset the password for your Merchant Dashboard. Click the button below to choose a new password. This link will expire in 1 hour.
+                  </p>
+                  <div style="text-align:center; margin-bottom:24px;">
+                    <a href="\${resetLink}" style="display:inline-block; background:#5b3fa5; color:#fff; font-weight:600; text-decoration:none; padding:14px 28px; border-radius:10px;">Reset Password</a>
+                  </div>
+                  <p style="font-size:13px; color:#aaa; text-align:center;">If you did not request this, you can safely ignore this email.</p>
+                </div>
+              </div>
+            \`;
+            
+            await emailApi.sendTransacEmail(sendSmtpEmail);
+          } catch (brevoErr) {
+            console.error('Brevo reset email failed:', brevoErr.message || brevoErr);
+          }
+        }
+      }
+
+      // Always return success even if user not found to prevent email enumeration
+      return send(res, 200, { success: true, message: 'If an account exists with that email, a reset link has been sent.' });
+    }
+
+    // ── POST /api/v1/merchants/reset-password ──────────────────────
+    if (method === 'POST' && url.endsWith('/merchants/reset-password')) {
+      const data = req.body || {};
+      if (!data.token || !data.password) return send(res, 400, { success: false, error: 'Token and new password are required' });
+
+      const [user] = await sql`
+        SELECT id FROM "MerchantUser" 
+        WHERE reset_token = ${data.token} 
+          AND reset_expires_at > NOW() 
+        LIMIT 1
+      `;
+
+      if (!user) {
+        return send(res, 400, { success: false, error: 'Invalid or expired reset token. Please request a new one.' });
+      }
+
+      const password_hash = await bcrypt.hash(data.password, 12);
+
+      await sql`
+        UPDATE "MerchantUser" 
+        SET password_hash = ${password_hash}, reset_token = NULL, reset_expires_at = NULL 
+        WHERE id = ${user.id}
+      `;
+
+      return send(res, 200, { success: true, message: 'Your password has been successfully reset. You can now log in.' });
+    }
+
     // ── GET /api/v1/migrate-users (TEMPORARY DB PRE-FLIGHT) ───────
     if (url === '/api/v1/migrate-users' && method === 'GET') {
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "email" TEXT UNIQUE`;
@@ -255,7 +346,9 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "zip_code" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "location_sharing_enabled" BOOLEAN DEFAULT false`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "push_notifications_enabled" BOOLEAN DEFAULT false`;
-      return send(res, 200, { success: true, message: "User table fully migrated!" });
+      await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_token" TEXT`;
+      await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_expires_at" TIMESTAMP`;
+      return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
     // ── GET /api/v1/merchants/search?zip=XXXXX ────────────────────
