@@ -9,6 +9,38 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const SibApiV3Sdk = require('sib-api-v3-sdk');
 
+// ── Firebase Admin Init ──────────────────────────────────────────
+const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
+
+let firebaseInitialized = false;
+try {
+  const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
+  if (fs.existsSync(serviceAccountPath) && !admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert(require(serviceAccountPath))
+    });
+    firebaseInitialized = true;
+  } else if (admin.apps.length) {
+    firebaseInitialized = true;
+  }
+} catch (err) {
+  console.error('Firebase Admin init error:', err);
+}
+
+async function sendPushNotification(token, title, body) {
+  if (!firebaseInitialized || !token) return;
+  try {
+    await admin.messaging().send({
+      token,
+      notification: { title, body }
+    });
+  } catch (err) {
+    console.error('Firebase push error:', err);
+  }
+}
+
 const ALLOWED_ORIGINS = [
   'https://perkfinity.net',
   'https://www.perkfinity.net',
@@ -348,6 +380,7 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "push_notifications_enabled" BOOLEAN DEFAULT false`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "reset_token" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "reset_expires_at" TIMESTAMP`;
+      await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "push_token" TEXT`;
       await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_token" TEXT`;
       await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_expires_at" TIMESTAMP`;
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
@@ -651,11 +684,15 @@ module.exports = async function handler(req, res) {
           ${now}
         )
       `;
-      // ── Send emails via Brevo ────────────────────────────────────
+      // ── Send emails & Pushes ──────────────────────────────────────
       let emailSent = 0;
       let emailFailed = 0;
+      let pushSent = 0;
+      let pushFailed = 0;
+      
       const BREVO_KEY = process.env.BREVO_API_KEY;
-      if (BREVO_KEY && qualifyingUsers.length > 0) {
+
+      if (qualifyingUsers.length > 0) {
         try {
           // Fetch merchant info for the email template
           const [merchantInfo] = await sql`
@@ -671,7 +708,7 @@ module.exports = async function handler(req, res) {
 
           // Fetch all qualifying users' emails
           const userIds = qualifyingUsers.map(u => u.user_id);
-          const users = await sql`SELECT id, email FROM "User" WHERE id = ANY(${userIds}) AND email IS NOT NULL`;
+          const users = await sql`SELECT id, email, push_token FROM "User" WHERE id = ANY(${userIds})`;
 
           // Build email subject and HTML
           const headline = data.title || 'New Offer';
@@ -702,32 +739,47 @@ module.exports = async function handler(req, res) {
           `;
 
           // Configure Brevo client
-          const brevoClient = SibApiV3Sdk.ApiClient.instance;
-          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
-          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          let emailApi = null;
+          if (BREVO_KEY) {
+            const brevoClient = SibApiV3Sdk.ApiClient.instance;
+            brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+            emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          }
 
           // Send to each user (Brevo free tier: 300/day)
           for (const user of users) {
-            if (!user.email) continue;
-            try {
-              const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
-              sendSmtpEmail.sender = { name: storeName, email: 'noreply@perkfinity.net' };
-              sendSmtpEmail.to = [{ email: user.email }];
-              sendSmtpEmail.subject = emailSubject;
-              sendSmtpEmail.htmlContent = emailHtml;
-              await emailApi.sendTransacEmail(sendSmtpEmail);
-              emailSent++;
-            } catch (emailErr) {
-              emailFailed++;
-              console.error(`Brevo email failed for user ${user.id}:`, emailErr.message || emailErr);
+            // Push Notification Dispatch
+            if (user.push_token) {
+              try {
+                await sendPushNotification(user.push_token, emailSubject, condLine || headline);
+                pushSent++;
+              } catch (pushErr) {
+                pushFailed++;
+              }
+            }
+
+            // Email Dispatch
+            if (emailApi && user.email) {
+              try {
+                const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+                sendSmtpEmail.sender = { name: storeName, email: 'noreply@perkfinity.net' };
+                sendSmtpEmail.to = [{ email: user.email }];
+                sendSmtpEmail.subject = emailSubject;
+                sendSmtpEmail.htmlContent = emailHtml;
+                await emailApi.sendTransacEmail(sendSmtpEmail);
+                emailSent++;
+              } catch (emailErr) {
+                emailFailed++;
+                console.error(`Brevo email failed for user ${user.id}:`, emailErr.message || emailErr);
+              }
             }
           }
-        } catch (brevoErr) {
-          console.error('Brevo setup error:', brevoErr.message || brevoErr);
+        } catch (setupErr) {
+          console.error('Campaign broadcast setup error:', setupErr.message || setupErr);
         }
       }
 
-      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, email_sent: emailSent, email_failed: emailFailed, message: `Promotion created and assigned to ${assignedCount} member(s). ${emailSent} email(s) sent.` } });
+      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, email_sent: emailSent, push_sent: pushSent, message: `Promotion created and assigned to ${assignedCount} member(s). ${emailSent} email(s) and ${pushSent} push notification(s) sent.` } });
     }
 
     // ── POST /api/v1/consumers/apple-signin ────────────────────────
@@ -1058,6 +1110,21 @@ module.exports = async function handler(req, res) {
       `;
 
       return send(res, 200, { success: true, data: history });
+    }
+
+    // ── POST /api/v1/consumers/push-token ─────────────────────────
+    if (method === 'POST' && url.endsWith('/consumers/push-token')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const data = req.body || {};
+      if (!data.token) return send(res, 400, { success: false, error: 'Missing push token' });
+
+      await sql`UPDATE "User" SET push_token = ${data.token} WHERE id = ${payload.userId}`;
+      return send(res, 200, { success: true, message: 'Push token registered successfully' });
     }
 
     // ── POST /api/v1/campaigns/:id/activate ───────────────────────
