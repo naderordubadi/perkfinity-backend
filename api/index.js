@@ -728,22 +728,34 @@ module.exports = async function handler(req, res) {
 
           const emailHtml = `
             <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
-              <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
-                ${logoUrl ? `<img src="${logoUrl}" alt="${storeName}" style="width:56px; height:56px; border-radius:50%; margin-bottom:10px; border:2px solid rgba(255,255,255,0.3);"/>` : ''}
-                <div style="color:#fff; font-size:18px; font-weight:700;">${storeName}</div>
-              </div>
-              <div style="padding:28px 24px;">
-                <div style="background:#f8f7ff; border:1.5px solid rgba(91,63,165,0.15); border-radius:12px; padding:20px; margin-bottom:18px; text-align:center;">
-                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5b3fa5; margin-bottom:8px;">${isAnnouncement ? '📢 Store Announcement' : 'Exclusive Offer For You'}</div>
-                  <div style="font-size:20px; font-weight:700; color:#1a1a2e; margin-bottom:6px;">${headline}</div>
-                  ${!isAnnouncement && condLine ? `<div style="font-size:13px; color:#555; margin-bottom:6px;">${condLine}</div>` : ''}
-                  ${!isAnnouncement && expiryStr ? `<div style="font-size:12px; color:#888;">${expiryStr}</div>` : ''}
-                  ${isAnnouncement && condLine ? `<div style="font-size:13px; color:#333; margin-top:10px; line-height:1.5;">${condLine}</div>` : ''}
+              <!-- Header: matches preview gradient + logos side by side -->
+              <div style="background:linear-gradient(135deg,#5B3FA5,#6BC17A); padding:24px; text-align:center;">
+                <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:8px;">
+                  ${logoUrl ? `<img src="${logoUrl}" alt="${storeName}" style="width:44px;height:44px;border-radius:50%;object-fit:contain;background:#fff;border:2px solid rgba(255,255,255,0.8);"/>` : ''}
+                  <img src="https://perkfinity.net/assets/Perkfinity-Logo.png" alt="Perkfinity" style="height:28px; opacity:0.95;"/>
                 </div>
-                ${!isAnnouncement ? '<div style="font-size:13px; color:#555; text-align:center; margin-bottom:18px;">When you are in the store, scan the Perkfinity QR code before you order to activate your perk.</div>' : ''}
-                ${storeAddr ? `<div style="font-size:12px; color:#888; text-align:center;">📍 ${storeName}, ${storeAddr}</div>` : ''}
+                <div style="color:#fff; font-size:18px; font-weight:800;">${storeName}</div>
               </div>
-              <div style="background:#f5f5f5; padding:14px; text-align:center; font-size:11px; color:#aaa;">Sent via Perkfinity Rewards</div>
+              <!-- Body -->
+              <div style="padding:24px; background:#fff;">
+                <!-- Offer card: matches preview gradient tint -->
+                <div style="text-align:center; margin-bottom:20px;">
+                  <div style="display:inline-block; background:linear-gradient(135deg,rgba(91,63,165,0.08),rgba(107,193,122,0.08)); border:1.5px solid rgba(91,63,165,0.15); border-radius:12px; padding:18px 28px;">
+                    <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1.5px; color:#5B3FA5; margin-bottom:6px;">${isAnnouncement ? '📢 Store Announcement' : 'Exclusive Offer For You'}</div>
+                    <div style="font-size:22px; font-weight:900; color:#1a1a2e;">${headline}</div>
+                    ${condLine ? `<div style="font-size:13px; color:#666; margin-top:6px;">${condLine}</div>` : ''}
+                  </div>
+                </div>
+                <!-- "When in store" instruction -->
+                ${!isAnnouncement ? `<p style="font-size:14px; color:#555; text-align:center; margin:0 0 16px;">When you are in the store, scan the Perkfinity QR code before you order to activate your perk.</p>` : ''}
+                <!-- Expiry pill badge: matches preview -->
+                ${!isAnnouncement && expiryStr ? `<div style="text-align:center; margin-bottom:16px;"><span style="font-size:12px; color:#999; background:#f8f8f8; padding:6px 14px; border-radius:20px; display:inline-block;">${expiryStr}</span></div>` : ''}
+                <hr style="border:none; border-top:1px solid #f0f0f0; margin:16px 0;">
+                <!-- Store address -->
+                ${storeAddr ? `<div style="font-size:12px; color:#888; text-align:center; line-height:1.6;">${storeName}<br/>${storeAddr}</div>` : ''}
+                <!-- Footer: matches preview "Powered by Perkfinity" -->
+                <div style="text-align:center; margin-top:12px; font-size:11px; color:#bbb;">Powered by <strong style="color:#5B3FA5;">Perkfinity</strong></div>
+              </div>
             </div>
           `;
 
