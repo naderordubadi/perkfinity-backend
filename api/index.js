@@ -16,10 +16,19 @@ const path = require('path');
 
 let firebaseInitialized = false;
 try {
-  const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
-  if (fs.existsSync(serviceAccountPath) && !admin.apps.length) {
+  let cert;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    cert = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } else {
+    const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
+    if (fs.existsSync(serviceAccountPath)) {
+      cert = require(serviceAccountPath);
+    }
+  }
+
+  if (cert && !admin.apps.length) {
     admin.initializeApp({
-      credential: admin.credential.cert(require(serviceAccountPath))
+      credential: admin.credential.cert(cert)
     });
     firebaseInitialized = true;
   } else if (admin.apps.length) {
@@ -698,7 +707,7 @@ module.exports = async function handler(req, res) {
           const [merchantInfo] = await sql`
             SELECT m.business_name, m.logo_url, l.address, l.city, l.state, l.postal_code
             FROM "Merchant" m
-            LEFT JOIN "Location" l ON l.merchant_id = m.id
+            LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
             WHERE m.id = ${targetMerchantId}
             LIMIT 1
           `;
