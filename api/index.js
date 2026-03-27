@@ -424,6 +424,7 @@ module.exports = async function handler(req, res) {
         )
       `;
       await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "store_address" TEXT`;
+      await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "offer_expires_at" TIMESTAMPTZ`;
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -755,8 +756,8 @@ module.exports = async function handler(req, res) {
           for (const userId of userIds) {
             try {
               await sql`
-                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels)
-                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel})
+                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels, offer_expires_at)
+                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel}, ${campaign.end_at})
               `;
               queuedCount++;
             } catch (queueErr) {

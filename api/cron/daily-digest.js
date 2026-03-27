@@ -125,6 +125,7 @@ module.exports = async (req, res) => {
               <div style="font-size:14px;color:#5B3FA5;font-weight:600;">${item.title}</div>
               ${item.body && item.body !== item.title ? `<div style="font-size:12px;color:#888;margin-top:2px;">${item.body}</div>` : ''}
               ${item.store_address ? `<div style="font-size:11px;color:#aaa;margin-top:3px;">📍 ${item.store_address}</div>` : ''}
+              ${item.offer_expires_at ? `<div style="font-size:11px;color:#B45309;margin-top:3px;font-weight:600;">Expires: ${new Date(item.offer_expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>` : ''}
             </div>
           </div>
         `).join('');
