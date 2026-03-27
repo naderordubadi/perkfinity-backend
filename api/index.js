@@ -411,6 +411,7 @@ module.exports = async function handler(req, res) {
           campaign_id TEXT NOT NULL,
           merchant_id TEXT NOT NULL,
           store_name TEXT NOT NULL,
+          store_address TEXT,
           logo_url TEXT,
           title TEXT NOT NULL,
           body TEXT,
@@ -419,6 +420,7 @@ module.exports = async function handler(req, res) {
           sent BOOLEAN DEFAULT false
         )
       `;
+      await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "store_address" TEXT`;
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -732,13 +734,15 @@ module.exports = async function handler(req, res) {
         try {
           // Fetch merchant info for the queue
           const [merchantInfo] = await sql`
-            SELECT m.business_name, m.logo_url
+            SELECT m.business_name, m.logo_url, l.address, l.city, l.state, l.postal_code
             FROM "Merchant" m
+            LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
             WHERE m.id = ${targetMerchantId}
             LIMIT 1
           `;
           const storeName = merchantInfo?.business_name || 'Your Local Store';
           const logoUrl = merchantInfo?.logo_url || '';
+          const storeAddress = merchantInfo ? [merchantInfo.address, merchantInfo.city, merchantInfo.state, merchantInfo.postal_code].filter(Boolean).join(', ') : '';
           const headline = data.title || 'New Offer';
           const condLine = data.condition_detail || '';
           const bodyText = condLine || headline;
@@ -748,8 +752,8 @@ module.exports = async function handler(req, res) {
           for (const userId of userIds) {
             try {
               await sql`
-                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, logo_url, title, body, channels)
-                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel})
+                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels)
+                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel})
               `;
               queuedCount++;
             } catch (queueErr) {

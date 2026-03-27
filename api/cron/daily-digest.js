@@ -119,6 +119,7 @@ module.exports = async (req, res) => {
               <div style="font-size:14px;font-weight:700;color:#1a1a2e;margin-bottom:2px;">${item.store_name}</div>
               <div style="font-size:14px;color:#5B3FA5;font-weight:600;">${item.title}</div>
               ${item.body && item.body !== item.title ? `<div style="font-size:12px;color:#888;margin-top:2px;">${item.body}</div>` : ''}
+              ${item.store_address ? `<div style="font-size:11px;color:#aaa;margin-top:3px;">📍 ${item.store_address}</div>` : ''}
             </div>
           </div>
         `).join('');
@@ -163,7 +164,7 @@ module.exports = async (req, res) => {
           ? `🎉 New perk from ${items[0].store_name}`
           : `🎉 ${offerCount} new perks from your local stores`;
         const pushBody = offerCount === 1
-          ? items[0].title
+          ? `${items[0].title}${items[0].store_address ? ' — 📍 ' + items[0].store_address : ''}`
           : items.map(i => `${i.store_name}: ${i.title}`).slice(0, 3).join(' • ') + (offerCount > 3 ? ` +${offerCount - 3} more` : '');
 
         const pushResult = await sendPushNotification(pushToken, pushTitle, pushBody);
