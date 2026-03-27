@@ -406,10 +406,10 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "Campaign" ADD COLUMN IF NOT EXISTS "delivery_channel" TEXT DEFAULT 'both'`;
       await sql`
         CREATE TABLE IF NOT EXISTS "NotificationQueue" (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          user_id UUID NOT NULL REFERENCES "User"(id),
-          campaign_id UUID NOT NULL REFERENCES "Campaign"(id),
-          merchant_id UUID NOT NULL,
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          user_id TEXT NOT NULL,
+          campaign_id TEXT NOT NULL,
+          merchant_id TEXT NOT NULL,
           store_name TEXT NOT NULL,
           logo_url TEXT,
           title TEXT NOT NULL,
