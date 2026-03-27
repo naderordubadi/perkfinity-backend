@@ -1511,6 +1511,77 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: "Task 2 DB migrated!" });
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // ADMIN API ENDPOINTS
+    // ══════════════════════════════════════════════════════════════
+
+    // ── GET /api/v1/admin/merchants ─────────────────────────────
+    if (method === 'GET' && url.endsWith('/admin/merchants')) {
+      const merchants = await sql`
+        SELECT m.*,
+          (SELECT COUNT(*) FROM "MerchantMemberList" ml WHERE ml.merchant_id = m.id) as member_count,
+          (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id) as campaign_count,
+          (SELECT COUNT(*) FROM "Redemption" r JOIN "Campaign" c2 ON c2.id = r.campaign_id WHERE c2.merchant_id = m.id AND r.status = 'redeemed') as redemption_count,
+          ml2.address as city
+        FROM "Merchant" m
+        LEFT JOIN "MerchantLocation" ml2 ON ml2.merchant_id = m.id AND ml2.is_active = true
+        ORDER BY m.created_at DESC
+      `;
+      const active = merchants.filter(m => m.status !== 'inactive').length;
+      return send(res, 200, {
+        success: true,
+        data: {
+          merchants: merchants.map(m => ({ ...m, password_hash: undefined, tier: m.subscription_tier || 'free', status: m.status || 'active' })),
+          stats: { total: merchants.length, active }
+        }
+      });
+    }
+
+    // ── GET /api/v1/admin/members ────────────────────────────────
+    if (method === 'GET' && url.endsWith('/admin/members')) {
+      const members = await sql`
+        SELECT u.id, u.email, u.full_name, u.phone_number, u.city, u.zip_code, u.push_token,
+          u.created_at, u.last_active,
+          (SELECT COUNT(*) FROM "MerchantMemberList" ml WHERE ml.user_id = u.id) as merchant_count
+        FROM "User" u
+        WHERE u.role IS NULL OR u.role = 'consumer'
+        ORDER BY u.created_at DESC
+      `;
+      const pushEnabled = members.filter(m => m.push_token).length;
+      return send(res, 200, {
+        success: true,
+        data: {
+          members,
+          stats: { total: members.length, push_enabled: pushEnabled }
+        }
+      });
+    }
+
+    // ── GET /api/v1/admin/campaigns ──────────────────────────────
+    if (method === 'GET' && url.endsWith('/admin/campaigns')) {
+      const campaigns = await sql`
+        SELECT c.*, m.business_name as merchant_name,
+          (SELECT COUNT(*) FROM "Redemption" r WHERE r.campaign_id = c.id AND r.status = 'redeemed') as redemption_count
+        FROM "Campaign" c
+        LEFT JOIN "Merchant" m ON m.id = c.merchant_id
+        ORDER BY c.created_at DESC
+      `;
+      const now = new Date();
+      const active = campaigns.filter(c => c.end_at && new Date(c.end_at) > now).length;
+      const totalRedemptions = campaigns.reduce((sum, c) => sum + (parseInt(c.redemption_count) || 0), 0);
+      const rate = campaigns.length ? Math.round((totalRedemptions / campaigns.length) * 100) / 100 : 0;
+      return send(res, 200, {
+        success: true,
+        data: {
+          campaigns: campaigns.map(c => ({
+            ...c,
+            status: c.end_at && new Date(c.end_at) > now ? 'active' : 'expired'
+          })),
+          stats: { total: campaigns.length, active, redemptions: totalRedemptions, redemption_rate: rate }
+        }
+      });
+    }
+
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
 
   } catch (err) {
