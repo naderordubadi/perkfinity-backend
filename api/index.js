@@ -404,7 +404,6 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_expires_at" TIMESTAMP`;
       // -- Daily Digest: NotificationQueue + delivery_channel --
       await sql`ALTER TABLE "Campaign" ADD COLUMN IF NOT EXISTS "delivery_channel" TEXT DEFAULT 'both'`;
-      await sql`DROP TABLE IF EXISTS "NotificationQueue"`;
       await sql`
         CREATE TABLE IF NOT EXISTS "NotificationQueue" (
           id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
