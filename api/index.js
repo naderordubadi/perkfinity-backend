@@ -18,7 +18,10 @@ let firebaseInitialized = false;
 try {
   let cert;
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    cert = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    let raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+    raw = raw.replace(/\\\\n/g, '\\n');
+    cert = JSON.parse(raw);
+    if (cert.private_key) cert.private_key = cert.private_key.replace(/\\n/g, '\n');
   } else {
     const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
     if (fs.existsSync(serviceAccountPath)) {
@@ -1060,6 +1063,7 @@ module.exports = async function handler(req, res) {
            c.title as discount,
            COALESCE(l.address, '') || CASE WHEN l.city IS NOT NULL THEN ', ' || l.city ELSE '' END || CASE WHEN l.state IS NOT NULL THEN ', ' || l.state ELSE '' END as store_address,
            c.title as latest_offer_title,
+           c.end_at as offer_expires_at,
            (SELECT COUNT(*) FROM "Campaign" c2
             WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count
          FROM "Campaign" c

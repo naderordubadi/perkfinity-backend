@@ -12,7 +12,12 @@ const admin = require('firebase-admin');
 let firebaseInitialized = false;
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT && !admin.apps.length) {
-    const cert = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    let raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+    // Fix: Vercel sometimes double-escapes \\n in private_key — normalize before parsing
+    raw = raw.replace(/\\\\n/g, '\\n');
+    const cert = JSON.parse(raw);
+    // Ensure private_key newlines are real newlines
+    if (cert.private_key) cert.private_key = cert.private_key.replace(/\\n/g, '\n');
     admin.initializeApp({ credential: admin.credential.cert(cert) });
     firebaseInitialized = true;
   } else if (admin.apps.length) {
