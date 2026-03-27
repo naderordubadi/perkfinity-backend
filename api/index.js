@@ -1059,7 +1059,6 @@ module.exports = async function handler(req, res) {
            c.title as discount,
            COALESCE(l.address, '') || CASE WHEN l.city IS NOT NULL THEN ', ' || l.city ELSE '' END || CASE WHEN l.state IS NOT NULL THEN ', ' || l.state ELSE '' END as store_address,
            c.title as latest_offer_title,
-           c.condition_detail as latest_offer_condition,
            (SELECT COUNT(*) FROM "Campaign" c2
             WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count
          FROM "Campaign" c
