@@ -1332,6 +1332,7 @@ module.exports = async function handler(req, res) {
                 'id', r.id,
                 'campaign_title', c.title,
                 'token', r.token,
+                'issued_at', r.issued_at,
                 'expires_at', r.expires_at,
                 'redeemed_at', r.redeemed_at,
                 'status', CASE
