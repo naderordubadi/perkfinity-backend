@@ -43,7 +43,17 @@ async function sendPushNotification(token, title, body) {
   try {
     await admin.messaging().send({
       token,
-      notification: { title, body }
+      notification: { title, body },
+      apns: {
+        headers: { 'apns-priority': '10' },
+        payload: {
+          aps: {
+            alert: { title, body },
+            sound: 'default',
+            badge: 1
+          }
+        }
+      }
     });
   } catch (err) {
     console.error('Firebase push error:', err);
@@ -392,6 +402,23 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "push_token" TEXT`;
       await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_token" TEXT`;
       await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_expires_at" TIMESTAMP`;
+      // -- Daily Digest: NotificationQueue + delivery_channel --
+      await sql`ALTER TABLE "Campaign" ADD COLUMN IF NOT EXISTS "delivery_channel" TEXT DEFAULT 'both'`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS "NotificationQueue" (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID NOT NULL REFERENCES "User"(id),
+          campaign_id UUID NOT NULL REFERENCES "Campaign"(id),
+          merchant_id UUID NOT NULL,
+          store_name TEXT NOT NULL,
+          logo_url TEXT,
+          title TEXT NOT NULL,
+          body TEXT,
+          channels TEXT NOT NULL DEFAULT 'both',
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          sent BOOLEAN DEFAULT false
+        )
+      `;
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -664,8 +691,7 @@ module.exports = async function handler(req, res) {
             AND r.redeemed_at >= ${ninetyDaysAgo}
         `;
       }
-      // Create Redemption rows for all qualifying users, including announcements
-      // so they appear in the merchant member list. The app filters out announcements from the activate UI.
+      // Create Redemption rows for all qualifying users
       let assignedCount = 0;
       for (const u of qualifyingUsers) {
         try {
@@ -693,114 +719,49 @@ module.exports = async function handler(req, res) {
           ${now}
         )
       `;
-      // ── Send emails & Pushes ──────────────────────────────────────
-      let emailSent = 0;
-      let emailFailed = 0;
-      let pushSent = 0;
-      let pushFailed = 0;
-      
-      const BREVO_KEY = process.env.BREVO_API_KEY;
+
+      // ── Queue notifications for daily digest ──────────────────────
+      const deliveryChannel = data.delivery_channel || 'both'; // 'email', 'push', 'both'
+
+      // Save delivery_channel to campaign
+      await sql`UPDATE "Campaign" SET delivery_channel = ${deliveryChannel} WHERE id = ${campaign.id}`;
+
+      let queuedCount = 0;
 
       if (qualifyingUsers.length > 0) {
         try {
-          // Fetch merchant info for the email template
+          // Fetch merchant info for the queue
           const [merchantInfo] = await sql`
-            SELECT m.business_name, m.logo_url, l.address, l.city, l.state, l.postal_code
+            SELECT m.business_name, m.logo_url
             FROM "Merchant" m
-            LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
             WHERE m.id = ${targetMerchantId}
             LIMIT 1
           `;
           const storeName = merchantInfo?.business_name || 'Your Local Store';
           const logoUrl = merchantInfo?.logo_url || '';
-          const storeAddr = merchantInfo ? [merchantInfo.address, merchantInfo.city, merchantInfo.state, merchantInfo.postal_code].filter(Boolean).join(', ') : '';
-
-          // Fetch all qualifying users' emails
-          const userIds = qualifyingUsers.map(u => u.user_id);
-          const users = await sql`SELECT id, email, push_token FROM "User" WHERE id = ANY(${userIds})`;
-
-          // Build email subject and HTML
           const headline = data.title || 'New Offer';
           const condLine = data.condition_detail || '';
-          const expiryStr = data.expires_at ? `Offer expires: ${new Date(data.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}` : '';
-          const isAnnouncement = data.type === 'announcement';
-          const emailSubject = isAnnouncement ? `📢 ${headline} — ${storeName}` : `🎉 ${headline} — ${storeName}`;
+          const bodyText = condLine || headline;
 
-          const emailHtml = `
-            <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
-              <!-- Header: matches preview gradient + logos side by side -->
-              <div style="background:linear-gradient(135deg,#5B3FA5,#6BC17A); padding:24px; text-align:center;">
-                <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:8px;">
-                  ${logoUrl ? `<img src="${logoUrl}" alt="${storeName}" style="width:44px;height:44px;border-radius:50%;object-fit:contain;background:#fff;border:2px solid rgba(255,255,255,0.8);"/>` : ''}
-                  <img src="https://perkfinity.net/assets/Perkfinity-Logo.png" alt="Perkfinity" style="height:28px; opacity:0.95;"/>
-                </div>
-                <div style="color:#fff; font-size:18px; font-weight:800;">${storeName}</div>
-              </div>
-              <!-- Body -->
-              <div style="padding:24px; background:#fff;">
-                <!-- Offer card: matches preview gradient tint -->
-                <div style="text-align:center; margin-bottom:20px;">
-                  <div style="display:inline-block; background:linear-gradient(135deg,rgba(91,63,165,0.08),rgba(107,193,122,0.08)); border:1.5px solid rgba(91,63,165,0.15); border-radius:12px; padding:18px 28px;">
-                    <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1.5px; color:#5B3FA5; margin-bottom:6px;">${isAnnouncement ? '📢 Store Announcement' : 'Exclusive Offer For You'}</div>
-                    <div style="font-size:22px; font-weight:900; color:#1a1a2e;">${headline}</div>
-                    ${condLine ? `<div style="font-size:13px; color:#666; margin-top:6px;">${condLine}</div>` : ''}
-                  </div>
-                </div>
-                <!-- "When in store" banner -->
-                ${!isAnnouncement ? `<div style="background:rgba(107,193,122,0.12); border:1px solid rgba(107,193,122,0.3); border-radius:10px; padding:12px 18px; text-align:center; margin:0 auto 16px; max-width:400px;"><p style="font-size:14px; color:#1a6b2b; margin:0; font-weight:500;">When you are in the store, scan the Perkfinity QR code<br>before you order to activate your perk.</p></div>` : ''}
-                <!-- Expiry pill badge: matches preview -->
-                ${!isAnnouncement && expiryStr ? `<div style="text-align:center; margin-bottom:16px;"><span style="font-size:12px; color:#999; background:#f8f8f8; padding:6px 14px; border-radius:20px; display:inline-block;">${expiryStr}</span></div>` : ''}
-                <hr style="border:none; border-top:1px solid #f0f0f0; margin:16px 0;">
-                <!-- Store address -->
-                ${storeAddr ? `<div style="font-size:12px; color:#888; text-align:center; line-height:1.6;">${storeName}<br/>${storeAddr}</div>` : ''}
-                <!-- Footer: matches preview "Powered by Perkfinity" -->
-                <div style="text-align:center; margin-top:12px; font-size:11px; color:#bbb;">Powered by <strong style="color:#5B3FA5;">Perkfinity</strong></div>
-              </div>
-            </div>
-          `;
-
-          // Configure Brevo client
-          let emailApi = null;
-          if (BREVO_KEY) {
-            const brevoClient = SibApiV3Sdk.ApiClient.instance;
-            brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
-            emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-          }
-
-          // Send to each user (Brevo free tier: 300/day)
-          for (const user of users) {
-            // Push Notification Dispatch
-            if (user.push_token) {
-              try {
-                await sendPushNotification(user.push_token, emailSubject, condLine || headline);
-                pushSent++;
-              } catch (pushErr) {
-                pushFailed++;
-              }
-            }
-
-            // Email Dispatch
-            if (emailApi && user.email) {
-              try {
-                const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
-                sendSmtpEmail.sender = { name: storeName, email: 'noreply@perkfinity.net' };
-                sendSmtpEmail.to = [{ email: user.email }];
-                sendSmtpEmail.subject = emailSubject;
-                sendSmtpEmail.htmlContent = emailHtml;
-                await emailApi.sendTransacEmail(sendSmtpEmail);
-                emailSent++;
-              } catch (emailErr) {
-                emailFailed++;
-                console.error(`Brevo email failed for user ${user.id}:`, emailErr.message || emailErr);
-              }
+          // Insert into NotificationQueue for each qualifying user
+          const userIds = qualifyingUsers.map(u => u.user_id);
+          for (const userId of userIds) {
+            try {
+              await sql`
+                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, logo_url, title, body, channels)
+                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel})
+              `;
+              queuedCount++;
+            } catch (queueErr) {
+              console.error(`Queue insert failed for user ${userId}:`, queueErr.message);
             }
           }
         } catch (setupErr) {
-          console.error('Campaign broadcast setup error:', setupErr.message || setupErr);
+          console.error('Campaign queue setup error:', setupErr.message || setupErr);
         }
       }
 
-      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, email_sent: emailSent, push_sent: pushSent, message: `Promotion created and assigned to ${assignedCount} member(s). ${emailSent} email(s) and ${pushSent} push notification(s) sent.` } });
+      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, queued_count: queuedCount, delivery_channel: deliveryChannel, message: `Promotion created and assigned to ${assignedCount} member(s). ${queuedCount} notification(s) queued for daily digest.` } });
     }
 
     // ── POST /api/v1/consumers/apple-signin ────────────────────────
