@@ -93,7 +93,22 @@ async function autoEnrollUser(sql, userId, publicCode) {
       ON CONFLICT DO NOTHING
     `;
 
-    // 2. Assign only welcome campaigns (not merchant-targeted promotions) to new members.
+    // 2. Auto-tier upgrade: check if merchant hit their free member limit
+    try {
+      const [merchant] = await sql`SELECT id, subscription_tier, member_limit FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
+      if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
+        const limit = merchant.member_limit || 10;
+        const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
+        if (countRow && countRow.cnt >= limit) {
+          await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
+          console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 (${countRow.cnt} members, limit was ${limit})`);
+        }
+      }
+    } catch (upgradeErr) {
+      console.error('Auto-tier upgrade check failed:', upgradeErr);
+    }
+
+    // 3. Assign only welcome campaigns (not merchant-targeted promotions) to new members.
     //    Targeted promotions have an AuditLog entry (action='promotion_created');
     //    welcome campaigns created at merchant signup do not.
     await sql`
@@ -214,11 +229,24 @@ module.exports = async function handler(req, res) {
       const now = new Date();
       const oneYear = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
+      // Promo code validation → set member_limit
+      let memberLimit = 10;
+      let promoCode = (data.promo_code || '').trim().toUpperCase();
+      if (promoCode) {
+        const validCodes = { 'MEMBER-15': 15, 'MEMBER-20': 20 };
+        if (!validCodes[promoCode]) {
+          return send(res, 400, { success: false, error: 'Invalid promo code.' });
+        }
+        memberLimit = validCodes[promoCode];
+      } else {
+        promoCode = null;
+      }
+
       // Insert merchant (required fields used directly; optional fields use || '')
       const [merchant] = await sql`
-        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, subscription_tier, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.tier || 'trial'}, 'active', ${now}, ${now})
-        RETURNING id, business_name, subscription_tier
+        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, subscription_tier, member_limit, promo_code, status, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.tier || 'trial'}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
+        RETURNING id, business_name, subscription_tier, member_limit
       `;
 
       // Insert owner user
@@ -1495,6 +1523,13 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: "Task 3 DB fields added!" });
     }
 
+    // ── Promo code + auto-tier migration ──────────────────────────
+    if (url === '/api/v1/migrate-promo' && method === 'GET') {
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "member_limit" INT DEFAULT 10`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "promo_code" TEXT`;
+      return send(res, 200, { success: true, message: "Promo code columns added (member_limit, promo_code)!" });
+    }
+
     if (url === '/api/v1/migrate-task2' && method === 'GET') {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "logo_url" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "city" TEXT`;
@@ -1519,7 +1554,7 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url.endsWith('/admin/merchants')) {
       const merchants = await sql`
         SELECT m.*,
-          (SELECT COUNT(*) FROM "MerchantMemberList" ml WHERE ml.merchant_id = m.id) as member_count,
+          (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.merchant_id = m.id) as member_count,
           (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id) as campaign_count,
           (SELECT COUNT(*) FROM "Redemption" r JOIN "Campaign" c2 ON c2.id = r.campaign_id WHERE c2.merchant_id = m.id AND r.status = 'redeemed') as redemption_count,
           ml2.address as city
@@ -1542,7 +1577,7 @@ module.exports = async function handler(req, res) {
       const members = await sql`
         SELECT u.id, u.email, u.full_name, u.phone_number, u.city, u.zip_code, u.push_token,
           u.created_at, u.last_active,
-          (SELECT COUNT(*) FROM "MerchantMemberList" ml WHERE ml.user_id = u.id) as merchant_count
+          (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.user_id = u.id) as merchant_count
         FROM "User" u
         WHERE u.role IS NULL OR u.role = 'consumer'
         ORDER BY u.created_at DESC
