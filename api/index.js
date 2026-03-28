@@ -1371,6 +1371,7 @@ module.exports = async function handler(req, res) {
                 'status', CASE
                   WHEN c.campaign_type = 'announcement' OR c.discount_percentage = -1 THEN 'Announcement'
                   WHEN r.status = 'redeemed' OR r.redeemed = true THEN 'Redeemed'
+                  WHEN c.end_at IS NOT NULL AND c.end_at < NOW() THEN 'Expired'
                   WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW()) THEN 'Expired'
                   WHEN r.status = 'pending' THEN 'Pending'
                   ELSE 'Created'
@@ -1381,7 +1382,7 @@ module.exports = async function handler(req, res) {
         FROM "MerchantMember" mm
         JOIN "User" u ON u.id = mm.user_id
         LEFT JOIN "Redemption" r ON r.user_id = u.id
-        LEFT JOIN "Campaign" c ON c.id = r.campaign_id AND c.merchant_id = mm.merchant_id AND c.status = 'active'
+        LEFT JOIN "Campaign" c ON c.id = r.campaign_id AND c.merchant_id = mm.merchant_id
         WHERE mm.merchant_id = ${merchantId}
         GROUP BY u.id, u.city, u.zip_code, u.full_name
       `;
@@ -1401,7 +1402,9 @@ module.exports = async function handler(req, res) {
       if (hPayload.merchantId !== hMerchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const history = await sql`
-        SELECT c.id, c.title, c.status, c.start_at, c.end_at, c.created_at,
+        SELECT c.id, c.title,
+               CASE WHEN c.end_at IS NOT NULL AND c.end_at < NOW() THEN 'expired' ELSE c.status END as status,
+               c.start_at, c.end_at, c.created_at,
                (SELECT a.metadata FROM "AuditLog" a
                 WHERE a.target_id = c.id AND a.action = 'promotion_created'
                 ORDER BY a.created_at DESC LIMIT 1) as metadata,
