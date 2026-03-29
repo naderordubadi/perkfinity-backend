@@ -1504,6 +1504,61 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: rows });
     }
 
+    // ── TEMP DEBUG: check notification queue status ────────────────
+    if (url === '/api/v1/debug/notification-queue' && method === 'GET') {
+      const rows = await sql`
+        SELECT nq.id, nq.user_id, u.email, nq.store_name, nq.title, nq.channels, nq.sent, nq.created_at
+        FROM "NotificationQueue" nq
+        JOIN "User" u ON u.id = nq.user_id
+        ORDER BY nq.created_at DESC
+        LIMIT 30
+      `;
+      return send(res, 200, { success: true, data: rows });
+    }
+
+    // ── TEMP DEBUG: test push notification to a specific email ─────
+    if (url === '/api/v1/debug/test-push' && method === 'GET') {
+      const targetEmail = new URL(req.url, 'http://x').searchParams.get('email');
+      if (!targetEmail) return send(res, 400, { success: false, error: 'Provide ?email= parameter' });
+
+      // Check Firebase availability
+      let fbReady = false;
+      try {
+        const fbAdmin = require('firebase-admin');
+        if (process.env.FIREBASE_SERVICE_ACCOUNT && !fbAdmin.apps.length) {
+          let raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+          raw = raw.replace(/\\\\n/g, '\\n');
+          const cert = JSON.parse(raw);
+          if (cert.private_key) cert.private_key = cert.private_key.replace(/\\n/g, '\n');
+          fbAdmin.initializeApp({ credential: fbAdmin.credential.cert(cert) });
+        }
+        fbReady = fbAdmin.apps.length > 0;
+      } catch (fbErr) {
+        return send(res, 500, { success: false, error: 'Firebase init failed', detail: fbErr.message });
+      }
+
+      if (!fbReady) return send(res, 500, { success: false, error: 'Firebase not initialized — check FIREBASE_SERVICE_ACCOUNT env var' });
+
+      const [user] = await sql`SELECT id, email, push_token FROM "User" WHERE email = ${targetEmail}`;
+      if (!user) return send(res, 404, { success: false, error: 'User not found' });
+      if (!user.push_token) return send(res, 400, { success: false, error: 'User has no push token stored', email: user.email });
+
+      try {
+        const fbAdmin = require('firebase-admin');
+        const result = await fbAdmin.messaging().send({
+          token: user.push_token,
+          notification: { title: '🧪 Perkfinity Test', body: 'Push notification is working!' },
+          apns: {
+            headers: { 'apns-priority': '10' },
+            payload: { aps: { alert: { title: '🧪 Perkfinity Test', body: 'Push notification is working!' }, sound: 'default', badge: 1 } }
+          }
+        });
+        return send(res, 200, { success: true, message: 'Push sent successfully', firebase_response: result });
+      } catch (pushErr) {
+        return send(res, 500, { success: false, error: 'Push send failed', detail: pushErr.message, code: pushErr.code });
+      }
+    }
+
     if (url === '/api/v1/update-test-profiles-mission-viejo' && method === 'GET') {
       const addresses = ["1", "2", "3", "4", "5"];
       for (const num of addresses) {
