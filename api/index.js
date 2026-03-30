@@ -1830,6 +1830,75 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ── POST /api/v1/stripe/create-customer-portal ─────────────────
+    if (method === 'POST' && url.endsWith('/stripe/create-customer-portal')) {
+      const data = req.body || {};
+      const merchantId = data.merchant_id;
+      if (!merchantId) return send(res, 400, { success: false, error: 'merchant_id is required' });
+
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      const [merchant] = await sql`SELECT stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      if (!merchant || !merchant.stripe_customer_id) return send(res, 400, { success: false, error: 'No Stripe customer found' });
+
+      try {
+        const portalSession = await stripeClient.billingPortal.sessions.create({
+          customer: merchant.stripe_customer_id,
+          return_url: 'https://perkfinity.net/dashboard.html?tab=billing',
+        });
+        return send(res, 200, { success: true, data: { url: portalSession.url } });
+      } catch (e) {
+        return send(res, 500, { success: false, error: e.message });
+      }
+    }
+
+    // ── POST /api/v1/merchants/:id/billing/cancel ─────────────────
+    const cancelMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/cancel$/);
+    if (method === 'POST' && cancelMatch) {
+      const merchantId = cancelMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      const [merchant] = await sql`SELECT stripe_subscription_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      if (!merchant || !merchant.stripe_subscription_id) {
+        return send(res, 400, { success: false, error: 'No active Stripe subscription found' });
+      }
+
+      try {
+        await stripeClient.subscriptions.update(merchant.stripe_subscription_id, {
+          cancel_at_period_end: true,
+        });
+
+        // Update local state to pending_cancellation so UI knows
+        await sql`
+          UPDATE "Merchant"
+          SET billing_status = 'pending_cancellation'
+          WHERE id = ${merchantId}
+        `;
+
+        return send(res, 200, { success: true, message: 'Subscription will cancel at period end' });
+      } catch (e) {
+        return send(res, 500, { success: false, error: e.message });
+      }
+    }
+
     // ── GET /api/v1/merchants/:id/billing ─────────────────────────
     const billingMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing$/);
     if (method === 'GET' && billingMatch) {
