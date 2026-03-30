@@ -11,6 +11,7 @@
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
     "bcryptjs": "^2.4.3",
+    "dotenv": "^17.3.1",
     "firebase-admin": "^13.7.0",
     "jsonwebtoken": "^9.0.2",
     "sib-api-v3-sdk": "^8.5.0",

@@ -1244,6 +1244,51 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true });
     }
 
+    // ── DELETE /api/v1/consumers/account ────────────────────────────
+    // Permanently deletes the user's PII and removes them from all merchant member lists.
+    // Keeps a shell User row + Redemption rows (anonymized) for merchant analytics.
+    if (method === 'DELETE' && url.endsWith('/consumers/account')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const userId = payload.userId;
+
+      // 1. Delete notification history (no value after account deletion)
+      await sql`DELETE FROM "NotificationHistory" WHERE user_id = ${userId}`;
+
+      // 2. Delete pending notification queue entries
+      await sql`DELETE FROM "NotificationQueue" WHERE user_id = ${userId}`;
+
+      // 3. Remove from all merchant member lists (member count drops accurately)
+      await sql`DELETE FROM "MerchantMember" WHERE user_id = ${userId}`;
+
+      // 4. Null out ALL personally identifiable information on the User row
+      //    Keep the row as a shell so Redemption foreign keys stay valid
+      await sql`
+        UPDATE "User" SET
+          email = NULL,
+          full_name = NULL,
+          phone_number = NULL,
+          city = NULL,
+          zip_code = NULL,
+          password_hash = NULL,
+          push_token = NULL,
+          google_id = NULL,
+          apple_sub = NULL,
+          location_sharing_enabled = false,
+          push_notifications_enabled = false,
+          reset_token = NULL,
+          reset_expires_at = NULL
+        WHERE id = ${userId}
+      `;
+
+      console.log(`[DELETE ACCOUNT] User ${userId} account data purged successfully`);
+      return send(res, 200, { success: true, message: 'Account deleted successfully' });
+    }
+
     // ── POST /api/v1/campaigns/:id/activate ───────────────────────
     const activateMatch = url.match(/\/api\/v1\/campaigns\/([a-zA-Z0-9_-]+)\/activate/);
     if (method === 'POST' && activateMatch) {
