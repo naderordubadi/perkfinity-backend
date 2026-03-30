@@ -181,6 +181,34 @@ module.exports = async (req, res) => {
       for (const item of items) {
         processedIds.push(item.id);
       }
+
+      // ── Persist to NotificationHistory for in-app viewing ────────
+      const offerCount = items.length;
+      const histTitle = offerCount === 1
+        ? `New perk from ${items[0].store_name}`
+        : `${offerCount} new perks from your local stores`;
+      const histBody = offerCount === 1
+        ? items[0].title
+        : items.map(i => `${i.store_name}: ${i.title}`).join(' • ');
+      const histPayload = JSON.stringify(items.map(i => ({
+        store_name: i.store_name,
+        logo_url: i.logo_url || null,
+        title: i.title,
+        body: i.body || null,
+        store_address: i.store_address || null,
+        campaign_id: i.campaign_id,
+        merchant_id: i.merchant_id,
+        offer_expires_at: i.offer_expires_at || null,
+      })));
+      try {
+        await sql`
+          INSERT INTO "NotificationHistory" (user_id, title, body, type, payload)
+          VALUES (${userId}, ${histTitle}, ${histBody}, ${offerCount === 1 ? 'single' : 'digest'}, ${histPayload}::jsonb)
+        `;
+      } catch (histErr) {
+        console.error(`Failed to persist NotificationHistory for user ${userId}:`, histErr.message || histErr);
+      }
+
       totalUsersProcessed++;
     }
 

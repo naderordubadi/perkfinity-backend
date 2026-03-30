@@ -488,6 +488,20 @@ module.exports = async function handler(req, res) {
       `;
       await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "store_address" TEXT`;
       await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "offer_expires_at" TIMESTAMPTZ`;
+      // -- Notification History: persists sent notifications for in-app viewing --
+      await sql`
+        CREATE TABLE IF NOT EXISTS "NotificationHistory" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          user_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT,
+          type TEXT NOT NULL DEFAULT 'digest',
+          payload JSONB DEFAULT '[]'::jsonb,
+          read BOOLEAN DEFAULT false,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS idx_notif_history_user ON "NotificationHistory" (user_id, created_at DESC)`;
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -1182,6 +1196,52 @@ module.exports = async function handler(req, res) {
 
       await sql`UPDATE "User" SET push_token = ${data.token} WHERE id = ${payload.userId}`;
       return send(res, 200, { success: true, message: 'Push token registered successfully' });
+    }
+
+    // ── GET /api/v1/consumers/notifications ────────────────────────
+    if (method === 'GET' && url.endsWith('/consumers/notifications')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const notifications = await sql`
+        SELECT id, title, body, type, payload, read, created_at
+        FROM "NotificationHistory"
+        WHERE user_id = ${payload.userId}
+        ORDER BY created_at DESC
+        LIMIT 50
+      `;
+      const unreadCount = notifications.filter(n => !n.read).length;
+      return send(res, 200, { success: true, data: notifications, unread_count: unreadCount });
+    }
+
+    // ── POST /api/v1/consumers/notifications/read ──────────────────
+    if (method === 'POST' && url.endsWith('/consumers/notifications/read')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const data = req.body || {};
+      if (!data.id) return send(res, 400, { success: false, error: 'Missing notification id' });
+
+      await sql`UPDATE "NotificationHistory" SET read = true WHERE id = ${data.id} AND user_id = ${payload.userId}`;
+      return send(res, 200, { success: true });
+    }
+
+    // ── POST /api/v1/consumers/notifications/read-all ──────────────
+    if (method === 'POST' && url.endsWith('/consumers/notifications/read-all')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      await sql`UPDATE "NotificationHistory" SET read = true WHERE user_id = ${payload.userId} AND read = false`;
+      return send(res, 200, { success: true });
     }
 
     // ── POST /api/v1/campaigns/:id/activate ───────────────────────
