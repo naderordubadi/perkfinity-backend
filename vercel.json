@@ -12,6 +12,7 @@
   ],
   "rewrites": [
     { "source": "/api/cron/(.*)", "destination": "/api/cron/$1" },
+    { "source": "/api/webhooks/stripe", "destination": "/api/webhooks/stripe" },
     { "source": "/(.*)", "destination": "/api/index.js" }
   ]
 }

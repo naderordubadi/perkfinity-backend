@@ -8,6 +8,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const SibApiV3Sdk = require('sib-api-v3-sdk');
+const Stripe = require('stripe');
 
 // ── Firebase Admin Init ──────────────────────────────────────────
 const admin = require('firebase-admin');
@@ -94,14 +95,46 @@ async function autoEnrollUser(sql, userId, publicCode) {
     `;
 
     // 2. Auto-tier upgrade: check if merchant hit their free member limit
+    //    If they have a saved payment method, auto-charge via Stripe.
     try {
-      const [merchant] = await sql`SELECT id, subscription_tier, member_limit FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
+      const [merchant] = await sql`SELECT id, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
       if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
         const limit = merchant.member_limit || 10;
         const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
         if (countRow && countRow.cnt >= limit) {
-          await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
-          console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 (${countRow.cnt} members, limit was ${limit})`);
+          // If merchant has a saved payment method, create a Stripe subscription automatically
+          const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+          const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
+          if (STRIPE_KEY && PRICE_ID && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
+            try {
+              const stripeClient = Stripe(STRIPE_KEY);
+              const subscription = await stripeClient.subscriptions.create({
+                customer: merchant.stripe_customer_id,
+                items: [{ price: PRICE_ID }],
+                default_payment_method: merchant.stripe_payment_method_id,
+                metadata: { merchant_id: merchant.id }
+              });
+              await sql`
+                UPDATE "Merchant" 
+                SET subscription_tier = 'tier1', 
+                    stripe_subscription_id = ${subscription.id},
+                    billing_status = 'active',
+                    subscription_started_at = NOW(),
+                    next_billing_date = NOW() + INTERVAL '30 days',
+                    updated_at = NOW() 
+                WHERE id = ${qrData.merchant_id}
+              `;
+              console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 via Stripe (${countRow.cnt} members, limit was ${limit})`);
+            } catch (stripeErr) {
+              console.error(`Stripe auto-charge failed for merchant ${qrData.merchant_id}:`, stripeErr.message);
+              // Still upgrade tier in DB so they aren't stuck, but flag billing as failed
+              await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
+            }
+          } else {
+            // No Stripe setup — just upgrade tier (legacy behavior)
+            await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
+            console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 (no Stripe — legacy) (${countRow.cnt} members, limit was ${limit})`);
+          }
         }
       }
     } catch (upgradeErr) {
@@ -1673,6 +1706,272 @@ module.exports = async function handler(req, res) {
           stats: { total: campaigns.length, active, redemptions: totalRedemptions, redemption_rate: rate }
         }
       });
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // STRIPE BILLING ENDPOINTS
+    // ══════════════════════════════════════════════════════════════
+
+    // ── DB Migration: Stripe billing columns ─────────────────────
+    if (url === '/api/v1/migrate-stripe' && method === 'GET') {
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "stripe_customer_id" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "stripe_subscription_id" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "stripe_payment_method_id" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "subscription_started_at" TIMESTAMPTZ`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "next_billing_date" TIMESTAMPTZ`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "billing_status" TEXT DEFAULT 'none'`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "account_blocked" BOOLEAN DEFAULT false`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS "Invoice" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          merchant_id TEXT NOT NULL REFERENCES "Merchant"(id),
+          stripe_invoice_id TEXT UNIQUE,
+          amount_cents INTEGER NOT NULL DEFAULT 2999,
+          currency TEXT DEFAULT 'usd',
+          status TEXT DEFAULT 'pending',
+          period_start TIMESTAMPTZ,
+          period_end TIMESTAMPTZ,
+          paid_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `;
+      return send(res, 200, { success: true, message: 'Stripe billing DB migration complete!' });
+    }
+
+    // ── POST /api/v1/stripe/create-setup-intent (Trial merchants) ─
+    if (method === 'POST' && url.endsWith('/stripe/create-setup-intent')) {
+      const data = req.body || {};
+      const merchantId = data.merchant_id;
+      if (!merchantId) return send(res, 400, { success: false, error: 'merchant_id is required' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      // Look up the merchant
+      const [merchant] = await sql`SELECT id, business_name, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+
+      // Get merchant email
+      const [merchantUser] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${merchantId} LIMIT 1`;
+
+      // Create or reuse Stripe customer
+      let customerId = merchant.stripe_customer_id;
+      if (!customerId) {
+        const customer = await stripeClient.customers.create({
+          name: merchant.business_name,
+          email: merchantUser?.email || undefined,
+          metadata: { merchant_id: merchantId }
+        });
+        customerId = customer.id;
+        await sql`UPDATE "Merchant" SET stripe_customer_id = ${customerId} WHERE id = ${merchantId}`;
+      }
+
+      // Create Setup Intent
+      const setupIntent = await stripeClient.setupIntents.create({
+        customer: customerId,
+        payment_method_types: ['card'],
+        metadata: { merchant_id: merchantId }
+      });
+
+      return send(res, 200, {
+        success: true,
+        data: {
+          client_secret: setupIntent.client_secret,
+          customer_id: customerId
+        }
+      });
+    }
+
+    // ── POST /api/v1/stripe/create-checkout-session (Tier 1) ──────
+    if (method === 'POST' && url.endsWith('/stripe/create-checkout-session')) {
+      const data = req.body || {};
+      const merchantId = data.merchant_id;
+      if (!merchantId) return send(res, 400, { success: false, error: 'merchant_id is required' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
+      if (!STRIPE_KEY || !PRICE_ID) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      const [merchant] = await sql`SELECT id, business_name, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+
+      const [merchantUser] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${merchantId} LIMIT 1`;
+
+      let customerId = merchant.stripe_customer_id;
+      if (!customerId) {
+        const customer = await stripeClient.customers.create({
+          name: merchant.business_name,
+          email: merchantUser?.email || undefined,
+          metadata: { merchant_id: merchantId }
+        });
+        customerId = customer.id;
+        await sql`UPDATE "Merchant" SET stripe_customer_id = ${customerId} WHERE id = ${merchantId}`;
+      }
+
+      // Create Checkout Session for $29.99/mo subscription
+      const session = await stripeClient.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ['card'],
+        line_items: [{ price: PRICE_ID, quantity: 1 }],
+        mode: 'subscription',
+        success_url: `https://perkfinity.net/signup.html?payment=success&merchant_id=${merchantId}`,
+        cancel_url: `https://perkfinity.net/signup.html?payment=cancelled&merchant_id=${merchantId}`,
+        metadata: { merchant_id: merchantId }
+      });
+
+      return send(res, 200, {
+        success: true,
+        data: {
+          checkout_url: session.url,
+          session_id: session.id
+        }
+      });
+    }
+
+    // ── GET /api/v1/merchants/:id/billing ─────────────────────────
+    const billingMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing$/);
+    if (method === 'GET' && billingMatch) {
+      const merchantId = billingMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const [merchant] = await sql`
+        SELECT id, business_name, subscription_tier, billing_status, account_blocked,
+               stripe_customer_id, stripe_subscription_id, subscription_started_at,
+               next_billing_date, member_limit
+        FROM "Merchant"
+        WHERE id = ${merchantId}
+        LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+
+      // Get member count
+      const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${merchantId}`;
+
+      // Get invoice history
+      const invoices = await sql`
+        SELECT id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at
+        FROM "Invoice"
+        WHERE merchant_id = ${merchantId}
+        ORDER BY created_at DESC
+        LIMIT 20
+      `;
+
+      return send(res, 200, {
+        success: true,
+        data: {
+          tier: merchant.subscription_tier,
+          billing_status: merchant.billing_status || 'none',
+          account_blocked: merchant.account_blocked || false,
+          member_count: countRow?.cnt || 0,
+          member_limit: merchant.member_limit || 10,
+          subscription_started_at: merchant.subscription_started_at,
+          next_billing_date: merchant.next_billing_date,
+          has_stripe: !!merchant.stripe_customer_id,
+          has_subscription: !!merchant.stripe_subscription_id,
+          invoices
+        }
+      });
+    }
+
+    // ── POST /api/v1/merchants/:id/billing/reactivate ─────────────
+    const reactivateMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/reactivate$/);
+    if (method === 'POST' && reactivateMatch) {
+      const merchantId = reactivateMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
+      if (!STRIPE_KEY || !PRICE_ID) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      const [merchant] = await sql`
+        SELECT id, stripe_customer_id, stripe_payment_method_id
+        FROM "Merchant"
+        WHERE id = ${merchantId}
+        LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (!merchant.stripe_customer_id || !merchant.stripe_payment_method_id) {
+        return send(res, 400, { success: false, error: 'No payment method on file. Please update your payment method first.' });
+      }
+
+      try {
+        const subscription = await stripeClient.subscriptions.create({
+          customer: merchant.stripe_customer_id,
+          items: [{ price: PRICE_ID }],
+          default_payment_method: merchant.stripe_payment_method_id,
+          metadata: { merchant_id: merchantId }
+        });
+
+        await sql`
+          UPDATE "Merchant"
+          SET subscription_tier = 'tier1',
+              stripe_subscription_id = ${subscription.id},
+              billing_status = 'active',
+              account_blocked = false,
+              subscription_started_at = NOW(),
+              next_billing_date = NOW() + INTERVAL '30 days',
+              updated_at = NOW()
+          WHERE id = ${merchantId}
+        `;
+
+        return send(res, 200, { success: true, message: 'Subscription reactivated successfully!' });
+      } catch (stripeErr) {
+        return send(res, 400, { success: false, error: `Reactivation failed: ${stripeErr.message}` });
+      }
+    }
+
+    // ── DELETE /api/v1/merchants/:id/abandon ──────────────────────
+    const abandonMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/abandon$/);
+    if ((method === 'DELETE' || method === 'POST') && abandonMatch) {
+      const merchantId = abandonMatch[1];
+
+      // Safety: only delete if no payment method attached
+      const [merchant] = await sql`
+        SELECT id, stripe_customer_id, stripe_payment_method_id
+        FROM "Merchant"
+        WHERE id = ${merchantId}
+        LIMIT 1
+      `;
+
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchant.stripe_payment_method_id) {
+        return send(res, 400, { success: false, error: 'Cannot abandon — payment method already attached' });
+      }
+
+      // Delete Stripe customer if created
+      if (merchant.stripe_customer_id) {
+        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+        if (STRIPE_KEY) {
+          try {
+            const stripeClient = Stripe(STRIPE_KEY);
+            await stripeClient.customers.del(merchant.stripe_customer_id);
+          } catch (delErr) {
+            console.error('Failed to delete Stripe customer:', delErr.message);
+          }
+        }
+      }
+
+      // Delete all related data
+      await sql`DELETE FROM "QrCode" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "Campaign" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "MerchantLocation" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "MerchantUser" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "Merchant" WHERE id = ${merchantId}`;
+
+      return send(res, 200, { success: true, message: 'Abandoned signup cleaned up' });
     }
 
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
