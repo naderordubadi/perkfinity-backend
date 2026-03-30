@@ -67,6 +67,8 @@ async function sendPushNotification(token, title, body) {
 const ALLOWED_ORIGINS = [
   'https://perkfinity.net',
   'https://www.perkfinity.net',
+  'https://app.perkfinity.net',
+  'https://perkfinity-app.vercel.app',  // legacy — keep for backwards compat
   'capacitor://localhost',   // Capacitor iOS WKWebView origin
   'https://localhost',       // Capacitor iOS fallback
   'null', // Allows local file:// based HTML testing
@@ -325,7 +327,7 @@ module.exports = async function handler(req, res) {
           merchantUser,
           accessToken,
           qr_public_code: public_code,
-          qr_url: `https://perkfinity-app.vercel.app/qr/${public_code}`,
+          qr_url: `https://app.perkfinity.net/qr/${public_code}`,
         }
       });
     }
@@ -666,7 +668,7 @@ module.exports = async function handler(req, res) {
       `;
 
       merchantData.qr_public_code = qrData ? qrData.public_code : null;
-      merchantData.qr_url = qrData ? `https://perkfinity-app.vercel.app/qr/${qrData.public_code}` : null;
+      merchantData.qr_url = qrData ? `https://app.perkfinity.net/qr/${qrData.public_code}` : null;
       merchantData.perk = campaignData ? campaignData.title : 'Welcome Perk';
 
       return send(res, 200, { success: true, data: merchantData });
