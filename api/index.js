@@ -1913,7 +1913,7 @@ module.exports = async function handler(req, res) {
       const [merchant] = await sql`
         SELECT id, business_name, subscription_tier, billing_status, account_blocked,
                stripe_customer_id, stripe_subscription_id, subscription_started_at,
-               next_billing_date, member_limit
+               next_billing_date, member_limit, created_at
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -1942,6 +1942,7 @@ module.exports = async function handler(req, res) {
           member_limit: merchant.member_limit || 10,
           subscription_started_at: merchant.subscription_started_at,
           next_billing_date: merchant.next_billing_date,
+          created_at: merchant.created_at,
           has_stripe: !!merchant.stripe_customer_id,
           has_subscription: !!merchant.stripe_subscription_id,
           invoices
