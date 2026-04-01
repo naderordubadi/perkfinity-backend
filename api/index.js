@@ -280,7 +280,7 @@ module.exports = async function handler(req, res) {
       // Insert merchant (required fields used directly; optional fields use || '')
       const [merchant] = await sql`
         INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, pos_system, subscription_tier, member_limit, promo_code, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || null}, ${data.tier || 'trial'}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${data.tier || 'trial'}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
         RETURNING id, business_name, subscription_tier, member_limit
       `;
 
