@@ -242,7 +242,9 @@ module.exports = async (req, res) => {
           break;
         }
 
-        if (subscription.cancel_at_period_end === true && merchant.billing_status !== 'pending_cancellation') {
+        const isCancelling = subscription.cancel_at_period_end === true || subscription.cancel_at !== null;
+
+        if (isCancelling && merchant.billing_status !== 'pending_cancellation') {
           // Merchant initiated cancellation (via Stripe portal or our app)
           await sql`
             UPDATE "Merchant"
@@ -250,8 +252,8 @@ module.exports = async (req, res) => {
                 updated_at = NOW()
             WHERE id = ${merchant.id}
           `;
-          console.log(`[Stripe] Merchant ${merchant.id} (${merchant.business_name}) — cancellation pending (cancel_at_period_end set)`);
-        } else if (subscription.cancel_at_period_end === false && merchant.billing_status === 'pending_cancellation') {
+          console.log(`[Stripe] Merchant ${merchant.id} (${merchant.business_name}) — cancellation pending (cancel_at set)`);
+        } else if (!isCancelling && merchant.billing_status === 'pending_cancellation') {
           // Merchant reversed cancellation (un-cancelled via Stripe portal)
           await sql`
             UPDATE "Merchant"
