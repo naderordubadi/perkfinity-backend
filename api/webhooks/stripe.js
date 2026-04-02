@@ -153,7 +153,7 @@ module.exports = async (req, res) => {
 
         // Find the merchant by stripe_customer_id
         const [merchant] = await sql`
-          SELECT id, business_name FROM "Merchant"
+          SELECT id, business_name, account_blocked, stripe_subscription_id FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
@@ -163,15 +163,21 @@ module.exports = async (req, res) => {
           break;
         }
 
-        // Update billing status
-        await sql`
-          UPDATE "Merchant"
-          SET billing_status = 'active',
-              account_blocked = false,
-              next_billing_date = NOW() + INTERVAL '30 days',
-              updated_at = NOW()
-          WHERE id = ${merchant.id}
-        `;
+        // If merchant is fully blocked (subscription was deleted) and has no active subscription attached,
+        // do not unblock them just because an old invoice cleared.
+        if (merchant.account_blocked && !merchant.stripe_subscription_id) {
+          console.log(`[Stripe] Late invoice cleared for permanently cancelled merchant ${merchant.id}. Keeping blocked status.`);
+        } else {
+          // Update billing status for active/past_due subscriptions
+          await sql`
+            UPDATE "Merchant"
+            SET billing_status = 'active',
+                account_blocked = false,
+                next_billing_date = NOW() + INTERVAL '30 days',
+                updated_at = NOW()
+            WHERE id = ${merchant.id}
+          `;
+        }
 
         // Record in Invoice table
         await sql`
