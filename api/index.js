@@ -129,8 +129,8 @@ async function autoEnrollUser(sql, userId, publicCode) {
               console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 via Stripe (${countRow.cnt} members, limit was ${limit})`);
             } catch (stripeErr) {
               console.error(`Stripe auto-charge failed for merchant ${qrData.merchant_id}:`, stripeErr.message);
-              // Still upgrade tier in DB so they aren't stuck, but flag billing as failed
-              await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
+              // Upgrade tier but heavily block account due to failed payment
+              await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', account_blocked = true, updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
             }
           } else {
             // No Stripe setup — just upgrade tier (legacy behavior)
@@ -557,7 +557,10 @@ module.exports = async function handler(req, res) {
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
 
-      const [merchant] = await sql`SELECT id, business_name, logo_url FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is inactive' });
+
       const [location] = await sql`SELECT address, city, state, postal_code FROM "MerchantLocation" WHERE merchant_id = ${qrCode.merchant_id} AND is_active = true LIMIT 1`;
 
       let campaigns = [];
@@ -700,6 +703,9 @@ module.exports = async function handler(req, res) {
 
       const targetMerchantId = promoMatch[1];
       if (decoded.merchantId !== targetMerchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const [merchantGuard] = await sql`SELECT account_blocked FROM "Merchant" WHERE id = ${targetMerchantId} LIMIT 1`;
+      if (merchantGuard?.account_blocked) return send(res, 403, { success: false, error: 'Account suspended. Reactivate your subscription to create campaigns.' });
 
       const data = req.body || {};
       if (!data.title || !data.type || !data.delivery || !data.audience) {
