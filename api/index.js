@@ -2120,6 +2120,43 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ── DELETE /api/v1/merchants/account ──────────────────────────
+    if (method === 'DELETE' && url.includes('/api/v1/merchants/account')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const merchantId = payload.merchantId;
+      const data = req.body || {};
+      if (!data.password) return send(res, 400, { success: false, error: 'Password is required' });
+
+      // Password Check
+      const [user] = await sql`SELECT id, password_hash FROM "MerchantUser" WHERE id = ${payload.userId} LIMIT 1`;
+      if (!user || !(await bcrypt.compare(data.password, user.password_hash))) {
+        return send(res, 401, { success: false, error: 'Incorrect password' });
+      }
+
+      // Check Billing Dependency Lock
+      const [merchant] = await sql`SELECT billing_status, account_blocked FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      
+      const st = merchant.billing_status;
+      // Protect active Stripe subscriptions from getting ghosted in DB
+      if (st === 'active' || st === 'payment_failed') {
+         return send(res, 403, { success: false, error: 'Forbidden. You must cancel your active subscription first.' });
+      }
+
+      // Safe to Wipe PII
+      await sql`UPDATE "MerchantUser" SET email = NULL, password_hash = NULL WHERE id = ${payload.userId}`;
+      await sql`UPDATE "Merchant" SET business_name = NULL, contact_name = NULL, phone = NULL, website = NULL, logo_url = NULL WHERE id = ${merchantId}`;
+      await sql`UPDATE "MerchantLocation" SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL WHERE merchant_id = ${merchantId}`;
+
+      return send(res, 200, { success: true, message: 'Account wiped successfully' });
+    }
+
     // ── DELETE /api/v1/merchants/:id/abandon ──────────────────────
     const abandonMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/abandon$/);
     if ((method === 'DELETE' || method === 'POST') && abandonMatch) {
