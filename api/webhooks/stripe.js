@@ -43,12 +43,17 @@ module.exports = async (req, res) => {
 
   let event;
 
+  // Read raw body from request stream (required with bodyParser: false on Vercel)
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  }
+  const rawBody = Buffer.concat(chunks);
+
   // Verify webhook signature if secret is set
   if (STRIPE_WEBHOOK_SECRET) {
     const sig = req.headers['stripe-signature'];
     try {
-      // Vercel provides raw body as a Buffer when we set the right config
-      const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
       event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
     } catch (err) {
       console.error('Webhook signature verification failed:', err.message);
@@ -56,7 +61,7 @@ module.exports = async (req, res) => {
     }
   } else {
     // In test mode without webhook secret, just parse the event
-    event = req.body;
+    event = JSON.parse(rawBody.toString());
     console.warn('⚠️ STRIPE_WEBHOOK_SECRET not set — skipping signature verification');
   }
 
