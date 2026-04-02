@@ -113,7 +113,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
               const subscription = await stripeClient.subscriptions.create({
                 customer: merchant.stripe_customer_id,
                 items: [{ price: PRICE_ID }],
-                default_payment_method: merchant.stripe_payment_method_id,
+                // Omit default_payment_method so Stripe safely falls back to the customer's portal-managed default card
                 metadata: { merchant_id: merchant.id }
               });
               await sql`
