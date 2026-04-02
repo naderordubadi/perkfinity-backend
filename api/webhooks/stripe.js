@@ -5,11 +5,12 @@
  * Deployed as a separate Vercel serverless function at /api/webhooks/stripe
  * 
  * Events handled:
- *   checkout.session.completed  — Tier 1 immediate signup charge succeeded
- *   setup_intent.succeeded      — Trial merchant saved card
- *   invoice.payment_succeeded   — Monthly recurring payment succeeded
- *   invoice.payment_failed      — Payment failed (retry will happen automatically)
- *   customer.subscription.deleted — Subscription cancelled → FULL BLOCK
+ *   checkout.session.completed     — Tier 1 immediate signup charge succeeded
+ *   setup_intent.succeeded         — Trial merchant saved card
+ *   invoice.payment_succeeded      — Monthly recurring payment succeeded
+ *   invoice.payment_failed         — Payment failed (retry will happen automatically)
+ *   customer.subscription.updated  — Detects cancel_at_period_end (portal or app) → pending_cancellation
+ *   customer.subscription.deleted  — Subscription cancelled → FULL BLOCK
  */
 
 const Stripe = require('stripe');
@@ -213,6 +214,48 @@ module.exports = async (req, res) => {
         `;
 
         console.warn(`[Stripe] Payment FAILED for merchant ${merchant.id} (${merchant.business_name})`);
+        break;
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // SUBSCRIPTION UPDATED — Detects cancel_at_period_end changes
+      // Fires when merchant cancels via Stripe portal or our app sets cancel_at_period_end
+      // Also fires if merchant un-cancels from the portal
+      // ═══════════════════════════════════════════════════════════
+      case 'customer.subscription.updated': {
+        const subscription = event.data.object;
+        const customerId = subscription.customer;
+
+        const [merchant] = await sql`
+          SELECT id, business_name, billing_status FROM "Merchant"
+          WHERE stripe_customer_id = ${customerId}
+          LIMIT 1
+        `;
+
+        if (!merchant) {
+          console.warn(`customer.subscription.updated: No merchant found for customer ${customerId}`);
+          break;
+        }
+
+        if (subscription.cancel_at_period_end === true && merchant.billing_status !== 'pending_cancellation') {
+          // Merchant initiated cancellation (via Stripe portal or our app)
+          await sql`
+            UPDATE "Merchant"
+            SET billing_status = 'pending_cancellation',
+                updated_at = NOW()
+            WHERE id = ${merchant.id}
+          `;
+          console.log(`[Stripe] Merchant ${merchant.id} (${merchant.business_name}) — cancellation pending (cancel_at_period_end set)`);
+        } else if (subscription.cancel_at_period_end === false && merchant.billing_status === 'pending_cancellation') {
+          // Merchant reversed cancellation (un-cancelled via Stripe portal)
+          await sql`
+            UPDATE "Merchant"
+            SET billing_status = 'active',
+                updated_at = NOW()
+            WHERE id = ${merchant.id}
+          `;
+          console.log(`[Stripe] Merchant ${merchant.id} (${merchant.business_name}) — cancellation reversed, back to active`);
+        }
         break;
       }
 
