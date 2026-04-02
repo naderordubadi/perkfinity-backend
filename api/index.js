@@ -88,7 +88,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
   try {
     const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${publicCode} AND status = 'active'`;
     if (!qrData) return;
-    
+
     // 1. Add to member list
     await sql`
       INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
@@ -224,15 +224,15 @@ module.exports = async function handler(req, res) {
 
       // Validate all required fields
       const missing = [];
-      if (!data.name)        missing.push('Store Name');
+      if (!data.name) missing.push('Store Name');
       if (!data.contactName) missing.push('Contact Name');
-      if (!data.phone)       missing.push('Phone Number');
-      if (!data.email)       missing.push('Email');
-      if (!data.password)    missing.push('Password');
-      if (!data.address)     missing.push('Street Address');
-      if (!data.city)        missing.push('City');
-      if (!data.state)       missing.push('State');
-      if (!data.zip)         missing.push('ZIP Code');
+      if (!data.phone) missing.push('Phone Number');
+      if (!data.email) missing.push('Email');
+      if (!data.password) missing.push('Password');
+      if (!data.address) missing.push('Street Address');
+      if (!data.city) missing.push('City');
+      if (!data.state) missing.push('State');
+      if (!data.zip) missing.push('ZIP Code');
 
       if (missing.length > 0) {
         return send(res, 400, { success: false, error: `Missing required fields: ${missing.join(', ')}` });
@@ -369,7 +369,7 @@ module.exports = async function handler(req, res) {
 
       // Find the merchant user
       const [user] = await sql`SELECT id, merchant_id, role FROM "MerchantUser" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
-      
+
       if (user) {
         // Generate a fast token
         const rawToken = crypto.randomBytes(32).toString('hex');
@@ -389,14 +389,14 @@ module.exports = async function handler(req, res) {
             const brevoClient = SibApiV3Sdk.ApiClient.instance;
             brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
             const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-            
+
             const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
             sendSmtpEmail.sender = { name: 'Perkfinity', email: 'noreply@perkfinity.net' };
             sendSmtpEmail.to = [{ email: data.email.toLowerCase() }];
             sendSmtpEmail.subject = 'Reset your Perkfinity Password';
-            
+
             const resetLink = `https://perkfinity.net/reset-password.html?token=${rawToken}`;
-            
+
             sendSmtpEmail.htmlContent = `
               <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
                 <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
@@ -414,7 +414,7 @@ module.exports = async function handler(req, res) {
                 </div>
               </div>
             `;
-            
+
             await emailApi.sendTransacEmail(sendSmtpEmail);
           } catch (brevoErr) {
             console.error('Brevo reset email failed:', brevoErr.message || brevoErr);
@@ -647,11 +647,11 @@ module.exports = async function handler(req, res) {
       const merchantId = getProfileMatch[1];
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
-      
+
       let payload;
-      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
-      
+
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
@@ -662,16 +662,16 @@ module.exports = async function handler(req, res) {
         WHERE m.id = ${merchantId} AND u.id = ${payload.userId}
         LIMIT 1
       `;
-      
+
       if (!merchantData) return send(res, 404, { success: false, error: 'Profile not found' });
-      
+
       // Fetch associated active QR code
       const [qrData] = await sql`
         SELECT public_code FROM "QrCode"
         WHERE merchant_id = ${merchantId} AND status = 'active'
         LIMIT 1
       `;
-      
+
       // Fetch associated welcome (or active) campaign perk
       const [campaignData] = await sql`
         SELECT title FROM "Campaign"
@@ -696,7 +696,7 @@ module.exports = async function handler(req, res) {
       if (!auth || !auth.startsWith('Bearer ')) return send(res, 401, { success: false, error: 'Unauthorized' });
       const JWT_SECRET = process.env.JWT_SECRET;
       let decoded;
-      try { decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET); } catch(e) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      try { decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET); } catch (e) { return send(res, 401, { success: false, error: 'Invalid token' }); }
 
       const targetMerchantId = promoMatch[1];
       if (decoded.merchantId !== targetMerchantId) return send(res, 403, { success: false, error: 'Forbidden' });
@@ -958,9 +958,9 @@ module.exports = async function handler(req, res) {
     if (method === 'POST' && url.endsWith('/consumers/signup')) {
       const data = req.body || {};
       if (!data.email || !data.password) return send(res, 400, { success: false, error: 'Missing email or password' });
-      
+
       const [existing] = await sql`SELECT id, password_hash FROM "User" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
-      
+
       if (existing) {
         if (existing.password_hash) {
           // User already fully signed up — suggest login
@@ -974,19 +974,19 @@ module.exports = async function handler(req, res) {
         await autoEnrollUser(sql, existing.id, data.qrCode);
         return send(res, 200, { success: true, data: { user: { id: existing.id, email: data.email.toLowerCase() }, accessToken: token } });
       }
-      
+
       const hash = await bcrypt.hash(data.password, 12);
       const [user] = await sql`
         INSERT INTO "User" (id, email, password_hash, created_at, last_active)
         VALUES (gen_random_uuid()::text, ${data.email.toLowerCase()}, ${hash}, NOW(), NOW())
         RETURNING id, email
       `;
-      
+
       const JWT_SECRET = process.env.JWT_SECRET;
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
-      
+
       await autoEnrollUser(sql, user.id, data.qrCode);
-      
+
       return send(res, 201, { success: true, data: { user, accessToken: token } });
     }
 
@@ -994,18 +994,18 @@ module.exports = async function handler(req, res) {
     if (method === 'POST' && url.endsWith('/consumers/login')) {
       const data = req.body || {};
       if (!data.email || !data.password) return send(res, 400, { success: false, error: 'Missing credentials' });
-      
+
       const [user] = await sql`SELECT * FROM "User" WHERE email = ${data.email.toLowerCase()} LIMIT 1`;
       if (!user || !(await bcrypt.compare(data.password, user.password_hash))) {
         return send(res, 401, { success: false, error: 'Invalid credentials' });
       }
-      
+
       await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
       const JWT_SECRET = process.env.JWT_SECRET;
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
-      
+
       await autoEnrollUser(sql, user.id, data.qrCode);
-      
+
       const { password_hash: _pw, ...safeUser } = user;
       return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
     }
@@ -1034,14 +1034,14 @@ module.exports = async function handler(req, res) {
             const brevoClient = SibApiV3Sdk.ApiClient.instance;
             brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
             const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-            
+
             const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
             sendSmtpEmail.sender = { name: 'Perkfinity', email: 'noreply@perkfinity.net' };
             sendSmtpEmail.to = [{ email: data.email.toLowerCase() }];
             sendSmtpEmail.subject = 'Reset your Perkfinity Member Password';
-            
+
             const resetLink = `https://perkfinity.net/member-reset-password.html?token=${rawToken}`;
-            
+
             sendSmtpEmail.htmlContent = `
               <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
                 <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
@@ -1059,7 +1059,7 @@ module.exports = async function handler(req, res) {
                 </div>
               </div>
             `;
-            
+
             await emailApi.sendTransacEmail(sendSmtpEmail);
             console.log(`[FORGOT-PASSWORD] Member reset email sent for: ${user.email}`);
           } catch (brevoErr) {
@@ -1105,11 +1105,11 @@ module.exports = async function handler(req, res) {
     if (method === 'PUT' && url.endsWith('/consumers/profile')) {
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
-      
+
       let payload;
-      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
-      
+
       const data = req.body || {};
       const [user] = await sql`
         UPDATE "User"
@@ -1128,11 +1128,11 @@ module.exports = async function handler(req, res) {
 
     // ── GET /api/v1/consumers/campaigns ───────────────────────────
     if (method === 'GET' && url.endsWith('/consumers/campaigns')) {
-       // Optional: This could be protected, but since it's just available merchants/campaigns, 
-       // keeping it public or semi-public is often fine. Here we assume we just return 
-       // active merchants and their active campaigns.
-       
-       const campaigns = await sql`
+      // Optional: This could be protected, but since it's just available merchants/campaigns, 
+      // keeping it public or semi-public is often fine. Here we assume we just return 
+      // active merchants and their active campaigns.
+
+      const campaigns = await sql`
          SELECT DISTINCT ON (m.id)
            m.id as id,
            m.business_name as merchant_name,
@@ -1152,8 +1152,8 @@ module.exports = async function handler(req, res) {
          WHERE c.status = 'active' AND m.status = 'active' AND c.end_at > NOW()
          ORDER BY m.id, c.created_at DESC
        `;
-       
-       return send(res, 200, { success: true, data: campaigns });
+
+      return send(res, 200, { success: true, data: campaigns });
     }
 
     // ── GET /api/v1/consumers/history ─────────────────────────────
@@ -1295,14 +1295,14 @@ module.exports = async function handler(req, res) {
     if (method === 'POST' && activateMatch) {
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
-      
+
       let payload;
-      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
-      
+
       const campaignId = activateMatch[1];
       const code = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6 chars
-      
+
       // Auto-join merchant member
       const [campaign] = await sql`SELECT merchant_id FROM "Campaign" WHERE id = ${campaignId}`;
       if (campaign) {
@@ -1312,7 +1312,7 @@ module.exports = async function handler(req, res) {
            ON CONFLICT DO NOTHING
         `;
       }
-      
+
       // UPDATE the most-recent non-redeemed Redemption row → 'pending'
       // Use CTE + LIMIT 1 to guarantee only ONE row is touched (avoids @unique token violation)
       const updated = await sql`
@@ -1440,19 +1440,19 @@ module.exports = async function handler(req, res) {
     if (method === 'POST' && url.endsWith('/campaigns/redeem')) {
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
-      
+
       let payload;
-      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
-      
+
       const data = req.body || {};
       if (!data.token) return send(res, 400, { success: false, error: 'Missing redemption token' });
-      
+
       const [existing] = await sql`SELECT * FROM "Redemption" WHERE token = ${data.token} AND user_id = ${payload.userId}`;
       if (!existing) return send(res, 404, { success: false, error: 'Redemption token not found' });
       if (existing.redeemed) return send(res, 400, { success: false, error: 'Offer already redeemed' });
       if (new Date(existing.expires_at) < new Date()) return send(res, 400, { success: false, error: 'Offer expired' });
-      
+
       // Allow manual consumer redemption (saving merchant_user_id as null because it was a self-serve redemption)
       const [updated] = await sql`
         UPDATE "Redemption"
@@ -1460,7 +1460,7 @@ module.exports = async function handler(req, res) {
         WHERE id = ${existing.id}
         RETURNING *
       `;
-      
+
       return send(res, 200, { success: true, data: { redemption: updated } });
     }
 
@@ -1470,16 +1470,16 @@ module.exports = async function handler(req, res) {
       const merchantId = logoMatch[1];
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
-      
+
       let payload;
-      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
-      
+
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
-      
+
       const data = req.body || {};
       if (!data.logo_url) return send(res, 400, { success: false, error: 'Missing logo_url' });
-      
+
       await sql`UPDATE "Merchant" SET logo_url = ${data.logo_url} WHERE id = ${merchantId}`;
       return send(res, 200, { success: true, data: { logo_url: data.logo_url } });
     }
@@ -1490,13 +1490,13 @@ module.exports = async function handler(req, res) {
       const merchantId = membersMatch[1];
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
-      
+
       let payload;
-      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
-      
+
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
-      
+
       const membersResult = await sql`
         SELECT
           u.id as user_id, u.city, u.zip_code, u.full_name,
@@ -1527,7 +1527,7 @@ module.exports = async function handler(req, res) {
         WHERE mm.merchant_id = ${merchantId}
         GROUP BY u.id, u.city, u.zip_code, u.full_name
       `;
-      
+
       return send(res, 200, { success: true, data: membersResult });
     }
 
@@ -1565,16 +1565,16 @@ module.exports = async function handler(req, res) {
       const merchantId = profileMatch[1];
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
-      
+
       let payload;
-      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); } 
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
-      
+
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
-      
+
       const data = req.body || {};
       if (!data.current_password) return send(res, 400, { success: false, error: 'Current password is required to save changes' });
-      
+
       // Update Password & Email (MerchantUser Table)
       const [user] = await sql`SELECT * FROM "MerchantUser" WHERE id = ${payload.userId} LIMIT 1`;
       if (!user || !(await bcrypt.compare(data.current_password, user.password_hash))) {
@@ -1583,17 +1583,17 @@ module.exports = async function handler(req, res) {
 
       let newEmail = user.email;
       if (data.email && data.email.toLowerCase() !== user.email) {
-         newEmail = data.email.toLowerCase();
-         // Check if email already used
-         const existing = await sql`SELECT id FROM "MerchantUser" WHERE email = ${newEmail} LIMIT 1`;
-         if (existing.length > 0) return send(res, 400, { success: false, error: 'Email already in use' });
+        newEmail = data.email.toLowerCase();
+        // Check if email already used
+        const existing = await sql`SELECT id FROM "MerchantUser" WHERE email = ${newEmail} LIMIT 1`;
+        if (existing.length > 0) return send(res, 400, { success: false, error: 'Email already in use' });
       }
 
       let newHash = user.password_hash;
       if (data.new_password && data.new_password.length >= 8) {
-         newHash = await bcrypt.hash(data.new_password, 12);
+        newHash = await bcrypt.hash(data.new_password, 12);
       } else if (data.new_password && data.new_password.length > 0) {
-         return send(res, 400, { success: false, error: 'New password must be at least 8 characters' });
+        return send(res, 400, { success: false, error: 'New password must be at least 8 characters' });
       }
 
       await sql`
@@ -1604,7 +1604,7 @@ module.exports = async function handler(req, res) {
 
       // Update Merchant Details
       if (data.business_name || data.contact_name || data.phone || data.website !== undefined) {
-         await sql`
+        await sql`
            UPDATE "Merchant" 
            SET 
              business_name = COALESCE(${data.business_name}, business_name),
@@ -1617,7 +1617,7 @@ module.exports = async function handler(req, res) {
 
       // Update Location Details (assuming 1 location for now per merchant, based on onboarding signup logic)
       if (data.address || data.suite !== undefined || data.city || data.state || data.zip) {
-         await sql`
+        await sql`
            UPDATE "MerchantLocation" 
            SET 
              address = COALESCE(${data.address}, address),
@@ -2075,21 +2075,24 @@ module.exports = async function handler(req, res) {
       const stripeClient = Stripe(STRIPE_KEY);
 
       const [merchant] = await sql`
-        SELECT id, stripe_customer_id, stripe_payment_method_id
+        SELECT id, stripe_customer_id, stripe_subscription_id, account_blocked
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
       `;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
-      if (!merchant.stripe_customer_id || !merchant.stripe_payment_method_id) {
-        return send(res, 400, { success: false, error: 'No payment method on file. Please update your payment method first.' });
+      if (!merchant.stripe_customer_id) {
+        return send(res, 400, { success: false, error: 'No Stripe customer profile found.' });
+      }
+      if (merchant.stripe_subscription_id && merchant.account_blocked === false) {
+        return send(res, 400, { success: false, error: 'You already have an active subscription.' });
       }
 
       try {
         const subscription = await stripeClient.subscriptions.create({
           customer: merchant.stripe_customer_id,
           items: [{ price: PRICE_ID }],
-          default_payment_method: merchant.stripe_payment_method_id,
+          // Omit default_payment_method so Stripe safely falls back to the customer's portal-managed default card
           metadata: { merchant_id: merchantId }
         });
 
