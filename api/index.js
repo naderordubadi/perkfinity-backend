@@ -264,15 +264,35 @@ module.exports = async function handler(req, res) {
       const now = new Date();
       const oneYear = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
-      // Promo code validation → set member_limit
+      // Promo code validation → set member_limit (or unlock Free For Life)
       let memberLimit = 10;
+      let selectedTier = data.tier || 'trial';
+      let skipStripe = false;
       let promoCode = (data.promo_code || '').trim().toUpperCase();
       if (promoCode) {
         const validCodes = { 'MEMBER-15': 15, 'MEMBER-20': 20 };
-        if (!validCodes[promoCode]) {
-          return send(res, 400, { success: false, error: 'Invalid promo code.' });
+        if (validCodes[promoCode]) {
+          // Standard promo: extended member limit
+          memberLimit = validCodes[promoCode];
+        } else {
+          // Check AdminAccessCode table for a free_for_life code
+          const [accessCode] = await sql`
+            SELECT id, label FROM "AdminAccessCode"
+            WHERE code = ${promoCode}
+              AND used = false
+              AND expires_at > NOW()
+            LIMIT 1
+          `;
+          if (!accessCode) {
+            return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
+          }
+          // Valid Free For Life code — unlimited members, no Stripe
+          memberLimit = 999999;
+          selectedTier = 'free_for_life';
+          skipStripe = true;
+          // Mark the code as used (after merchant is inserted below)
+          promoCode = promoCode; // keep for DB stamp after insert
         }
-        memberLimit = validCodes[promoCode];
       } else {
         promoCode = null;
       }
@@ -280,9 +300,18 @@ module.exports = async function handler(req, res) {
       // Insert merchant (required fields used directly; optional fields use || '')
       const [merchant] = await sql`
         INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, pos_system, subscription_tier, member_limit, promo_code, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${data.tier || 'trial'}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${selectedTier}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
         RETURNING id, business_name, subscription_tier, member_limit
       `;
+
+      // If a free_for_life code was used, mark it as used now that we have the merchant id
+      if (skipStripe && promoCode) {
+        await sql`
+          UPDATE "AdminAccessCode"
+          SET used = true, used_by = ${merchant.id}, used_at = NOW()
+          WHERE code = ${promoCode}
+        `;
+      }
 
       // Insert owner user
       const [merchantUser] = await sql`
@@ -328,6 +357,7 @@ module.exports = async function handler(req, res) {
           accessToken,
           qr_public_code: public_code,
           qr_url: `https://app.perkfinity.net/qr/${public_code}`,
+          skip_stripe: skipStripe,
         }
       });
     }
@@ -1735,6 +1765,25 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: "Promo code columns added (member_limit, promo_code)!" });
     }
 
+    // ── AdminAccessCode migration ──────────────────────────────────
+    if (url === '/api/v1/admin/migrate-access-codes' && method === 'GET') {
+      await sql`
+        CREATE TABLE IF NOT EXISTS "AdminAccessCode" (
+          id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          code       TEXT UNIQUE NOT NULL,
+          label      TEXT,
+          used       BOOLEAN DEFAULT false,
+          used_by    TEXT,
+          used_at    TIMESTAMPTZ,
+          expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `;
+      // Add cancelled_at to Merchant if not exists (needed by FFL cancel endpoint)
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "cancelled_at" TIMESTAMPTZ`;
+      return send(res, 200, { success: true, message: 'AdminAccessCode table created and Merchant.cancelled_at added.' });
+    }
+
     if (url === '/api/v1/migrate-task2' && method === 'GET') {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "logo_url" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "city" TEXT`;
@@ -1820,6 +1869,122 @@ module.exports = async function handler(req, res) {
           stats: { total: campaigns.length, active, redemptions: totalRedemptions, redemption_rate: rate }
         }
       });
+    }
+
+    // ── POST /api/v1/admin/access-codes — Generate a Free For Life code
+    if (method === 'POST' && url.endsWith('/admin/access-codes')) {
+      const adminSecret = req.headers['x-admin-secret'];
+      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+        return send(res, 401, { success: false, error: 'Unauthorized' });
+      }
+      const data = req.body || {};
+      const label = (data.label || '').trim() || null;
+      // Generate a code: FREE-XXXX-XXXX (no ambiguous chars)
+      const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+      const seg = (n) => Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+      const code = `FREE-${seg(4)}-${seg(4)}`;
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      await sql`
+        INSERT INTO "AdminAccessCode" (code, label, expires_at)
+        VALUES (${code}, ${label}, ${expiresAt})
+      `;
+      return send(res, 201, { success: true, data: { code, label, expires_at: expiresAt } });
+    }
+
+    // ── GET /api/v1/admin/access-codes — List all codes
+    if (method === 'GET' && url.endsWith('/admin/access-codes')) {
+      const adminSecret = req.headers['x-admin-secret'];
+      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+        return send(res, 401, { success: false, error: 'Unauthorized' });
+      }
+      const now = new Date();
+      const codes = await sql`
+        SELECT ac.id, ac.code, ac.label, ac.used, ac.used_by, ac.used_at, ac.expires_at, ac.created_at,
+               m.business_name as used_by_name
+        FROM "AdminAccessCode" ac
+        LEFT JOIN "Merchant" m ON m.id = ac.used_by
+        ORDER BY ac.created_at DESC
+      `;
+      const enriched = codes.map(c => ({
+        ...c,
+        status: c.used ? 'used' : new Date(c.expires_at) < now ? 'expired' : 'available'
+      }));
+      return send(res, 200, { success: true, data: { codes: enriched } });
+    }
+
+    // ── POST /api/v1/admin/send-email — Admin bulk email via Brevo
+    if (method === 'POST' && url.endsWith('/admin/send-email')) {
+      const adminSecret = req.headers['x-admin-secret'];
+      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+        return send(res, 401, { success: false, error: 'Unauthorized' });
+      }
+      const data = req.body || {};
+      if (!data.merchant_ids || !data.subject || !data.body) {
+        return send(res, 400, { success: false, error: 'merchant_ids, subject, and body are required' });
+      }
+      const BREVO_KEY = process.env.BREVO_API_KEY;
+      if (!BREVO_KEY) return send(res, 500, { success: false, error: 'Email not configured' });
+
+      // Fetch emails for all specified merchant IDs
+      const users = await sql`
+        SELECT mu.email, m.business_name
+        FROM "MerchantUser" mu
+        JOIN "Merchant" m ON m.id = mu.merchant_id
+        WHERE m.id = ANY(${data.merchant_ids})
+          AND mu.role = 'owner'
+      `;
+      if (!users.length) return send(res, 404, { success: false, error: 'No merchants found' });
+
+      const brevoClient = SibApiV3Sdk.ApiClient.instance;
+      brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+      const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+      let sent = 0, failed = 0;
+      for (const u of users) {
+        try {
+          const email = new SibApiV3Sdk.SendSmtpEmail();
+          email.sender = { name: 'Perkfinity', email: 'noreply@perkfinity.net' };
+          email.to = [{ email: u.email, name: u.business_name }];
+          email.subject = data.subject;
+          email.htmlContent = data.body;
+          await emailApi.sendTransacEmail(email);
+          sent++;
+        } catch (e) {
+          console.error(`Failed to send to ${u.email}:`, e.message);
+          failed++;
+        }
+      }
+      return send(res, 200, { success: true, data: { sent, failed, total: users.length } });
+    }
+
+    // ── DELETE /api/v1/admin/merchants/:id — Admin hard delete
+    const adminDeleteMatch = url.match(/\/api\/v1\/admin\/merchants\/([a-zA-Z0-9_-]+)$/);
+    if (method === 'DELETE' && adminDeleteMatch) {
+      const adminSecret = req.headers['x-admin-secret'];
+      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+        return send(res, 401, { success: false, error: 'Unauthorized' });
+      }
+      const merchantId = adminDeleteMatch[1];
+      const [merchant] = await sql`SELECT id, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+
+      // Cancel Stripe customer if exists
+      if (merchant.stripe_customer_id) {
+        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+        if (STRIPE_KEY) {
+          try { await Stripe(STRIPE_KEY).customers.del(merchant.stripe_customer_id); } catch (e) { /* non-fatal */ }
+        }
+      }
+
+      // Wipe all related rows
+      await sql`DELETE FROM "Redemption" WHERE campaign_id IN (SELECT id FROM "Campaign" WHERE merchant_id = ${merchantId})`;
+      await sql`DELETE FROM "MerchantMember" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "QrCode" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "Campaign" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "MerchantLocation" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "MerchantUser" WHERE merchant_id = ${merchantId}`;
+      await sql`DELETE FROM "Merchant" WHERE id = ${merchantId}`;
+
+      return send(res, 200, { success: true, message: `Merchant ${merchantId} permanently deleted.` });
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -1973,6 +2138,35 @@ module.exports = async function handler(req, res) {
       } catch (e) {
         return send(res, 500, { success: false, error: e.message });
       }
+    }
+
+    // ── POST /api/v1/merchants/:id/cancel — Self-service cancel (Free For Life / no Stripe)
+    const fflCancelMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/cancel$/);
+    if (method === 'POST' && fflCancelMatch) {
+      const merchantId = fflCancelMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const [merchant] = await sql`SELECT subscription_tier FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchant.subscription_tier !== 'free_for_life') {
+        return send(res, 400, { success: false, error: 'This endpoint is for Free For Life accounts only. Use /billing/cancel for paid accounts.' });
+      }
+
+      await sql`
+        UPDATE "Merchant"
+        SET status = 'cancelled',
+            billing_status = 'cancelled',
+            account_blocked = true,
+            cancelled_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
+      return send(res, 200, { success: true, message: 'Your account has been cancelled. You can reactivate by contacting support.' });
     }
 
     // ── POST /api/v1/merchants/:id/billing/cancel ─────────────────
