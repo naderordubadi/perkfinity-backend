@@ -212,6 +212,28 @@ module.exports = async function handler(req, res) {
       } catch (migErr) { /* columns may already exist */ }
     }
 
+    // ── One-time migration: AnnouncementLog table ─────────────────
+    if (!global._announcementLogMigrated) {
+      try {
+        await sql`
+          CREATE TABLE IF NOT EXISTS "AnnouncementLog" (
+            id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+            subject TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            audience_type TEXT,
+            filters JSONB,
+            recipient_count INTEGER DEFAULT 0,
+            external_count INTEGER DEFAULT 0,
+            has_attachments BOOLEAN DEFAULT false,
+            status TEXT DEFAULT 'sent',
+            scheduled_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+          )
+        `;
+        global._announcementLogMigrated = true;
+      } catch (migErr) { /* table may already exist */ }
+    }
+
 
     // ── Health check ──────────────────────────────────────────────
     if (method === 'GET' && (url === '/' || url === '/health' || url.endsWith('/health'))) {
@@ -1925,6 +1947,271 @@ module.exports = async function handler(req, res) {
           }
         }
       });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ANNOUNCEMENT ENDPOINTS
+    // ═══════════════════════════════════════════════════════════════
+
+    // ── GET /api/v1/admin/audience-options ─────────────────────────
+    if (method === 'GET' && url.endsWith('/admin/audience-options')) {
+      const merchantCities = await sql`
+        SELECT DISTINCT ml.city FROM "MerchantLocation" ml
+        WHERE ml.city IS NOT NULL AND ml.city != ''
+        ORDER BY ml.city
+      `;
+      const merchantZips = await sql`
+        SELECT DISTINCT ml.postal_code FROM "MerchantLocation" ml
+        WHERE ml.postal_code IS NOT NULL AND ml.postal_code != ''
+        ORDER BY ml.postal_code
+      `;
+      const memberCities = await sql`
+        SELECT DISTINCT u.city FROM "User" u
+        WHERE u.city IS NOT NULL AND u.city != ''
+        ORDER BY u.city
+      `;
+      const memberZips = await sql`
+        SELECT DISTINCT u.zip_code FROM "User" u
+        WHERE u.zip_code IS NOT NULL AND u.zip_code != ''
+        ORDER BY u.zip_code
+      `;
+      return send(res, 200, {
+        success: true,
+        data: {
+          merchant_cities: merchantCities.map(r => r.city),
+          merchant_zips: merchantZips.map(r => r.postal_code),
+          member_cities: memberCities.map(r => r.city),
+          member_zips: memberZips.map(r => r.zip_code)
+        }
+      });
+    }
+
+    // ── POST /api/v1/admin/audience-preview ────────────────────────
+    if (method === 'POST' && url.endsWith('/admin/audience-preview')) {
+      const data = req.body || {};
+      const audience = data.audience || {};
+      let recipients = [];
+
+      // Build merchant recipients
+      if (audience.type === 'merchants' || audience.type === 'both') {
+        let q = `SELECT m.id, m.business_name as name, mu.email
+                  FROM "Merchant" m
+                  LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+                  LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id
+                  WHERE mu.email IS NOT NULL`;
+        const params = [];
+        if (audience.statuses && audience.statuses.length) {
+          // Map UI statuses to DB conditions
+          const conds = [];
+          if (audience.statuses.includes('free_trial')) conds.push(`m.subscription_tier IN ('none','trial')`);
+          if (audience.statuses.includes('tier1')) conds.push(`m.subscription_tier = 'tier1'`);
+          if (audience.statuses.includes('free_for_life')) conds.push(`m.subscription_tier = 'free_for_life'`);
+          if (audience.statuses.includes('blocked')) conds.push(`m.account_blocked = true`);
+          if (audience.statuses.includes('pending_cancellation')) conds.push(`m.billing_status = 'pending_cancellation'`);
+          if (conds.length) q += ` AND (${conds.join(' OR ')})`;
+        }
+        if (audience.cities && audience.cities.length) {
+          q += ` AND ml.city = ANY($${params.length + 1})`;
+          params.push(audience.cities);
+        }
+        if (audience.zip_codes && audience.zip_codes.length) {
+          q += ` AND ml.postal_code = ANY($${params.length + 1})`;
+          params.push(audience.zip_codes);
+        }
+        if (audience.joined_days) {
+          q += ` AND m.created_at >= NOW() - INTERVAL '${parseInt(audience.joined_days)} days'`;
+        }
+        if (audience.member_count_max != null) {
+          q += ` AND m.member_count <= ${parseInt(audience.member_count_max)}`;
+        }
+        // Use parameterized neon query
+        const merchantRows = params.length === 0
+          ? await sql.unsafe(q)
+          : params.length === 1
+            ? await sql.unsafe(q, params)
+            : await sql.unsafe(q, params);
+        recipients = recipients.concat(merchantRows.map(r => ({ name: r.name, email: r.email, type: 'merchant' })));
+      }
+
+      // Build member recipients
+      if (audience.type === 'members' || audience.type === 'both') {
+        let q = `SELECT u.id, u.full_name as name, u.email
+                  FROM "User" u
+                  WHERE u.email IS NOT NULL AND u.email != ''`;
+        const params = [];
+        if (audience.cities && audience.cities.length) {
+          q += ` AND u.city = ANY($${params.length + 1})`;
+          params.push(audience.cities);
+        }
+        if (audience.zip_codes && audience.zip_codes.length) {
+          q += ` AND u.zip_code = ANY($${params.length + 1})`;
+          params.push(audience.zip_codes);
+        }
+        if (audience.joined_days) {
+          q += ` AND u.created_at >= NOW() - INTERVAL '${parseInt(audience.joined_days)} days'`;
+        }
+        const memberRows = params.length === 0
+          ? await sql.unsafe(q)
+          : await sql.unsafe(q, params);
+        recipients = recipients.concat(memberRows.map(r => ({ name: r.name, email: r.email, type: 'member' })));
+      }
+
+      // Deduplicate by email
+      const seen = new Set();
+      recipients = recipients.filter(r => {
+        if (!r.email || seen.has(r.email.toLowerCase())) return false;
+        seen.add(r.email.toLowerCase());
+        return true;
+      });
+
+      return send(res, 200, {
+        success: true,
+        data: {
+          count: recipients.length,
+          sample: recipients.slice(0, 10).map(r => ({ name: r.name, email: r.email, type: r.type }))
+        }
+      });
+    }
+
+    // ── POST /api/v1/admin/send-announcement ──────────────────────
+    if (method === 'POST' && url.endsWith('/admin/send-announcement')) {
+      const data = req.body || {};
+      const { subject, html_body, sender, audience, external_emails, attachments, scheduled_at } = data;
+
+      if (!subject || !html_body) {
+        return send(res, 400, { success: false, error: 'Subject and body are required' });
+      }
+
+      const BREVO_KEY = process.env.BREVO_API_KEY;
+      if (!BREVO_KEY) {
+        return send(res, 500, { success: false, error: 'Brevo API key not configured' });
+      }
+
+      const SibApiV3Sdk = require('sib-api-v3-sdk');
+      const brevoClient = SibApiV3Sdk.ApiClient.instance;
+      brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+      const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+
+      // Sender mapping
+      const senderMap = {
+        'hello@perkfinity.net': { name: 'Perkfinity', email: 'hello@perkfinity.net' },
+        'support@perkfinity.net': { name: 'Perkfinity Support', email: 'support@perkfinity.net' },
+        'noreply@perkfinity.net': { name: 'Perkfinity', email: 'noreply@perkfinity.net' }
+      };
+      const senderObj = senderMap[sender] || senderMap['noreply@perkfinity.net'];
+
+      // Build recipient list (same logic as preview)
+      let recipients = [];
+      const aud = audience || {};
+
+      if (aud.type === 'merchants' || aud.type === 'both') {
+        let q = `SELECT mu.email, m.business_name as name
+                  FROM "Merchant" m
+                  LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+                  LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id
+                  WHERE mu.email IS NOT NULL`;
+        const params = [];
+        if (aud.statuses && aud.statuses.length) {
+          const conds = [];
+          if (aud.statuses.includes('free_trial')) conds.push(`m.subscription_tier IN ('none','trial')`);
+          if (aud.statuses.includes('tier1')) conds.push(`m.subscription_tier = 'tier1'`);
+          if (aud.statuses.includes('free_for_life')) conds.push(`m.subscription_tier = 'free_for_life'`);
+          if (aud.statuses.includes('blocked')) conds.push(`m.account_blocked = true`);
+          if (aud.statuses.includes('pending_cancellation')) conds.push(`m.billing_status = 'pending_cancellation'`);
+          if (conds.length) q += ` AND (${conds.join(' OR ')})`;
+        }
+        if (aud.cities && aud.cities.length) { q += ` AND ml.city = ANY($${params.length + 1})`; params.push(aud.cities); }
+        if (aud.zip_codes && aud.zip_codes.length) { q += ` AND ml.postal_code = ANY($${params.length + 1})`; params.push(aud.zip_codes); }
+        if (aud.joined_days) q += ` AND m.created_at >= NOW() - INTERVAL '${parseInt(aud.joined_days)} days'`;
+        if (aud.member_count_max != null) q += ` AND m.member_count <= ${parseInt(aud.member_count_max)}`;
+        const rows = params.length === 0 ? await sql.unsafe(q) : await sql.unsafe(q, params);
+        recipients = recipients.concat(rows.map(r => r.email));
+      }
+
+      if (aud.type === 'members' || aud.type === 'both') {
+        let q = `SELECT u.email FROM "User" u WHERE u.email IS NOT NULL AND u.email != ''`;
+        const params = [];
+        if (aud.cities && aud.cities.length) { q += ` AND u.city = ANY($${params.length + 1})`; params.push(aud.cities); }
+        if (aud.zip_codes && aud.zip_codes.length) { q += ` AND u.zip_code = ANY($${params.length + 1})`; params.push(aud.zip_codes); }
+        if (aud.joined_days) q += ` AND u.created_at >= NOW() - INTERVAL '${parseInt(aud.joined_days)} days'`;
+        const rows = params.length === 0 ? await sql.unsafe(q) : await sql.unsafe(q, params);
+        recipients = recipients.concat(rows.map(r => r.email));
+      }
+
+      // Add external emails
+      const extEmails = (external_emails || []).filter(e => e && e.includes('@'));
+      recipients = recipients.concat(extEmails);
+
+      // Deduplicate
+      recipients = [...new Set(recipients.map(e => e.toLowerCase()))];
+
+      if (recipients.length === 0) {
+        return send(res, 400, { success: false, error: 'No recipients found with the current filters' });
+      }
+
+      // Build Brevo attachments
+      const brevoAttachments = (attachments || []).map(a => ({
+        name: a.name,
+        content: a.content // base64
+      }));
+
+      // Send in batches of 50
+      let sentCount = 0;
+      let failCount = 0;
+      const batchSize = 50;
+      for (let i = 0; i < recipients.length; i += batchSize) {
+        const batch = recipients.slice(i, i + batchSize);
+        try {
+          const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+          sendSmtpEmail.sender = senderObj;
+          // Use BCC for privacy — send to self, BCC all recipients
+          sendSmtpEmail.to = [senderObj];
+          sendSmtpEmail.bcc = batch.map(email => ({ email }));
+          sendSmtpEmail.subject = subject;
+          sendSmtpEmail.htmlContent = html_body;
+          if (brevoAttachments.length > 0) sendSmtpEmail.attachment = brevoAttachments;
+          await emailApi.sendTransacEmail(sendSmtpEmail);
+          sentCount += batch.length;
+        } catch (sendErr) {
+          console.error('Brevo batch send error:', sendErr.message || sendErr);
+          failCount += batch.length;
+        }
+      }
+
+      // Log to AnnouncementLog
+      try {
+        await sql`
+          INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, scheduled_at)
+          VALUES (
+            ${subject},
+            ${senderObj.email},
+            ${aud.type || 'custom'},
+            ${JSON.stringify(aud)}::jsonb,
+            ${sentCount},
+            ${extEmails.length},
+            ${brevoAttachments.length > 0},
+            ${failCount > 0 ? 'partial' : 'sent'},
+            ${scheduled_at ? new Date(scheduled_at) : null}
+          )
+        `;
+      } catch (logErr) {
+        console.error('AnnouncementLog insert error:', logErr.message || logErr);
+      }
+
+      return send(res, 200, {
+        success: true,
+        data: { sent: sentCount, failed: failCount, total_recipients: recipients.length }
+      });
+    }
+
+    // ── GET /api/v1/admin/announcement-history ────────────────────
+    if (method === 'GET' && url.endsWith('/admin/announcement-history')) {
+      const history = await sql`
+        SELECT * FROM "AnnouncementLog"
+        ORDER BY created_at DESC
+        LIMIT 100
+      `;
+      return send(res, 200, { success: true, data: history });
     }
 
     // ── POST /api/v1/admin/access-codes — Generate a Free For Life code
