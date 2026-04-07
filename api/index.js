@@ -226,10 +226,13 @@ module.exports = async function handler(req, res) {
             external_count INTEGER DEFAULT 0,
             has_attachments BOOLEAN DEFAULT false,
             status TEXT DEFAULT 'sent',
+            html_body TEXT,
             scheduled_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ DEFAULT NOW()
           )
         `;
+        // Add html_body if table already exists without it
+        await sql`ALTER TABLE "AnnouncementLog" ADD COLUMN IF NOT EXISTS html_body TEXT`;
         global._announcementLogMigrated = true;
       } catch (migErr) { /* table may already exist */ }
     }
@@ -2203,7 +2206,7 @@ module.exports = async function handler(req, res) {
       // Log to AnnouncementLog
       try {
         await sql`
-          INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, scheduled_at)
+          INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, html_body, scheduled_at)
           VALUES (
             ${subject},
             ${senderObj.email},
@@ -2213,6 +2216,7 @@ module.exports = async function handler(req, res) {
             ${extEmails.length},
             ${brevoAttachments.length > 0},
             ${failCount > 0 ? 'partial' : 'sent'},
+            ${html_body},
             ${scheduled_at ? new Date(scheduled_at) : null}
           )
         `;
