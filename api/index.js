@@ -1986,10 +1986,10 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── POST /api/v1/admin/audience-preview ────────────────────────
-    if (method === 'POST' && url.endsWith('/admin/audience-preview')) {
-      const data = req.body || {};
-      const audience = data.audience || {};
+    // ── GET /api/v1/admin/audience-preview ─────────────────────────
+    if (method === 'GET' && url.endsWith('/admin/audience-preview')) {
+      const qs = require('url').parse(req.url, true).query;
+      const audience = qs.audience ? JSON.parse(qs.audience) : {};
       let recipients = [];
 
       // Merchant recipients
