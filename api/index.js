@@ -1988,86 +1988,91 @@ module.exports = async function handler(req, res) {
 
     // ── GET /api/v1/admin/audience-preview ─────────────────────────
     if (method === 'GET' && url.endsWith('/admin/audience-preview')) {
-      const qs = require('url').parse(req.url, true).query;
-      const audience = qs.audience ? JSON.parse(qs.audience) : {};
-      let recipients = [];
+      try {
+        const qs = require('url').parse(req.url, true).query;
+        const audience = qs.audience ? JSON.parse(qs.audience) : {};
+        let recipients = [];
 
-      // Merchant recipients
-      if (audience.type === 'merchants' || audience.type === 'both') {
-        const rows = await sql`
-          SELECT DISTINCT m.id, m.business_name as name, mu.email,
-            m.subscription_tier, m.billing_status, m.account_blocked,
-            m.member_count, m.created_at as joined_at,
-            ml.city, ml.postal_code
-          FROM "Merchant" m
-          LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
-          LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id AND ml.is_active = true
-          WHERE mu.email IS NOT NULL
-        `;
-        let filtered = rows;
-        if (audience.statuses && audience.statuses.length) {
-          filtered = filtered.filter(r => {
-            if (audience.statuses.includes('free_trial') && (r.subscription_tier === 'none' || r.subscription_tier === 'trial')) return true;
-            if (audience.statuses.includes('tier1') && r.subscription_tier === 'tier1') return true;
-            if (audience.statuses.includes('free_for_life') && r.subscription_tier === 'free_for_life') return true;
-            if (audience.statuses.includes('blocked') && r.account_blocked === true) return true;
-            if (audience.statuses.includes('pending_cancellation') && r.billing_status === 'pending_cancellation') return true;
-            return false;
-          });
+        // Merchant recipients — same query pattern as /admin/merchants
+        if (audience.type === 'merchants' || audience.type === 'both') {
+          const rows = await sql`
+            SELECT m.id, m.business_name,
+              mu.email as contact_email,
+              m.subscription_tier, m.billing_status, m.account_blocked,
+              m.member_count, m.created_at,
+              ml.city as location_city, ml.postal_code as location_zip
+            FROM "Merchant" m
+            LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+            LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id AND ml.is_active = true
+            ORDER BY m.created_at DESC
+          `;
+          let filtered = rows.filter(r => r.contact_email);
+          if (audience.statuses && audience.statuses.length) {
+            filtered = filtered.filter(r => {
+              if (audience.statuses.includes('free_trial') && (r.subscription_tier === 'none' || r.subscription_tier === 'trial' || !r.subscription_tier)) return true;
+              if (audience.statuses.includes('tier1') && r.subscription_tier === 'tier1') return true;
+              if (audience.statuses.includes('free_for_life') && r.subscription_tier === 'free_for_life') return true;
+              if (audience.statuses.includes('blocked') && r.account_blocked === true) return true;
+              if (audience.statuses.includes('pending_cancellation') && r.billing_status === 'pending_cancellation') return true;
+              return false;
+            });
+          }
+          if (audience.cities && audience.cities.length) {
+            filtered = filtered.filter(r => r.location_city && audience.cities.includes(r.location_city));
+          }
+          if (audience.zip_codes && audience.zip_codes.length) {
+            filtered = filtered.filter(r => r.location_zip && audience.zip_codes.includes(r.location_zip));
+          }
+          if (audience.joined_days) {
+            const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
+            filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
+          }
+          if (audience.member_count_max != null) {
+            filtered = filtered.filter(r => (parseInt(r.member_count) || 0) <= parseInt(audience.member_count_max));
+          }
+          recipients = recipients.concat(filtered.map(r => ({ name: r.business_name, email: r.contact_email, type: 'merchant' })));
         }
-        if (audience.cities && audience.cities.length) {
-          filtered = filtered.filter(r => r.city && audience.cities.includes(r.city));
+
+        // Member recipients — same query pattern as /admin/members
+        if (audience.type === 'members' || audience.type === 'both') {
+          const rows = await sql`
+            SELECT u.id, u.full_name, u.email, u.city, u.zip_code, u.created_at
+            FROM "User" u
+            ORDER BY u.created_at DESC
+          `;
+          let filtered = rows.filter(r => r.email);
+          if (audience.cities && audience.cities.length) {
+            filtered = filtered.filter(r => r.city && audience.cities.includes(r.city));
+          }
+          if (audience.zip_codes && audience.zip_codes.length) {
+            filtered = filtered.filter(r => r.zip_code && audience.zip_codes.includes(r.zip_code));
+          }
+          if (audience.joined_days) {
+            const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
+            filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
+          }
+          recipients = recipients.concat(filtered.map(r => ({ name: r.full_name, email: r.email, type: 'member' })));
         }
-        if (audience.zip_codes && audience.zip_codes.length) {
-          filtered = filtered.filter(r => r.postal_code && audience.zip_codes.includes(r.postal_code));
-        }
-        if (audience.joined_days) {
-          const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
-          filtered = filtered.filter(r => new Date(r.joined_at) >= cutoff);
-        }
-        if (audience.member_count_max != null) {
-          filtered = filtered.filter(r => (parseInt(r.member_count) || 0) <= parseInt(audience.member_count_max));
-        }
-        recipients = recipients.concat(filtered.map(r => ({ name: r.name, email: r.email, type: 'merchant' })));
+
+        // Deduplicate by email
+        const seen = new Set();
+        recipients = recipients.filter(r => {
+          if (!r.email || seen.has(r.email.toLowerCase())) return false;
+          seen.add(r.email.toLowerCase());
+          return true;
+        });
+
+        return send(res, 200, {
+          success: true,
+          data: {
+            count: recipients.length,
+            sample: recipients.slice(0, 10).map(r => ({ name: r.name, email: r.email, type: r.type }))
+          }
+        });
+      } catch (previewErr) {
+        console.error('audience-preview error:', previewErr);
+        return send(res, 500, { success: false, error: previewErr.message || 'Preview failed' });
       }
-
-      // Member recipients
-      if (audience.type === 'members' || audience.type === 'both') {
-        const rows = await sql`
-          SELECT DISTINCT u.id, u.full_name as name, u.email,
-            u.city, u.zip_code, u.created_at as joined_at
-          FROM "User" u
-          WHERE u.email IS NOT NULL AND u.email != ''
-        `;
-        let filtered = rows;
-        if (audience.cities && audience.cities.length) {
-          filtered = filtered.filter(r => r.city && audience.cities.includes(r.city));
-        }
-        if (audience.zip_codes && audience.zip_codes.length) {
-          filtered = filtered.filter(r => r.zip_code && audience.zip_codes.includes(r.zip_code));
-        }
-        if (audience.joined_days) {
-          const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
-          filtered = filtered.filter(r => new Date(r.joined_at) >= cutoff);
-        }
-        recipients = recipients.concat(filtered.map(r => ({ name: r.name, email: r.email, type: 'member' })));
-      }
-
-      // Deduplicate by email
-      const seen = new Set();
-      recipients = recipients.filter(r => {
-        if (!r.email || seen.has(r.email.toLowerCase())) return false;
-        seen.add(r.email.toLowerCase());
-        return true;
-      });
-
-      return send(res, 200, {
-        success: true,
-        data: {
-          count: recipients.length,
-          sample: recipients.slice(0, 10).map(r => ({ name: r.name, email: r.email, type: r.type }))
-        }
-      });
     }
 
     // ── POST /api/v1/admin/send-announcement ──────────────────────
@@ -2103,17 +2108,19 @@ module.exports = async function handler(req, res) {
 
       if (aud.type === 'merchants' || aud.type === 'both') {
         const rows = await sql`
-          SELECT DISTINCT mu.email, m.subscription_tier, m.billing_status, m.account_blocked,
-            m.member_count, m.created_at as joined_at, ml.city, ml.postal_code
+          SELECT m.id, mu.email as contact_email,
+            m.subscription_tier, m.billing_status, m.account_blocked,
+            m.member_count, m.created_at,
+            ml.city as location_city, ml.postal_code as location_zip
           FROM "Merchant" m
           LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
           LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id AND ml.is_active = true
-          WHERE mu.email IS NOT NULL
+          ORDER BY m.created_at DESC
         `;
-        let filtered = rows;
+        let filtered = rows.filter(r => r.contact_email);
         if (aud.statuses && aud.statuses.length) {
           filtered = filtered.filter(r => {
-            if (aud.statuses.includes('free_trial') && (r.subscription_tier === 'none' || r.subscription_tier === 'trial')) return true;
+            if (aud.statuses.includes('free_trial') && (r.subscription_tier === 'none' || r.subscription_tier === 'trial' || !r.subscription_tier)) return true;
             if (aud.statuses.includes('tier1') && r.subscription_tier === 'tier1') return true;
             if (aud.statuses.includes('free_for_life') && r.subscription_tier === 'free_for_life') return true;
             if (aud.statuses.includes('blocked') && r.account_blocked === true) return true;
@@ -2121,28 +2128,28 @@ module.exports = async function handler(req, res) {
             return false;
           });
         }
-        if (aud.cities && aud.cities.length) filtered = filtered.filter(r => r.city && aud.cities.includes(r.city));
-        if (aud.zip_codes && aud.zip_codes.length) filtered = filtered.filter(r => r.postal_code && aud.zip_codes.includes(r.postal_code));
+        if (aud.cities && aud.cities.length) filtered = filtered.filter(r => r.location_city && aud.cities.includes(r.location_city));
+        if (aud.zip_codes && aud.zip_codes.length) filtered = filtered.filter(r => r.location_zip && aud.zip_codes.includes(r.location_zip));
         if (aud.joined_days) {
           const cutoff = new Date(Date.now() - parseInt(aud.joined_days) * 86400000);
-          filtered = filtered.filter(r => new Date(r.joined_at) >= cutoff);
+          filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
         }
         if (aud.member_count_max != null) filtered = filtered.filter(r => (parseInt(r.member_count) || 0) <= parseInt(aud.member_count_max));
-        recipients = recipients.concat(filtered.map(r => r.email));
+        recipients = recipients.concat(filtered.map(r => r.contact_email));
       }
 
       if (aud.type === 'members' || aud.type === 'both') {
         const rows = await sql`
-          SELECT DISTINCT u.email, u.city, u.zip_code, u.created_at as joined_at
+          SELECT u.id, u.email, u.city, u.zip_code, u.created_at
           FROM "User" u
-          WHERE u.email IS NOT NULL AND u.email != ''
+          ORDER BY u.created_at DESC
         `;
-        let filtered = rows;
+        let filtered = rows.filter(r => r.email);
         if (aud.cities && aud.cities.length) filtered = filtered.filter(r => r.city && aud.cities.includes(r.city));
         if (aud.zip_codes && aud.zip_codes.length) filtered = filtered.filter(r => r.zip_code && aud.zip_codes.includes(r.zip_code));
         if (aud.joined_days) {
           const cutoff = new Date(Date.now() - parseInt(aud.joined_days) * 86400000);
-          filtered = filtered.filter(r => new Date(r.joined_at) >= cutoff);
+          filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
         }
         recipients = recipients.concat(filtered.map(r => r.email));
       }
