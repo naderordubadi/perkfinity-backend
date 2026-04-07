@@ -1896,7 +1896,7 @@ module.exports = async function handler(req, res) {
       // Billing stats from Merchant table
       const [stats] = await sql`
         SELECT
-          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND account_blocked = false AND billing_status NOT IN ('cancelled','payment_failed')) as paying_merchants,
+          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND account_blocked = false AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation')) as paying_merchants,
           COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND billing_status = 'pending_cancellation') as pending_cancel,
           COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
           COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
