@@ -1860,7 +1860,9 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url.endsWith('/admin/campaigns')) {
       const campaigns = await sql`
         SELECT c.*, m.business_name as merchant_name,
-          (SELECT COUNT(*) FROM "Redemption" r WHERE r.campaign_id = c.id AND r.status = 'redeemed') as redemption_count
+          (SELECT COUNT(*) FROM "Redemption" r WHERE r.campaign_id = c.id AND r.status = 'redeemed') as redemption_count,
+          (SELECT COUNT(*) FROM "Redemption" r2 WHERE r2.campaign_id = c.id AND r2.status = 'expired') as expired_count,
+          (SELECT COUNT(*) FROM "Redemption" r3 WHERE r3.campaign_id = c.id) as total_sent
         FROM "Campaign" c
         LEFT JOIN "Merchant" m ON m.id = c.merchant_id
         ORDER BY c.created_at DESC
