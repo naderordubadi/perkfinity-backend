@@ -1830,10 +1830,10 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url.endsWith('/admin/members')) {
       const members = await sql`
         SELECT u.id, u.email, u.full_name, u.phone_number, u.city, u.zip_code, u.push_token,
-          u.created_at, u.last_active,
-          (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.user_id = u.id) as merchant_count
+          u.created_at,
+          (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.user_id = u.id) as merchant_count,
+          (SELECT COUNT(*) FROM "Redemption" r WHERE r.user_id = u.id AND r.status = 'redeemed') as redemption_count
         FROM "User" u
-        WHERE u.role IS NULL OR u.role = 'consumer'
         ORDER BY u.created_at DESC
       `;
       const pushEnabled = members.filter(m => m.push_token).length;
