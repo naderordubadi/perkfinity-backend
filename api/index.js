@@ -1956,24 +1956,24 @@ module.exports = async function handler(req, res) {
     // ── GET /api/v1/admin/audience-options ─────────────────────────
     if (method === 'GET' && url.endsWith('/admin/audience-options')) {
       const merchantCities = await sql`
-        SELECT DISTINCT ml.city FROM "MerchantLocation" ml
-        WHERE ml.city IS NOT NULL AND ml.city != ''
-        ORDER BY ml.city
+        SELECT DISTINCT INITCAP(TRIM(ml.city)) as city FROM "MerchantLocation" ml
+        WHERE ml.city IS NOT NULL AND TRIM(ml.city) != ''
+        ORDER BY city
       `;
       const merchantZips = await sql`
-        SELECT DISTINCT ml.postal_code FROM "MerchantLocation" ml
-        WHERE ml.postal_code IS NOT NULL AND ml.postal_code != ''
-        ORDER BY ml.postal_code
+        SELECT DISTINCT TRIM(ml.postal_code) as postal_code FROM "MerchantLocation" ml
+        WHERE ml.postal_code IS NOT NULL AND TRIM(ml.postal_code) != ''
+        ORDER BY postal_code
       `;
       const memberCities = await sql`
-        SELECT DISTINCT u.city FROM "User" u
-        WHERE u.city IS NOT NULL AND u.city != ''
-        ORDER BY u.city
+        SELECT DISTINCT INITCAP(TRIM(u.city)) as city FROM "User" u
+        WHERE u.city IS NOT NULL AND TRIM(u.city) != ''
+        ORDER BY city
       `;
       const memberZips = await sql`
-        SELECT DISTINCT u.zip_code FROM "User" u
-        WHERE u.zip_code IS NOT NULL AND u.zip_code != ''
-        ORDER BY u.zip_code
+        SELECT DISTINCT TRIM(u.zip_code) as zip_code FROM "User" u
+        WHERE u.zip_code IS NOT NULL AND TRIM(u.zip_code) != ''
+        ORDER BY zip_code
       `;
       return send(res, 200, {
         success: true,
@@ -2019,10 +2019,12 @@ module.exports = async function handler(req, res) {
             });
           }
           if (audience.cities && audience.cities.length) {
-            filtered = filtered.filter(r => r.location_city && audience.cities.includes(r.location_city));
+            const lc = audience.cities.map(c => c.toLowerCase().trim());
+            filtered = filtered.filter(r => r.location_city && lc.includes(r.location_city.toLowerCase().trim()));
           }
           if (audience.zip_codes && audience.zip_codes.length) {
-            filtered = filtered.filter(r => r.location_zip && audience.zip_codes.includes(r.location_zip));
+            const lz = audience.zip_codes.map(z => z.trim());
+            filtered = filtered.filter(r => r.location_zip && lz.includes(r.location_zip.trim()));
           }
           if (audience.joined_days) {
             const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
@@ -2043,10 +2045,12 @@ module.exports = async function handler(req, res) {
           `;
           let filtered = rows.filter(r => r.email);
           if (audience.cities && audience.cities.length) {
-            filtered = filtered.filter(r => r.city && audience.cities.includes(r.city));
+            const lc = audience.cities.map(c => c.toLowerCase().trim());
+            filtered = filtered.filter(r => r.city && lc.includes(r.city.toLowerCase().trim()));
           }
           if (audience.zip_codes && audience.zip_codes.length) {
-            filtered = filtered.filter(r => r.zip_code && audience.zip_codes.includes(r.zip_code));
+            const lz = audience.zip_codes.map(z => z.trim());
+            filtered = filtered.filter(r => r.zip_code && lz.includes(r.zip_code.trim()));
           }
           if (audience.joined_days) {
             const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
@@ -2130,8 +2134,8 @@ module.exports = async function handler(req, res) {
             return false;
           });
         }
-        if (aud.cities && aud.cities.length) filtered = filtered.filter(r => r.location_city && aud.cities.includes(r.location_city));
-        if (aud.zip_codes && aud.zip_codes.length) filtered = filtered.filter(r => r.location_zip && aud.zip_codes.includes(r.location_zip));
+        if (aud.cities && aud.cities.length) { const lc = aud.cities.map(c => c.toLowerCase().trim()); filtered = filtered.filter(r => r.location_city && lc.includes(r.location_city.toLowerCase().trim())); }
+        if (aud.zip_codes && aud.zip_codes.length) { const lz = aud.zip_codes.map(z => z.trim()); filtered = filtered.filter(r => r.location_zip && lz.includes(r.location_zip.trim())); }
         if (aud.joined_days) {
           const cutoff = new Date(Date.now() - parseInt(aud.joined_days) * 86400000);
           filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
@@ -2147,8 +2151,8 @@ module.exports = async function handler(req, res) {
           ORDER BY u.created_at DESC
         `;
         let filtered = rows.filter(r => r.email);
-        if (aud.cities && aud.cities.length) filtered = filtered.filter(r => r.city && aud.cities.includes(r.city));
-        if (aud.zip_codes && aud.zip_codes.length) filtered = filtered.filter(r => r.zip_code && aud.zip_codes.includes(r.zip_code));
+        if (aud.cities && aud.cities.length) { const lc = aud.cities.map(c => c.toLowerCase().trim()); filtered = filtered.filter(r => r.city && lc.includes(r.city.toLowerCase().trim())); }
+        if (aud.zip_codes && aud.zip_codes.length) { const lz = aud.zip_codes.map(z => z.trim()); filtered = filtered.filter(r => r.zip_code && lz.includes(r.zip_code.trim())); }
         if (aud.joined_days) {
           const cutoff = new Date(Date.now() - parseInt(aud.joined_days) * 86400000);
           filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
