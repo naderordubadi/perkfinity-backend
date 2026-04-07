@@ -1811,9 +1811,15 @@ module.exports = async function handler(req, res) {
           (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.merchant_id = m.id) as member_count,
           (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id) as campaign_count,
           (SELECT COUNT(*) FROM "Redemption" r JOIN "Campaign" c2 ON c2.id = r.campaign_id WHERE c2.merchant_id = m.id AND r.status = 'redeemed') as redemption_count,
+          (SELECT title FROM "Campaign" c3 WHERE c3.merchant_id = m.id AND c3.status = 'active' ORDER BY c3.created_at ASC LIMIT 1) as perk,
+          mu.email as contact_email,
+          ml2.address as location_address,
+          ml2.suite as location_suite,
           ml2.city as location_city,
+          ml2.state as location_state,
           ml2.postal_code as location_zip
         FROM "Merchant" m
+        LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
         LEFT JOIN "MerchantLocation" ml2 ON ml2.merchant_id = m.id AND ml2.is_active = true
         ORDER BY m.created_at DESC
       `;
