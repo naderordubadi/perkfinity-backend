@@ -79,7 +79,7 @@ function setCors(req, res) {
   const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:'));
   res.setHeader('Access-Control-Allow-Origin', isAllowed ? origin : '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, x-admin-secret');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 }
 
