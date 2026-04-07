@@ -1992,67 +1992,40 @@ module.exports = async function handler(req, res) {
       const audience = data.audience || {};
       let recipients = [];
 
-      // Build merchant recipients
+      // Helper: build merchant query with neon tagged templates
       if (audience.type === 'merchants' || audience.type === 'both') {
-        let q = `SELECT m.id, m.business_name as name, mu.email
-                  FROM "Merchant" m
-                  LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
-                  LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id
-                  WHERE mu.email IS NOT NULL`;
-        const params = [];
-        if (audience.statuses && audience.statuses.length) {
-          // Map UI statuses to DB conditions
-          const conds = [];
-          if (audience.statuses.includes('free_trial')) conds.push(`m.subscription_tier IN ('none','trial')`);
-          if (audience.statuses.includes('tier1')) conds.push(`m.subscription_tier = 'tier1'`);
-          if (audience.statuses.includes('free_for_life')) conds.push(`m.subscription_tier = 'free_for_life'`);
-          if (audience.statuses.includes('blocked')) conds.push(`m.account_blocked = true`);
-          if (audience.statuses.includes('pending_cancellation')) conds.push(`m.billing_status = 'pending_cancellation'`);
-          if (conds.length) q += ` AND (${conds.join(' OR ')})`;
-        }
-        if (audience.cities && audience.cities.length) {
-          q += ` AND ml.city = ANY($${params.length + 1})`;
-          params.push(audience.cities);
-        }
-        if (audience.zip_codes && audience.zip_codes.length) {
-          q += ` AND ml.postal_code = ANY($${params.length + 1})`;
-          params.push(audience.zip_codes);
-        }
-        if (audience.joined_days) {
-          q += ` AND m.created_at >= NOW() - INTERVAL '${parseInt(audience.joined_days)} days'`;
-        }
-        if (audience.member_count_max != null) {
-          q += ` AND m.member_count <= ${parseInt(audience.member_count_max)}`;
-        }
-        // Use parameterized neon query
-        const merchantRows = params.length === 0
-          ? await sql.unsafe(q)
-          : params.length === 1
-            ? await sql.unsafe(q, params)
-            : await sql.unsafe(q, params);
+        // Start with all merchants that have an email
+        let merchantRows = await sql`
+          SELECT DISTINCT m.id, m.business_name as name, mu.email
+          FROM "Merchant" m
+          LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+          LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id AND ml.is_active = true
+          WHERE mu.email IS NOT NULL
+            AND (${!audience.statuses || !audience.statuses.length} OR (
+              (${(audience.statuses || []).includes('free_trial')} AND m.subscription_tier IN ('none','trial'))
+              OR (${(audience.statuses || []).includes('tier1')} AND m.subscription_tier = 'tier1')
+              OR (${(audience.statuses || []).includes('free_for_life')} AND m.subscription_tier = 'free_for_life')
+              OR (${(audience.statuses || []).includes('blocked')} AND m.account_blocked = true)
+              OR (${(audience.statuses || []).includes('pending_cancellation')} AND m.billing_status = 'pending_cancellation')
+            ))
+            AND (${!audience.cities || !audience.cities.length} OR ml.city = ANY(${audience.cities || []}))
+            AND (${!audience.zip_codes || !audience.zip_codes.length} OR ml.postal_code = ANY(${audience.zip_codes || []}))
+            AND (${!audience.joined_days} OR m.created_at >= NOW() - make_interval(days => ${parseInt(audience.joined_days) || 0}))
+            AND (${audience.member_count_max == null} OR m.member_count <= ${parseInt(audience.member_count_max) || 0})
+        `;
         recipients = recipients.concat(merchantRows.map(r => ({ name: r.name, email: r.email, type: 'merchant' })));
       }
 
       // Build member recipients
       if (audience.type === 'members' || audience.type === 'both') {
-        let q = `SELECT u.id, u.full_name as name, u.email
-                  FROM "User" u
-                  WHERE u.email IS NOT NULL AND u.email != ''`;
-        const params = [];
-        if (audience.cities && audience.cities.length) {
-          q += ` AND u.city = ANY($${params.length + 1})`;
-          params.push(audience.cities);
-        }
-        if (audience.zip_codes && audience.zip_codes.length) {
-          q += ` AND u.zip_code = ANY($${params.length + 1})`;
-          params.push(audience.zip_codes);
-        }
-        if (audience.joined_days) {
-          q += ` AND u.created_at >= NOW() - INTERVAL '${parseInt(audience.joined_days)} days'`;
-        }
-        const memberRows = params.length === 0
-          ? await sql.unsafe(q)
-          : await sql.unsafe(q, params);
+        let memberRows = await sql`
+          SELECT DISTINCT u.id, u.full_name as name, u.email
+          FROM "User" u
+          WHERE u.email IS NOT NULL AND u.email != ''
+            AND (${!audience.cities || !audience.cities.length} OR u.city = ANY(${audience.cities || []}))
+            AND (${!audience.zip_codes || !audience.zip_codes.length} OR u.zip_code = ANY(${audience.zip_codes || []}))
+            AND (${!audience.joined_days} OR u.created_at >= NOW() - make_interval(days => ${parseInt(audience.joined_days) || 0}))
+        `;
         recipients = recipients.concat(memberRows.map(r => ({ name: r.name, email: r.email, type: 'member' })));
       }
 
@@ -2105,36 +2078,36 @@ module.exports = async function handler(req, res) {
       const aud = audience || {};
 
       if (aud.type === 'merchants' || aud.type === 'both') {
-        let q = `SELECT mu.email, m.business_name as name
-                  FROM "Merchant" m
-                  LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
-                  LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id
-                  WHERE mu.email IS NOT NULL`;
-        const params = [];
-        if (aud.statuses && aud.statuses.length) {
-          const conds = [];
-          if (aud.statuses.includes('free_trial')) conds.push(`m.subscription_tier IN ('none','trial')`);
-          if (aud.statuses.includes('tier1')) conds.push(`m.subscription_tier = 'tier1'`);
-          if (aud.statuses.includes('free_for_life')) conds.push(`m.subscription_tier = 'free_for_life'`);
-          if (aud.statuses.includes('blocked')) conds.push(`m.account_blocked = true`);
-          if (aud.statuses.includes('pending_cancellation')) conds.push(`m.billing_status = 'pending_cancellation'`);
-          if (conds.length) q += ` AND (${conds.join(' OR ')})`;
-        }
-        if (aud.cities && aud.cities.length) { q += ` AND ml.city = ANY($${params.length + 1})`; params.push(aud.cities); }
-        if (aud.zip_codes && aud.zip_codes.length) { q += ` AND ml.postal_code = ANY($${params.length + 1})`; params.push(aud.zip_codes); }
-        if (aud.joined_days) q += ` AND m.created_at >= NOW() - INTERVAL '${parseInt(aud.joined_days)} days'`;
-        if (aud.member_count_max != null) q += ` AND m.member_count <= ${parseInt(aud.member_count_max)}`;
-        const rows = params.length === 0 ? await sql.unsafe(q) : await sql.unsafe(q, params);
+        const rows = await sql`
+          SELECT DISTINCT mu.email
+          FROM "Merchant" m
+          LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+          LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id AND ml.is_active = true
+          WHERE mu.email IS NOT NULL
+            AND (${!aud.statuses || !aud.statuses.length} OR (
+              (${(aud.statuses || []).includes('free_trial')} AND m.subscription_tier IN ('none','trial'))
+              OR (${(aud.statuses || []).includes('tier1')} AND m.subscription_tier = 'tier1')
+              OR (${(aud.statuses || []).includes('free_for_life')} AND m.subscription_tier = 'free_for_life')
+              OR (${(aud.statuses || []).includes('blocked')} AND m.account_blocked = true)
+              OR (${(aud.statuses || []).includes('pending_cancellation')} AND m.billing_status = 'pending_cancellation')
+            ))
+            AND (${!aud.cities || !aud.cities.length} OR ml.city = ANY(${aud.cities || []}))
+            AND (${!aud.zip_codes || !aud.zip_codes.length} OR ml.postal_code = ANY(${aud.zip_codes || []}))
+            AND (${!aud.joined_days} OR m.created_at >= NOW() - make_interval(days => ${parseInt(aud.joined_days) || 0}))
+            AND (${aud.member_count_max == null} OR m.member_count <= ${parseInt(aud.member_count_max) || 0})
+        `;
         recipients = recipients.concat(rows.map(r => r.email));
       }
 
       if (aud.type === 'members' || aud.type === 'both') {
-        let q = `SELECT u.email FROM "User" u WHERE u.email IS NOT NULL AND u.email != ''`;
-        const params = [];
-        if (aud.cities && aud.cities.length) { q += ` AND u.city = ANY($${params.length + 1})`; params.push(aud.cities); }
-        if (aud.zip_codes && aud.zip_codes.length) { q += ` AND u.zip_code = ANY($${params.length + 1})`; params.push(aud.zip_codes); }
-        if (aud.joined_days) q += ` AND u.created_at >= NOW() - INTERVAL '${parseInt(aud.joined_days)} days'`;
-        const rows = params.length === 0 ? await sql.unsafe(q) : await sql.unsafe(q, params);
+        const rows = await sql`
+          SELECT DISTINCT u.email
+          FROM "User" u
+          WHERE u.email IS NOT NULL AND u.email != ''
+            AND (${!aud.cities || !aud.cities.length} OR u.city = ANY(${aud.cities || []}))
+            AND (${!aud.zip_codes || !aud.zip_codes.length} OR u.zip_code = ANY(${aud.zip_codes || []}))
+            AND (${!aud.joined_days} OR u.created_at >= NOW() - make_interval(days => ${parseInt(aud.joined_days) || 0}))
+        `;
         recipients = recipients.concat(rows.map(r => r.email));
       }
 
