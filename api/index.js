@@ -1841,7 +1841,7 @@ module.exports = async function handler(req, res) {
           u.created_at,
           (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.user_id = u.id) as merchant_count,
           (SELECT COUNT(*) FROM "Redemption" r WHERE r.user_id = u.id AND r.status = 'redeemed') as redemption_count,
-          (SELECT COUNT(*) FROM "MerchantMember" ml2 WHERE ml2.user_id = u.id AND ml2.joined_at >= NOW() - INTERVAL '30 days') as merchants_30d,
+          (SELECT COUNT(*) FROM "MerchantMember" ml2 WHERE ml2.user_id = u.id AND ml2.created_at >= NOW() - INTERVAL '30 days') as merchants_30d,
           (SELECT COUNT(*) FROM "Redemption" r2 WHERE r2.user_id = u.id AND r2.status = 'redeemed' AND r2.redeemed_at >= NOW() - INTERVAL '30 days') as redeemed_30d
         FROM "User" u
         ORDER BY u.created_at DESC
