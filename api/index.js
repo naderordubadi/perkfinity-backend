@@ -1999,7 +1999,8 @@ module.exports = async function handler(req, res) {
             SELECT m.id, m.business_name,
               mu.email as contact_email,
               m.subscription_tier, m.billing_status, m.account_blocked,
-              m.member_count, m.created_at,
+              (SELECT COUNT(*) FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
+              m.created_at,
               ml.city as location_city, ml.postal_code as location_zip
             FROM "Merchant" m
             LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
@@ -2110,7 +2111,8 @@ module.exports = async function handler(req, res) {
         const rows = await sql`
           SELECT m.id, mu.email as contact_email,
             m.subscription_tier, m.billing_status, m.account_blocked,
-            m.member_count, m.created_at,
+            (SELECT COUNT(*) FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
+            m.created_at,
             ml.city as location_city, ml.postal_code as location_zip
           FROM "Merchant" m
           LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
