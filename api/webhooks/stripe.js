@@ -299,8 +299,9 @@ module.exports = async (req, res) => {
               updated_at = NOW()
           WHERE id = ${merchant.id}
         `;
+        await sql`UPDATE "Campaign" SET status = 'inactive', updated_at = NOW() WHERE merchant_id = ${merchant.id} AND status = 'active'`;
 
-        console.error(`[Stripe] 🚫 FULL BLOCK: Merchant ${merchant.id} (${merchant.business_name}) — subscription deleted`);
+        console.error(`[Stripe] 🚫 FULL BLOCK: Merchant ${merchant.id} (${merchant.business_name}) — subscription deleted, campaigns deactivated`);
         break;
       }
 

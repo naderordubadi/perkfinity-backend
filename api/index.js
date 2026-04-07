@@ -131,6 +131,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
               console.error(`Stripe auto-charge failed for merchant ${qrData.merchant_id}:`, stripeErr.message);
               // Upgrade tier but heavily block account due to failed payment
               await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', account_blocked = true, updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
+              await sql`UPDATE "Campaign" SET status = 'inactive', updated_at = NOW() WHERE merchant_id = ${qrData.merchant_id} AND status = 'active'`;
             }
           } else {
             // No Stripe setup — just upgrade tier (legacy behavior)
@@ -2175,6 +2176,7 @@ module.exports = async function handler(req, res) {
             updated_at = NOW()
         WHERE id = ${merchantId}
       `;
+      await sql`UPDATE "Campaign" SET status = 'inactive', updated_at = NOW() WHERE merchant_id = ${merchantId} AND status = 'active'`;
       return send(res, 200, { success: true, message: 'Your account has been cancelled. You can reactivate by contacting support.' });
     }
 
