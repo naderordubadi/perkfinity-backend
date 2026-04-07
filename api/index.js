@@ -760,7 +760,7 @@ module.exports = async function handler(req, res) {
           'active',
           ${now},
           ${expiresAt},
-          ${data.type === 'announcement' ? 'announcement' : 'perk'},
+          ${data.type || 'perk'},
           ${now},
           ${now}
         )
