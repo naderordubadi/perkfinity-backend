@@ -2195,6 +2195,10 @@ module.exports = async function handler(req, res) {
           sendSmtpEmail.subject = subject;
           sendSmtpEmail.htmlContent = html_body;
           if (brevoAttachments.length > 0) sendSmtpEmail.attachment = brevoAttachments;
+          // Schedule for later if scheduled_at is provided
+          if (scheduled_at) {
+            sendSmtpEmail.scheduledAt = new Date(scheduled_at).toISOString();
+          }
           await emailApi.sendTransacEmail(sendSmtpEmail);
           sentCount += batch.length;
         } catch (sendErr) {
