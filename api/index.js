@@ -1885,9 +1885,9 @@ module.exports = async function handler(req, res) {
 
     // ── GET /api/v1/admin/billing ─────────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/billing')) {
-      // Invoices with merchant names
+      // Invoices with merchant names and billing details
       const invoices = await sql`
-        SELECT i.*, m.business_name as merchant_name, m.subscription_tier
+        SELECT i.*, m.business_name as merchant_name, m.subscription_tier, m.next_billing_date
         FROM "Invoice" i
         LEFT JOIN "Merchant" m ON m.id = i.merchant_id
         ORDER BY i.created_at DESC
@@ -1899,7 +1899,8 @@ module.exports = async function handler(req, res) {
           COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND billing_status = 'active' AND account_blocked = false) as paying_merchants,
           COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND billing_status = 'pending_cancellation') as pending_cancel,
           COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
-          COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life') as ffl_merchants
+          COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life') as ffl_merchants,
+          COUNT(*) FILTER (WHERE subscription_tier IN ('none','trial') AND account_blocked = false) as upgrade_eligible
         FROM "Merchant"
       `;
 
@@ -1919,6 +1920,7 @@ module.exports = async function handler(req, res) {
             pending_cancel: parseInt(stats.pending_cancel) || 0,
             failed_payments: parseInt(stats.failed_payments) || 0,
             ffl_merchants: parseInt(stats.ffl_merchants) || 0,
+            upgrade_eligible: parseInt(stats.upgrade_eligible) || 0,
             total_revenue_cents: totalRevenue
           }
         }
