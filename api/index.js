@@ -1883,6 +1883,48 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ── GET /api/v1/admin/billing ─────────────────────────────────
+    if (method === 'GET' && url.endsWith('/admin/billing')) {
+      // Invoices with merchant names
+      const invoices = await sql`
+        SELECT i.*, m.business_name as merchant_name, m.subscription_tier
+        FROM "Invoice" i
+        LEFT JOIN "Merchant" m ON m.id = i.merchant_id
+        ORDER BY i.created_at DESC
+      `;
+
+      // Billing stats from Merchant table
+      const [stats] = await sql`
+        SELECT
+          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND billing_status = 'active' AND account_blocked = false) as paying_merchants,
+          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND billing_status = 'pending_cancellation') as pending_cancel,
+          COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
+          COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life') as ffl_merchants
+        FROM "Merchant"
+      `;
+
+      const payingCount = parseInt(stats.paying_merchants) || 0;
+      const mrr = payingCount * 29.99; // $29.99/mo per Tier 1 merchant
+      const totalRevenue = invoices
+        .filter(i => i.status === 'paid')
+        .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
+
+      return send(res, 200, {
+        success: true,
+        data: {
+          invoices,
+          stats: {
+            mrr: mrr.toFixed(2),
+            paying_merchants: payingCount,
+            pending_cancel: parseInt(stats.pending_cancel) || 0,
+            failed_payments: parseInt(stats.failed_payments) || 0,
+            ffl_merchants: parseInt(stats.ffl_merchants) || 0,
+            total_revenue_cents: totalRevenue
+          }
+        }
+      });
+    }
+
     // ── POST /api/v1/admin/access-codes — Generate a Free For Life code
     if (method === 'POST' && url.endsWith('/admin/access-codes')) {
       const adminSecret = req.headers['x-admin-secret'];
