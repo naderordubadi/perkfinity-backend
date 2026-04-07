@@ -2195,10 +2195,6 @@ module.exports = async function handler(req, res) {
           sendSmtpEmail.subject = subject;
           sendSmtpEmail.htmlContent = html_body;
           if (brevoAttachments.length > 0) sendSmtpEmail.attachment = brevoAttachments;
-          // Schedule for later if scheduled_at is provided
-          if (scheduled_at) {
-            sendSmtpEmail.scheduledAt = new Date(scheduled_at).toISOString();
-          }
           await emailApi.sendTransacEmail(sendSmtpEmail);
           sentCount += batch.length;
         } catch (sendErr) {
@@ -2208,6 +2204,7 @@ module.exports = async function handler(req, res) {
       }
 
       // Log to AnnouncementLog
+      const logStatus = failCount > 0 && sentCount === 0 ? 'failed' : failCount > 0 ? 'partial' : 'sent';
       try {
         await sql`
           INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, html_body, scheduled_at)
@@ -2219,7 +2216,7 @@ module.exports = async function handler(req, res) {
             ${sentCount},
             ${extEmails.length},
             ${brevoAttachments.length > 0},
-            ${failCount > 0 ? 'partial' : 'sent'},
+            ${logStatus},
             ${html_body},
             ${scheduled_at ? new Date(scheduled_at) : null}
           )
