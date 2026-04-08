@@ -2338,7 +2338,7 @@ module.exports = async function handler(req, res) {
         let st = 'available';
         const expired = new Date(c.expires_at) < now;
         
-        if (c.type === 'free_for_life') {
+        if (c.type === 'free_for_life' || !c.type) {
           if (c.used) st = 'used';
           else if (expired) st = 'expired';
         } else {
