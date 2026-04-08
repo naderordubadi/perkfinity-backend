@@ -2240,6 +2240,17 @@ module.exports = async function handler(req, res) {
 
     // ── GET /api/v1/admin/announcement-history ────────────────────
     if (method === 'GET' && url.endsWith('/admin/announcement-history')) {
+      // Auto-update scheduled entries whose time has passed → mark as sent
+      try {
+        await sql`
+          UPDATE "AnnouncementLog"
+          SET status = 'sent'
+          WHERE status = 'scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= NOW()
+        `;
+      } catch (upErr) {
+        console.error('Auto-update scheduled status error:', upErr.message);
+      }
+
       const history = await sql`
         SELECT * FROM "AnnouncementLog"
         ORDER BY created_at DESC
