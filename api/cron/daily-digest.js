@@ -133,7 +133,7 @@ module.exports = async (req, res) => {
         const emailHtml = `
           <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
             <div style="background:linear-gradient(135deg,#5B3FA5,#6BC17A); padding:24px; text-align:center;">
-              <img src="https://perkfinity.net/assets/Perkfinity-Logo.png" alt="Perkfinity" style="height:32px; opacity:0.95; margin-bottom:8px;"/>
+              <img src="https://perkfinity.net/assets/Perkfinity-Logo.png" alt="Perkfinity" width="200" height="40" style="display:inline-block; width:200px; max-width:100%; height:auto; max-height:40px; object-fit:contain; opacity:0.95; margin-bottom:8px;"/>
               <div style="color:#fff; font-size:20px; font-weight:800;">Your Neighborhood Perks, Just for You</div>
               <div style="color:rgba(255,255,255,0.85); font-size:13px; margin-top:4px;">${offerCount} new perk${offerCount > 1 ? 's' : ''} from your favorite stores</div>
             </div>
