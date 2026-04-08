@@ -2180,6 +2180,9 @@ module.exports = async function handler(req, res) {
         content: a.content // base64
       }));
 
+      // Determine if this is a scheduled send
+      const isScheduled = scheduled_at && new Date(scheduled_at) > new Date();
+
       // Send in batches of 50
       let sentCount = 0;
       let failCount = 0;
@@ -2195,6 +2198,10 @@ module.exports = async function handler(req, res) {
           sendSmtpEmail.subject = subject;
           sendSmtpEmail.htmlContent = html_body;
           if (brevoAttachments.length > 0) sendSmtpEmail.attachment = brevoAttachments;
+          // Schedule for later if scheduled_at is provided
+          if (isScheduled) {
+            sendSmtpEmail.scheduledAt = new Date(scheduled_at).toISOString();
+          }
           await emailApi.sendTransacEmail(sendSmtpEmail);
           sentCount += batch.length;
         } catch (sendErr) {
@@ -2204,7 +2211,7 @@ module.exports = async function handler(req, res) {
       }
 
       // Log to AnnouncementLog
-      const logStatus = failCount > 0 && sentCount === 0 ? 'failed' : failCount > 0 ? 'partial' : 'sent';
+      const logStatus = isScheduled ? 'scheduled' : (failCount > 0 && sentCount === 0 ? 'failed' : failCount > 0 ? 'partial' : 'sent');
       try {
         await sql`
           INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, html_body, scheduled_at)
@@ -2227,7 +2234,7 @@ module.exports = async function handler(req, res) {
 
       return send(res, 200, {
         success: true,
-        data: { sent: sentCount, failed: failCount, total_recipients: recipients.length }
+        data: { sent: sentCount, failed: failCount, total_recipients: recipients.length, scheduled: isScheduled }
       });
     }
 
