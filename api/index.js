@@ -244,6 +244,14 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { ok: true, status: 'healthy', db: 'connected', version: 'test-2026', timestamp: new Date().toISOString() });
     }
 
+    // ── DB Migration: Access Codes ──────────────────────────────
+    if (url === '/api/v1/migrate-codes' && method === 'GET') {
+      await sql`ALTER TABLE "AdminAccessCode" ADD COLUMN IF NOT EXISTS "type" TEXT DEFAULT 'free_for_life'`;
+      await sql`ALTER TABLE "AdminAccessCode" ADD COLUMN IF NOT EXISTS "member_limit" INTEGER`;
+      await sql`ALTER TABLE "AdminAccessCode" ADD COLUMN IF NOT EXISTS "use_count" INTEGER DEFAULT 0`;
+      return send(res, 200, { success: true, message: 'Access codes DB migration complete!' });
+    }
+
     // ── POST /api/v1/merchants/signup ─────────────────────────────
     if (method === 'POST' && url.endsWith('/merchants/signup')) {
       const data = req.body || {};
@@ -295,29 +303,35 @@ module.exports = async function handler(req, res) {
       let selectedTier = data.tier || 'trial';
       let skipStripe = false;
       let promoCode = (data.promo_code || '').trim().toUpperCase();
+      let extendedTrial = false;
       if (promoCode) {
-        const validCodes = { 'MEMBER-15': 15, 'MEMBER-20': 20 };
-        if (validCodes[promoCode]) {
-          // Standard promo: extended member limit
-          memberLimit = validCodes[promoCode];
-        } else {
-          // Check AdminAccessCode table for a free_for_life code
-          const [accessCode] = await sql`
-            SELECT id, label FROM "AdminAccessCode"
-            WHERE code = ${promoCode}
-              AND used = false
-              AND expires_at > NOW()
-            LIMIT 1
-          `;
-          if (!accessCode) {
-            return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
+        // Look up the promo code directly in AdminAccessCode
+        const [accessCode] = await sql`
+          SELECT id, label, type, member_limit, used 
+          FROM "AdminAccessCode"
+          WHERE code = ${promoCode}
+            AND expires_at > NOW()
+          LIMIT 1
+        `;
+
+        if (!accessCode) {
+          return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
+        }
+
+        if (accessCode.type === 'free_for_life') {
+          if (accessCode.used) {
+            return send(res, 400, { success: false, error: 'This promo code has already been used.' });
           }
-          // Valid Free For Life code — unlimited members, no Stripe
+          // Valid Free For Life code
           memberLimit = 999999;
           selectedTier = 'free_for_life';
           skipStripe = true;
-          // Mark the code as used (after merchant is inserted below)
-          promoCode = promoCode; // keep for DB stamp after insert
+        } else if (accessCode.type === 'extended_trial') {
+          // Keep tier as trial, but bump the limit
+          memberLimit = accessCode.member_limit || 10;
+          extendedTrial = true;
+        } else {
+          return send(res, 400, { success: false, error: 'Unrecognized promo code type.' });
         }
       } else {
         promoCode = null;
@@ -330,12 +344,20 @@ module.exports = async function handler(req, res) {
         RETURNING id, business_name, subscription_tier, member_limit
       `;
 
-      // If a free_for_life code was used, mark it as used now that we have the merchant id
+      // If a free_for_life code was used, mark it as single-use
       if (skipStripe && promoCode) {
         await sql`
           UPDATE "AdminAccessCode"
-          SET used = true, used_by = ${merchant.id}, used_at = NOW()
-          WHERE code = ${promoCode}
+          SET used = true, used_by = ${merchant.id}, used_at = NOW(), use_count = use_count + 1
+          WHERE code = ${promoCode} AND type = 'free_for_life'
+        `;
+      }
+      // If an extended_trial code was used, increment its counter
+      if (extendedTrial && promoCode) {
+        await sql`
+          UPDATE "AdminAccessCode"
+          SET use_count = use_count + 1, used_at = NOW()
+          WHERE code = ${promoCode} AND type = 'extended_trial'
         `;
       }
 
@@ -2259,7 +2281,7 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: history });
     }
 
-    // ── POST /api/v1/admin/access-codes — Generate a Free For Life code
+    // ── POST /api/v1/admin/access-codes — Generate a code
     if (method === 'POST' && url.endsWith('/admin/access-codes')) {
       const adminSecret = req.headers['x-admin-secret'];
       if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
@@ -2267,16 +2289,35 @@ module.exports = async function handler(req, res) {
       }
       const data = req.body || {};
       const label = (data.label || '').trim() || null;
-      // Generate a code: FREE-XXXX-XXXX (no ambiguous chars)
+      const type = data.type === 'extended_trial' ? 'extended_trial' : 'free_for_life';
+      
+      let code;
       const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-      const seg = (n) => Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-      const code = `FREE-${seg(4)}-${seg(4)}`;
-      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      if (type === 'extended_trial') {
+        if (!data.custom_code || !data.member_limit || !data.expires_in_days) {
+          return send(res, 400, { success: false, error: 'Missing required promo code fields' });
+        }
+        code = data.custom_code.trim().toUpperCase().replace(/\s+/g, '-');
+      } else {
+        const seg = (n) => Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+        code = `FREE-${seg(4)}-${seg(4)}`;
+      }
+
+      // Ensure code is unique exactly if extended_trial to prevent dual-creation overwrites
+      const existing = await sql`SELECT id FROM "AdminAccessCode" WHERE code = ${code}`;
+      if (existing.length > 0) {
+        return send(res, 400, { success: false, error: 'This promo code already exists. Please choose a different code name.' });
+      }
+
+      const days = parseInt(data.expires_in_days) || 30;
+      const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+      const memberLimit = type === 'extended_trial' ? parseInt(data.member_limit) : null;
+
       await sql`
-        INSERT INTO "AdminAccessCode" (code, label, expires_at)
-        VALUES (${code}, ${label}, ${expiresAt})
+        INSERT INTO "AdminAccessCode" (code, label, type, member_limit, expires_at)
+        VALUES (${code}, ${label}, ${type}, ${memberLimit}, ${expiresAt})
       `;
-      return send(res, 201, { success: true, data: { code, label, expires_at: expiresAt } });
+      return send(res, 201, { success: true, data: { code, label, type, member_limit: memberLimit, expires_at: expiresAt } });
     }
 
     // ── GET /api/v1/admin/access-codes — List all codes
@@ -2287,16 +2328,26 @@ module.exports = async function handler(req, res) {
       }
       const now = new Date();
       const codes = await sql`
-        SELECT ac.id, ac.code, ac.label, ac.used, ac.used_by, ac.used_at, ac.expires_at, ac.created_at,
+        SELECT ac.id, ac.code, ac.label, ac.type, ac.member_limit, ac.used, ac.used_by, ac.used_at, ac.expires_at, ac.created_at, ac.use_count,
                m.business_name as used_by_name
         FROM "AdminAccessCode" ac
         LEFT JOIN "Merchant" m ON m.id = ac.used_by
         ORDER BY ac.created_at DESC
       `;
-      const enriched = codes.map(c => ({
-        ...c,
-        status: c.used ? 'used' : new Date(c.expires_at) < now ? 'expired' : 'available'
-      }));
+      const enriched = codes.map(c => {
+        let st = 'available';
+        const expired = new Date(c.expires_at) < now;
+        
+        if (c.type === 'free_for_life') {
+          if (c.used) st = 'used';
+          else if (expired) st = 'expired';
+        } else {
+          // extended_trial codes are infinite use until they expire
+          if (expired) st = 'expired';
+        }
+        
+        return { ...c, status: st };
+      });
       return send(res, 200, { success: true, data: { codes: enriched } });
     }
 
