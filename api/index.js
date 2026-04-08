@@ -1212,7 +1212,7 @@ module.exports = async function handler(req, res) {
          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
          LEFT JOIN "QrCode" q ON q.merchant_id = m.id AND q.status = 'active'
          WHERE c.status = 'active' AND m.status = 'active' AND c.end_at > NOW()
-         ORDER BY m.id, c.created_at DESC
+         ORDER BY m.id, c.created_at ASC
        `;
 
       return send(res, 200, { success: true, data: campaigns });
