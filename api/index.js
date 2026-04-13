@@ -1279,7 +1279,7 @@ module.exports = async function handler(req, res) {
       const data = req.body || {};
       if (!data.token) return send(res, 400, { success: false, error: 'Missing push token' });
 
-      await sql`UPDATE "User" SET push_token = ${data.token} WHERE id = ${payload.userId}`;
+      await sql`UPDATE "User" SET push_token = ${data.token}, device_platform = ${data.platform || null} WHERE id = ${payload.userId}`;
       return send(res, 200, { success: true, message: 'Push token registered successfully' });
     }
 
@@ -1813,6 +1813,12 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: "Promo code columns added (member_limit, promo_code)!" });
     }
 
+    // ── device_platform migration ──────────────────────────────────
+    if (url === '/api/v1/admin/migrate-device-platform' && method === 'GET') {
+      await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS device_platform TEXT`;
+      return send(res, 200, { success: true, message: 'device_platform column added to User table.' });
+    }
+
     // ── AdminAccessCode migration ──────────────────────────────────
     if (url === '/api/v1/admin/migrate-access-codes' && method === 'GET') {
       await sql`
@@ -1831,6 +1837,7 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "cancelled_at" TIMESTAMPTZ`;
       return send(res, 200, { success: true, message: 'AdminAccessCode table created and Merchant.cancelled_at added.' });
     }
+
 
     if (url === '/api/v1/migrate-task2' && method === 'GET') {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "logo_url" TEXT`;
@@ -1851,6 +1858,38 @@ module.exports = async function handler(req, res) {
     // ══════════════════════════════════════════════════════════════
     // ADMIN API ENDPOINTS
     // ══════════════════════════════════════════════════════════════
+
+    // ── Helper: verify admin JWT Bearer token ────────────────────
+    function verifyAdminAuth(req) {
+      const authHeader = req.headers['authorization'] || '';
+      if (!authHeader.startsWith('Bearer ')) return false;
+      try {
+        const payload = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+        return payload.role === 'admin';
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // ── POST /api/v1/admin/login ─────────────────────────────────
+    if (method === 'POST' && url.endsWith('/admin/login')) {
+      const data = req.body || {};
+      const { email, password } = data;
+      const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+      const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+      if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+        return send(res, 500, { success: false, error: 'Admin credentials not configured on server' });
+      }
+      if (!email || !password) {
+        return send(res, 400, { success: false, error: 'Email and password are required' });
+      }
+      if (email.toLowerCase().trim() !== ADMIN_EMAIL.toLowerCase().trim() || password !== ADMIN_PASSWORD) {
+        return send(res, 401, { success: false, error: 'Invalid email or password' });
+      }
+      const token = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '12h' });
+      return send(res, 200, { success: true, token });
+    }
 
     // ── GET /api/v1/admin/merchants ─────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/merchants')) {
@@ -1884,7 +1923,7 @@ module.exports = async function handler(req, res) {
     // ── GET /api/v1/admin/members ────────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/members')) {
       const members = await sql`
-        SELECT u.id, u.email, u.full_name, u.phone_number, u.city, u.zip_code, u.push_token,
+        SELECT u.id, u.email, u.full_name, u.phone_number, u.city, u.zip_code, u.push_token, u.device_platform,
           u.created_at,
           (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.user_id = u.id) as merchant_count,
           (SELECT COUNT(*) FROM "Redemption" r WHERE r.user_id = u.id AND r.status = 'redeemed') as redemption_count,
@@ -1934,7 +1973,7 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url.endsWith('/admin/billing')) {
       // Invoices with merchant names and billing details
       const invoices = await sql`
-        SELECT i.*, m.business_name as merchant_name, m.subscription_tier, m.next_billing_date
+        SELECT i.*, m.business_name as merchant_name, m.subscription_tier, m.next_billing_date, m.billing_status
         FROM "Invoice" i
         LEFT JOIN "Merchant" m ON m.id = i.merchant_id
         ORDER BY i.created_at DESC
@@ -2283,8 +2322,7 @@ module.exports = async function handler(req, res) {
 
     // ── POST /api/v1/admin/access-codes — Generate a code
     if (method === 'POST' && url.endsWith('/admin/access-codes')) {
-      const adminSecret = req.headers['x-admin-secret'];
-      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+      if (!verifyAdminAuth(req)) {
         return send(res, 401, { success: false, error: 'Unauthorized' });
       }
       const data = req.body || {};
@@ -2322,8 +2360,7 @@ module.exports = async function handler(req, res) {
 
     // ── GET /api/v1/admin/access-codes — List all codes
     if (method === 'GET' && url.endsWith('/admin/access-codes')) {
-      const adminSecret = req.headers['x-admin-secret'];
-      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+      if (!verifyAdminAuth(req)) {
         return send(res, 401, { success: false, error: 'Unauthorized' });
       }
       const now = new Date();
@@ -2353,8 +2390,7 @@ module.exports = async function handler(req, res) {
 
     // ── POST /api/v1/admin/send-email — Admin bulk email via Brevo
     if (method === 'POST' && url.endsWith('/admin/send-email')) {
-      const adminSecret = req.headers['x-admin-secret'];
-      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+      if (!verifyAdminAuth(req)) {
         return send(res, 401, { success: false, error: 'Unauthorized' });
       }
       const data = req.body || {};
@@ -2398,8 +2434,7 @@ module.exports = async function handler(req, res) {
     // ── DELETE /api/v1/admin/merchants/:id — Admin hard delete
     const adminDeleteMatch = url.match(/\/api\/v1\/admin\/merchants\/([a-zA-Z0-9_-]+)$/);
     if (method === 'DELETE' && adminDeleteMatch) {
-      const adminSecret = req.headers['x-admin-secret'];
-      if (!adminSecret || adminSecret !== process.env.ADMIN_SECRET) {
+      if (!verifyAdminAuth(req)) {
         return send(res, 401, { success: false, error: 'Unauthorized' });
       }
       const merchantId = adminDeleteMatch[1];
