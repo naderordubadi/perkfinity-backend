@@ -2819,7 +2819,7 @@ module.exports = async function handler(req, res) {
       }
 
       // Safe to Wipe PII
-      await sql`UPDATE "MerchantUser" SET email = NULL, password_hash = NULL WHERE id = ${payload.userId}`;
+      await sql`UPDATE "MerchantUser" SET email = ${'deleted_' + payload.userId + '@deleted.invalid'}, password_hash = NULL WHERE id = ${payload.userId}`;
       await sql`UPDATE "Merchant" SET business_name = NULL, contact_name = NULL, phone = NULL, website = NULL, logo_url = NULL WHERE id = ${merchantId}`;
       await sql`UPDATE "MerchantLocation" SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL WHERE merchant_id = ${merchantId}`;
 
