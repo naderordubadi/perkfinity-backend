@@ -1969,7 +1969,7 @@ module.exports = async function handler(req, res) {
         LEFT JOIN "MerchantLocation" ml2 ON ml2.merchant_id = m.id AND ml2.is_active = true
         ORDER BY m.created_at DESC
       `;
-      const active = merchants.filter(m => m.status !== 'inactive').length;
+      const active = merchants.filter(m => m.status !== 'inactive' && m.billing_status !== 'deleted').length;
       return send(res, 200, {
         success: true,
         data: {
@@ -2041,7 +2041,7 @@ module.exports = async function handler(req, res) {
       // Billing stats from Merchant table
       const [stats] = await sql`
         SELECT
-          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND account_blocked = false AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation')) as paying_merchants,
+          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND account_blocked = false AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')) as paying_merchants,
           COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND billing_status = 'pending_cancellation') as pending_cancel,
           COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
           COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
