@@ -173,6 +173,7 @@ module.exports = async (req, res) => {
             UPDATE "Merchant"
             SET billing_status = 'active',
                 account_blocked = false,
+                cancelled_at = NULL,
                 next_billing_date = NOW() + INTERVAL '30 days',
                 updated_at = NOW()
             WHERE id = ${merchant.id}
@@ -264,6 +265,7 @@ module.exports = async (req, res) => {
           await sql`
             UPDATE "Merchant"
             SET billing_status = 'active',
+                cancelled_at = NULL,
                 updated_at = NOW()
             WHERE id = ${merchant.id}
           `;
@@ -295,6 +297,7 @@ module.exports = async (req, res) => {
           UPDATE "Merchant"
           SET billing_status = 'cancelled',
               account_blocked = true,
+              cancelled_at = NOW(),
               stripe_subscription_id = NULL,
               updated_at = NOW()
           WHERE id = ${merchant.id}

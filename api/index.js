@@ -99,7 +99,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
     // 2. Auto-tier upgrade: check if merchant hit their free member limit
     //    If they have a saved payment method, auto-charge via Stripe.
     try {
-      const [merchant] = await sql`SELECT id, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
+      const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
       if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
         const limit = merchant.member_limit || 10;
         const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
@@ -129,9 +129,57 @@ async function autoEnrollUser(sql, userId, publicCode) {
               console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 via Stripe (${countRow.cnt} members, limit was ${limit})`);
             } catch (stripeErr) {
               console.error(`Stripe auto-charge failed for merchant ${qrData.merchant_id}:`, stripeErr.message);
-              // Upgrade tier but heavily block account due to failed payment
-              await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', account_blocked = true, updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
+              // Block account and record failure timestamp for the reminder job
+              await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', account_blocked = true, payment_failed_at = NOW(), payment_failure_reminder_count = 0, updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
               await sql`UPDATE "Campaign" SET status = 'inactive', updated_at = NOW() WHERE merchant_id = ${qrData.merchant_id} AND status = 'active'`;
+              // Send Day-0 notification email to merchant immediately
+              try {
+                const [mu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${qrData.merchant_id} LIMIT 1`;
+                const BREVO_KEY = process.env.BREVO_API_KEY;
+                if (BREVO_KEY && mu?.email) {
+                  const brevoClient = SibApiV3Sdk.ApiClient.instance;
+                  brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+                  const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+                  const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+                  emailObj.sender = { name: 'Perkfinity Support', email: 'support@perkfinity.net' };
+                  emailObj.to = [{ email: mu.email }];
+                  emailObj.subject = 'Action Required: Payment Failed — Your Perkfinity Account Is Paused';
+                  const bizName = merchant?.business_name ? ` ${merchant.business_name}` : '';
+                  emailObj.htmlContent = `
+                    <div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee;">
+                      <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;">
+                        <div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div>
+                      </div>
+                      <div style="padding:28px 24px;">
+                        <div style="font-size:20px;font-weight:700;color:#dc2626;margin-bottom:16px;">⚠️ Payment Failed — Action Required</div>
+                        <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">
+                          Hi${bizName},<br><br>
+                          Your account has reached the free member limit and we attempted to automatically upgrade you to <strong>Perkfinity Tier 1</strong>. Unfortunately, your payment method was declined.
+                        </p>
+                        <div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+                          <div style="font-size:13px;font-weight:700;color:#dc2626;margin-bottom:8px;">Your account is currently paused:</div>
+                          <ul style="margin:0;padding-left:18px;font-size:13px;color:#991b1b;line-height:2;">
+                            <li>Members cannot redeem perks by scanning your QR code</li>
+                            <li>Campaigns and promotions are frozen</li>
+                            <li>Your member data is fully preserved</li>
+                          </ul>
+                        </div>
+                        <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:24px;">
+                          To restore full access, log in to your dashboard, update your payment method, and reactivate your account. The process takes less than a minute.
+                        </p>
+                        <div style="text-align:center;margin-bottom:24px;">
+                          <a href="https://perkfinity.net/dashboard.html" style="display:inline-block;background:#5b3fa5;color:#fff;font-weight:700;text-decoration:none;padding:14px 32px;border-radius:10px;font-size:15px;">Update Payment &amp; Restore Access</a>
+                        </div>
+                        <p style="font-size:13px;color:#aaa;text-align:center;">Need help? Reply to this email and our team will assist you right away.</p>
+                      </div>
+                    </div>
+                  `;
+                  await emailApi.sendTransacEmail(emailObj);
+                  console.log(`[PaymentFailed] Day-0 email sent to ${mu.email} for merchant ${qrData.merchant_id}`);
+                }
+              } catch (emailErr) {
+                console.error('[PaymentFailed] Day-0 email send failed:', emailErr.message);
+              }
             }
           } else {
             // No Stripe setup — just upgrade tier (legacy behavior)
@@ -1819,6 +1867,13 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: 'device_platform column added to User table.' });
     }
 
+    // ── payment_failed_at migration ────────────────────────────────
+    if (url === '/api/v1/admin/migrate-payment-failed-at' && method === 'GET') {
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS payment_failed_at TIMESTAMPTZ`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS payment_failure_reminder_count INTEGER DEFAULT 0`;
+      return send(res, 200, { success: true, message: 'payment_failed_at and payment_failure_reminder_count added to Merchant table.' });
+    }
+
     // ── AdminAccessCode migration ──────────────────────────────────
     if (url === '/api/v1/admin/migrate-access-codes' && method === 'GET') {
       await sql`
@@ -2696,7 +2751,8 @@ module.exports = async function handler(req, res) {
       const [merchant] = await sql`
         SELECT id, business_name, subscription_tier, billing_status, account_blocked,
                stripe_customer_id, stripe_subscription_id, subscription_started_at,
-               next_billing_date, member_limit, promo_code, created_at
+               next_billing_date, member_limit, promo_code, created_at,
+               payment_failed_at, payment_failure_reminder_count
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -2728,6 +2784,7 @@ module.exports = async function handler(req, res) {
           created_at: merchant.created_at,
           has_stripe: !!merchant.stripe_customer_id,
           has_subscription: !!merchant.stripe_subscription_id,
+          payment_failed_at: merchant.payment_failed_at || null,
           invoices
         }
       });
@@ -2777,6 +2834,9 @@ module.exports = async function handler(req, res) {
               stripe_subscription_id = ${subscription.id},
               billing_status = 'active',
               account_blocked = false,
+              cancelled_at = NULL,
+              payment_failed_at = NULL,
+              payment_failure_reminder_count = NULL,
               subscription_started_at = NOW(),
               next_billing_date = NOW() + INTERVAL '30 days',
               updated_at = NOW()
@@ -2787,6 +2847,23 @@ module.exports = async function handler(req, res) {
       } catch (stripeErr) {
         return send(res, 400, { success: false, error: `Reactivation failed: ${stripeErr.message}` });
       }
+    }
+
+    // ── GET /api/v1/admin/stuck-payments ──────────────────────────
+    // Returns merchants blocked due to auto-upgrade payment failure (not normal cancellation)
+    if (method === 'GET' && url.endsWith('/admin/stuck-payments')) {
+      const stuckMerchants = await sql`
+        SELECT m.id, m.business_name, m.payment_failed_at, m.payment_failure_reminder_count,
+               EXTRACT(DAY FROM NOW() - m.payment_failed_at)::int AS days_since_failure,
+               mu.email
+        FROM "Merchant" m
+        LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+        WHERE m.billing_status = 'payment_failed'
+          AND m.account_blocked = true
+          AND m.payment_failed_at IS NOT NULL
+        ORDER BY m.payment_failed_at ASC
+      `;
+      return send(res, 200, { success: true, data: stuckMerchants });
     }
 
     // ── DELETE /api/v1/merchants/account ──────────────────────────
