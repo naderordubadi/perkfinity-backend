@@ -114,19 +114,23 @@ export async function purgeCancelledMerchants() {
         await sql`
           UPDATE "MerchantUser"
           SET email = ${'deleted_' + merchant.merchant_user_id + '@deleted.invalid'},
-              password_hash = NULL
+              password_hash = 'DELETED'
           WHERE id = ${merchant.merchant_user_id}
         `;
       }
 
-      // Wipe Merchant PII
+      // Wipe Merchant PII and stamp status as 'deleted'
       await sql`
         UPDATE "Merchant"
-        SET business_name = NULL,
+        SET business_name = '[Deleted]',
             contact_name = NULL,
             phone = NULL,
             website = NULL,
-            logo_url = NULL
+            logo_url = NULL,
+            status = 'cancelled',
+            billing_status = 'deleted',
+            account_blocked = true,
+            updated_at = NOW()
         WHERE id = ${merchant.id}
       `;
 

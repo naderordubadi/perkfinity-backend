@@ -643,6 +643,7 @@ module.exports = async function handler(req, res) {
       const zip = zipParam.trim();
 
       // Correlated subqueries: one row per merchant, no DISTINCT ON row-multiplication risk
+      // Excludes blocked and deleted merchants from user-facing discovery
       const merchants = await sql`
         SELECT
           m.id,
@@ -669,6 +670,8 @@ module.exports = async function handler(req, res) {
           ON l.merchant_id = m.id
          AND l.is_active = true
         WHERE TRIM(l.postal_code) = TRIM(${zip})
+          AND m.account_blocked = false
+          AND (m.billing_status IS NULL OR m.billing_status != 'deleted')
         ORDER BY m.business_name ASC
       `;
 
@@ -683,9 +686,10 @@ module.exports = async function handler(req, res) {
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
 
-      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked, billing_status FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
-      if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is inactive' });
+      if (merchant.billing_status === 'deleted') return send(res, 403, { success: false, error: 'This store is no longer available' });
+      if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is currently inactive' });
 
       const [location] = await sql`SELECT address, city, state, postal_code FROM "MerchantLocation" WHERE merchant_id = ${qrCode.merchant_id} AND is_active = true LIMIT 1`;
 
@@ -2900,7 +2904,20 @@ module.exports = async function handler(req, res) {
       // so they must use sentinel values instead of NULL to avoid constraint violations.
       const deletedEmail = 'deleted_' + payload.userId + '@deleted.invalid';
       await sql`UPDATE "MerchantUser" SET email = ${deletedEmail}, password_hash = 'DELETED' WHERE id = ${payload.userId}`;
-      await sql`UPDATE "Merchant" SET business_name = '[Deleted]', contact_name = NULL, phone = NULL, website = NULL, logo_url = NULL WHERE id = ${merchantId}`;
+      await sql`
+        UPDATE "Merchant"
+        SET business_name = '[Deleted]',
+            contact_name = NULL,
+            phone = NULL,
+            website = NULL,
+            logo_url = NULL,
+            status = 'cancelled',
+            billing_status = 'deleted',
+            account_blocked = true,
+            cancelled_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
       await sql`UPDATE "MerchantLocation" SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL WHERE merchant_id = ${merchantId}`;
 
       return send(res, 200, { success: true, message: 'Account wiped successfully' });
