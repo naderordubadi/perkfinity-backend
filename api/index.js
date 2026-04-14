@@ -2896,8 +2896,11 @@ module.exports = async function handler(req, res) {
       }
 
       // Safe to Wipe PII
-      await sql`UPDATE "MerchantUser" SET email = ${'deleted_' + payload.userId + '@deleted.invalid'}, password_hash = 'DELETED' WHERE id = ${payload.userId}`;
-      await sql`UPDATE "Merchant" SET business_name = NULL, contact_name = NULL, phone = NULL, website = NULL, logo_url = NULL WHERE id = ${merchantId}`;
+      // NOTE: MerchantUser.password_hash and Merchant.business_name are NOT NULL in the schema,
+      // so they must use sentinel values instead of NULL to avoid constraint violations.
+      const deletedEmail = 'deleted_' + payload.userId + '@deleted.invalid';
+      await sql`UPDATE "MerchantUser" SET email = ${deletedEmail}, password_hash = 'DELETED' WHERE id = ${payload.userId}`;
+      await sql`UPDATE "Merchant" SET business_name = '[Deleted]', contact_name = NULL, phone = NULL, website = NULL, logo_url = NULL WHERE id = ${merchantId}`;
       await sql`UPDATE "MerchantLocation" SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL WHERE merchant_id = ${merchantId}`;
 
       return send(res, 200, { success: true, message: 'Account wiped successfully' });
