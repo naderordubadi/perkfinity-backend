@@ -4,7 +4,7 @@
   "description": "Perkfinity Backend — Vercel Serverless + Neon",
   "main": "api/index.js",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "node dev-server.js",
     "build": "tsc --noEmit",
     "vercel-build": "echo 'No build needed'"
   },
