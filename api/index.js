@@ -101,7 +101,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
     try {
       const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
       if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
-        const limit = merchant.member_limit || 10;
+        const limit = merchant.member_limit || 100;
         const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
         if (countRow && countRow.cnt >= limit) {
           // If merchant has a saved payment method, create a Stripe subscription automatically
@@ -347,7 +347,7 @@ module.exports = async function handler(req, res) {
       const oneYear = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
       // Promo code validation → set member_limit (or unlock Free For Life)
-      let memberLimit = 10;
+      let memberLimit = 100;
       let selectedTier = data.tier || 'trial';
       let skipStripe = false;
       let promoCode = (data.promo_code || '').trim().toUpperCase();
@@ -376,7 +376,7 @@ module.exports = async function handler(req, res) {
           skipStripe = true;
         } else if (accessCode.type === 'extended_trial') {
           // Keep tier as trial, but bump the limit
-          memberLimit = accessCode.member_limit || 10;
+          memberLimit = accessCode.member_limit || 100;
           extendedTrial = true;
         } else {
           return send(res, 400, { success: false, error: 'Unrecognized promo code type.' });
@@ -1860,7 +1860,7 @@ module.exports = async function handler(req, res) {
 
     // ── Promo code + auto-tier migration ──────────────────────────
     if (url === '/api/v1/migrate-promo' && method === 'GET') {
-      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "member_limit" INT DEFAULT 10`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "member_limit" INT DEFAULT 100`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "promo_code" TEXT`;
       return send(res, 200, { success: true, message: "Promo code columns added (member_limit, promo_code)!" });
     }
@@ -2782,7 +2782,7 @@ module.exports = async function handler(req, res) {
           billing_status: merchant.billing_status || 'none',
           account_blocked: merchant.account_blocked || false,
           member_count: countRow?.cnt || 0,
-          member_limit: merchant.member_limit || 10,
+          member_limit: merchant.member_limit || 100,
           subscription_started_at: merchant.subscription_started_at,
           next_billing_date: merchant.next_billing_date,
           created_at: merchant.created_at,
