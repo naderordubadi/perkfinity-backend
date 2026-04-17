@@ -910,6 +910,20 @@ module.exports = async function handler(req, res) {
             AND (r.status = 'redeemed' OR r.redeemed = true)
             AND r.redeemed_at >= ${ninetyDaysAgo}
         `;
+      } else if (data.audience === 'by_location') {
+        const cities = Array.isArray(data.audience_cities) ? data.audience_cities.filter(c => c) : [];
+        const zips = Array.isArray(data.audience_zips) ? data.audience_zips.filter(z => z) : [];
+        // Fetch all members with their city/zip, then filter in JS
+        const allWithLocation = await sql`
+          SELECT DISTINCT mm.user_id, u.city, u.zip_code FROM "MerchantMember" mm
+          JOIN "User" u ON u.id = mm.user_id
+          WHERE mm.merchant_id = ${targetMerchantId}
+        `;
+        qualifyingUsers = allWithLocation.filter(u => {
+          const cityMatch = cities.length === 0 || cities.includes(u.city);
+          const zipMatch = zips.length === 0 || zips.includes(u.zip_code);
+          return (cities.length > 0 && cityMatch) || (zips.length > 0 && zipMatch);
+        });
       }
       // Create Redemption rows for all qualifying users
       let assignedCount = 0;
@@ -2445,6 +2459,20 @@ module.exports = async function handler(req, res) {
         return { ...c, status: st };
       });
       return send(res, 200, { success: true, data: { codes: enriched } });
+    }
+
+    // ── PUT /api/v1/admin/access-codes/:id/expire — Manually expire a code
+    const expireCodeMatch = url.match(/\/api\/v1\/admin\/access-codes\/([^/]+)\/expire$/);
+    if (method === 'PUT' && expireCodeMatch) {
+      if (!verifyAdminAuth(req)) {
+        return send(res, 401, { success: false, error: 'Unauthorized' });
+      }
+      const codeId = expireCodeMatch[1];
+      const [code] = await sql`SELECT id, code FROM "AdminAccessCode" WHERE id = ${codeId} LIMIT 1`;
+      if (!code) return send(res, 404, { success: false, error: 'Access code not found' });
+
+      await sql`UPDATE "AdminAccessCode" SET expires_at = NOW() WHERE id = ${codeId}`;
+      return send(res, 200, { success: true, message: `Code ${code.code} has been expired.` });
     }
 
     // ── POST /api/v1/admin/send-email — Admin bulk email via Brevo
