@@ -614,6 +614,7 @@ module.exports = async function handler(req, res) {
       `;
       await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "store_address" TEXT`;
       await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "offer_expires_at" TIMESTAMPTZ`;
+      await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS "disclaimer" TEXT`;
       // -- Notification History: persists sent notifications for in-app viewing --
       await sql`
         CREATE TABLE IF NOT EXISTS "NotificationHistory" (
@@ -984,8 +985,8 @@ module.exports = async function handler(req, res) {
           for (const userId of userIds) {
             try {
               await sql`
-                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels, offer_expires_at)
-                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel}, ${campaign.end_at})
+                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels, offer_expires_at, disclaimer)
+                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel}, ${campaign.end_at}, ${data.disclaimer || null})
               `;
               queuedCount++;
             } catch (queueErr) {
