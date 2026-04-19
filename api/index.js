@@ -982,6 +982,7 @@ module.exports = async function handler(req, res) {
 
           // Insert into NotificationQueue for each qualifying user
           const userIds = qualifyingUsers.map(u => u.user_id);
+          const queueErrors = [];
           for (const userId of userIds) {
             try {
               await sql`
@@ -991,6 +992,7 @@ module.exports = async function handler(req, res) {
               queuedCount++;
             } catch (queueErr) {
               console.error(`Queue insert failed for user ${userId}:`, queueErr.message);
+              queueErrors.push(queueErr.message);
             }
           }
         } catch (setupErr) {
@@ -999,7 +1001,7 @@ module.exports = async function handler(req, res) {
       }
 
       const channelMsg = deliveryChannel === 'email' ? `${queuedCount} email(s)` : deliveryChannel === 'push' ? `${queuedCount} push notification(s)` : `${queuedCount} email(s) and ${queuedCount} push notification(s)`;
-      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, queued_count: queuedCount, delivery_channel: deliveryChannel, message: `Promotion created and assigned to ${assignedCount} member(s). ${channelMsg} queued for daily digest.` } });
+      return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, queued_count: queuedCount, delivery_channel: deliveryChannel, queue_errors: typeof queueErrors !== 'undefined' ? queueErrors : [], message: `Promotion created and assigned to ${assignedCount} member(s). ${channelMsg} queued for daily digest.` } });
     }
 
     // ── POST /api/v1/consumers/apple-signin ────────────────────────
