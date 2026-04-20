@@ -760,13 +760,13 @@ module.exports = async function handler(req, res) {
       // return all active campaigns for this merchant so the QR page can still show something
       if (campaigns.length === 0) {
         campaigns = await sql`
-          SELECT id, title, discount_percentage, terms, status, start_at, end_at
+          SELECT id, title, discount_percentage, terms, status, start_at, end_at, campaign_type
           FROM "Campaign"
           WHERE merchant_id = ${qrCode.merchant_id}
             AND status = 'active'
             AND end_at > NOW()
             AND discount_percentage >= 0
-          ORDER BY created_at DESC
+          ORDER BY created_at ASC
           LIMIT 5
         `;
       }
