@@ -170,9 +170,15 @@ module.exports = async (req, res) => {
         const pushTitle = offerCount === 1
           ? `🎉 New perk from ${items[0].store_name}`
           : `🎉 ${offerCount} new perks from your local stores`;
-        const pushBody = offerCount === 1
+        let pushBody = offerCount === 1
           ? `${items[0].title}${items[0].store_address ? ' — 📍 ' + items[0].store_address : ''}`
           : items.map(i => `${i.store_name}: ${i.title}`).slice(0, 3).join(' • ') + (offerCount > 3 ? ` +${offerCount - 3} more` : '');
+
+        // Append disclaimer to push body if present
+        const disclaimers = [...new Set(items.map(i => i.disclaimer).filter(Boolean))];
+        if (disclaimers.length > 0) {
+          pushBody += '\n' + disclaimers.join(' | ');
+        }
 
         const pushResult = await sendPushNotification(pushToken, pushTitle, pushBody);
         if (pushResult) totalPushSent++;
@@ -200,6 +206,7 @@ module.exports = async (req, res) => {
         campaign_id: i.campaign_id,
         merchant_id: i.merchant_id,
         offer_expires_at: i.offer_expires_at || null,
+        disclaimer: i.disclaimer || null,
       })));
       try {
         await sql`
