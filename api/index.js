@@ -485,12 +485,16 @@ module.exports = async function handler(req, res) {
         { expiresIn: '8h' }
       );
 
-      // Detect incomplete setup: no payment method on file, not FFL, not cancelled/deleted
+      // Detect incomplete setup: account abandoned before completing Step 4.
+      // Requires BOTH billing_status AND stripe_payment_method_id to be null:
+      //   - Tier 1 active merchants: billing_status='active' → passes first check
+      //   - Old trial merchants (pre-confirm-setup): stripe_payment_method_id set by webhook → passes second check
+      //   - New trial merchants: billing_status='trial' set by confirm-setup → passes first check
+      //   - FFL: excluded by tier check
       const setupIncomplete = (
+        !user.billing_status &&
         !user.stripe_payment_method_id &&
-        user.subscription_tier !== 'free_for_life' &&
-        user.billing_status !== 'cancelled' &&
-        user.billing_status !== 'deleted'
+        user.subscription_tier !== 'free_for_life'
       );
 
       const { password_hash: _pw, ...safeUser } = user;
