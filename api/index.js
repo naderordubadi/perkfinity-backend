@@ -466,7 +466,8 @@ module.exports = async function handler(req, res) {
       }
 
       const [user] = await sql`
-        SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status, m.logo_url
+        SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status, m.logo_url,
+               m.stripe_payment_method_id, m.billing_status
         FROM "MerchantUser" u
         JOIN "Merchant" m ON m.id = u.merchant_id
         WHERE u.email = ${data.email.toLowerCase()}
@@ -484,8 +485,16 @@ module.exports = async function handler(req, res) {
         { expiresIn: '8h' }
       );
 
+      // Detect incomplete setup: no payment method on file, not FFL, not cancelled/deleted
+      const setupIncomplete = (
+        !user.stripe_payment_method_id &&
+        user.subscription_tier !== 'free_for_life' &&
+        user.billing_status !== 'cancelled' &&
+        user.billing_status !== 'deleted'
+      );
+
       const { password_hash: _pw, ...safeUser } = user;
-      return send(res, 200, { success: true, data: { merchantUser: safeUser, accessToken } });
+      return send(res, 200, { success: true, data: { merchantUser: safeUser, accessToken, setup_incomplete: setupIncomplete } });
     }
 
     // ── POST /api/v1/merchants/forgot-password ─────────────────────
@@ -789,7 +798,8 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
-        SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, l.address, l.suite, l.city, l.state, l.postal_code, u.email
+        SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, m.subscription_tier,
+               m.stripe_payment_method_id, m.billing_status, l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
         LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
@@ -1632,10 +1642,12 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const data = req.body || {};
-      if (!data.logo_url) return send(res, 400, { success: false, error: 'Missing logo_url' });
+      // Allow null to support logo deletion
+      if (data.logo_url === undefined) return send(res, 400, { success: false, error: 'Missing logo_url' });
 
-      await sql`UPDATE "Merchant" SET logo_url = ${data.logo_url} WHERE id = ${merchantId}`;
-      return send(res, 200, { success: true, data: { logo_url: data.logo_url } });
+      const logoValue = data.logo_url || null;
+      await sql`UPDATE "Merchant" SET logo_url = ${logoValue} WHERE id = ${merchantId}`;
+      return send(res, 200, { success: true, data: { logo_url: logoValue } });
     }
 
     // ── GET /api/v1/merchants/:id/members ─────────────────────────
@@ -2625,6 +2637,34 @@ module.exports = async function handler(req, res) {
           customer_id: customerId
         }
       });
+    }
+
+    // ── POST /api/v1/stripe/confirm-setup ─────────────────────────
+    // Called immediately after confirmCardSetup() succeeds on the frontend.
+    // Writes stripe_payment_method_id to the DB without waiting for a webhook,
+    // preventing the dashboard gate race condition.
+    if (method === 'POST' && url.endsWith('/stripe/confirm-setup')) {
+      const data = req.body || {};
+      const { merchant_id, payment_method_id } = data;
+      if (!merchant_id || !payment_method_id) {
+        return send(res, 400, { success: false, error: 'merchant_id and payment_method_id are required' });
+      }
+
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchant_id) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      await sql`
+        UPDATE "Merchant"
+        SET stripe_payment_method_id = ${payment_method_id},
+            billing_status = COALESCE(billing_status, 'trial'),
+            updated_at = NOW()
+        WHERE id = ${merchant_id}
+      `;
+      return send(res, 200, { success: true });
     }
 
     // ── POST /api/v1/stripe/create-checkout-session (Tier 1) ──────
