@@ -485,24 +485,18 @@ module.exports = async function handler(req, res) {
         { expiresIn: '8h' }
       );
 
-      // ── Payment Setup Gate ─────────────────────────────────────────
-      // Kill switch: set ENABLE_PAYMENT_GATE=true in Vercel env vars to activate.
-      // If the env var is missing or not 'true', gate is disabled and all merchants pass through.
-      // This allows instant disable via Vercel dashboard without a code deploy.
-      let setupIncomplete = false;
-      if (process.env.ENABLE_PAYMENT_GATE === 'true') {
-        // Only block if BOTH billing_status AND stripe_payment_method_id are null:
-        //   - Tier 1 active: billing_status='active' → passes
-        //   - Old trial with card: stripe_payment_method_id set by Stripe webhook → passes
-        //   - New trial with card: billing_status='trial' set by confirm-setup → passes
-        //   - FFL: excluded by tier check
-        //   - Abandoned (never finished Step 4): both null → blocked
-        setupIncomplete = (
-          !user.billing_status &&
-          !user.stripe_payment_method_id &&
-          user.subscription_tier !== 'free_for_life'
-        );
-      }
+      // Payment Setup Gate: block accounts that never completed Step 4.
+      // Requires BOTH billing_status AND stripe_payment_method_id to be null:
+      //   - Tier 1 active: billing_status='active' → passes
+      //   - Old trial with card: stripe_payment_method_id set by webhook → passes
+      //   - New trial with card: billing_status='trial' set by confirm-setup → passes
+      //   - FFL: excluded by tier check
+      //   - Abandoned (never finished Step 4): both null → blocked
+      const setupIncomplete = (
+        !user.billing_status &&
+        !user.stripe_payment_method_id &&
+        user.subscription_tier !== 'free_for_life'
+      );
 
       const { password_hash: _pw, ...safeUser } = user;
       return send(res, 200, { success: true, data: { merchantUser: safeUser, accessToken, setup_incomplete: setupIncomplete } });
