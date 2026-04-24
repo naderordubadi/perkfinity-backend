@@ -1297,9 +1297,16 @@ module.exports = async function handler(req, res) {
 
     // ── GET /api/v1/consumers/campaigns ───────────────────────────
     if (method === 'GET' && url.endsWith('/consumers/campaigns')) {
-      // Optional: This could be protected, but since it's just available merchants/campaigns, 
-      // keeping it public or semi-public is often fine. Here we assume we just return 
-      // active merchants and their active campaigns.
+      // Optionally resolve the logged-in user so we can flag is_member per merchant.
+      // Unauthenticated callers get is_member: false for all merchants.
+      let authedUserId = null;
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        try {
+          const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
+          authedUserId = decoded.userId || null;
+        } catch { /* invalid/expired token — treat as unauthenticated */ }
+      }
 
       const campaigns = await sql`
          SELECT DISTINCT ON (m.id)
@@ -1313,7 +1320,11 @@ module.exports = async function handler(req, res) {
            c.title as latest_offer_title,
            c.end_at as offer_expires_at,
            (SELECT COUNT(*) FROM "Campaign" c2
-            WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count
+            WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count,
+           CASE WHEN ${authedUserId} IS NOT NULL AND EXISTS (
+             SELECT 1 FROM "MerchantMember" mm
+             WHERE mm.merchant_id = m.id AND mm.user_id = ${authedUserId}
+           ) THEN true ELSE false END as is_member
          FROM "Campaign" c
          JOIN "Merchant" m ON m.id = c.merchant_id
          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
