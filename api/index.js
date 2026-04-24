@@ -1308,6 +1308,15 @@ module.exports = async function handler(req, res) {
         } catch { /* invalid/expired token — treat as unauthenticated */ }
       }
 
+      // Fetch the list of merchant IDs this user has already joined (separate simple query)
+      let memberMerchantIds = new Set();
+      if (authedUserId) {
+        const memberRows = await sql`
+          SELECT merchant_id FROM "MerchantMember" WHERE user_id = ${authedUserId}
+        `;
+        memberMerchantIds = new Set(memberRows.map(r => r.merchant_id));
+      }
+
       const campaigns = await sql`
          SELECT DISTINCT ON (m.id)
            m.id as id,
@@ -1320,11 +1329,7 @@ module.exports = async function handler(req, res) {
            c.title as latest_offer_title,
            c.end_at as offer_expires_at,
            (SELECT COUNT(*) FROM "Campaign" c2
-            WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count,
-           CASE WHEN ${authedUserId} IS NOT NULL AND EXISTS (
-             SELECT 1 FROM "MerchantMember" mm
-             WHERE mm.merchant_id = m.id AND mm.user_id = ${authedUserId}
-           ) THEN true ELSE false END as is_member
+            WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count
          FROM "Campaign" c
          JOIN "Merchant" m ON m.id = c.merchant_id
          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
@@ -1333,7 +1338,13 @@ module.exports = async function handler(req, res) {
          ORDER BY m.id, c.created_at ASC
        `;
 
-      return send(res, 200, { success: true, data: campaigns });
+      // Map is_member onto each result in JS — avoids complex SQL subqueries
+      const result = campaigns.map(c => ({
+        ...c,
+        is_member: memberMerchantIds.has(c.id)
+      }));
+
+      return send(res, 200, { success: true, data: result });
     }
 
     // ── GET /api/v1/consumers/history ─────────────────────────────
