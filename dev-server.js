@@ -27,11 +27,32 @@ function parseBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const start = Date.now();
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     req.body = await parseBody(req);
   } else {
     req.body = {};
   }
+
+  // Log request
+  console.log(`\n→ ${req.method} ${req.url}`);
+  if (req.body && Object.keys(req.body).length) console.log('  body:', JSON.stringify(req.body));
+
+  // Intercept res.end to log response
+  const origEnd = res.end.bind(res);
+  res.end = function(chunk, ...args) {
+    const ms = Date.now() - start;
+    try {
+      const body = chunk ? JSON.parse(chunk.toString()) : {};
+      if (!body.success) {
+        console.log(`← ${res.statusCode} (${ms}ms) ERROR:`, JSON.stringify(body));
+      } else {
+        console.log(`← ${res.statusCode} (${ms}ms) OK`);
+      }
+    } catch { console.log(`← ${res.statusCode} (${ms}ms)`); }
+    return origEnd(chunk, ...args);
+  };
+
   handler(req, res);
 });
 

@@ -117,19 +117,33 @@ module.exports = async (req, res) => {
           : `🎉 You have ${offerCount} new perks from your local stores`;
 
         // Build offer cards HTML
-        const offerCards = items.map(item => `
-          <div style="display:flex; align-items:center; gap:14px; padding:14px 16px; background:#f9fafb; border-radius:12px; margin-bottom:10px; border:1px solid #f0f0f0;">
+        const offerCards = items.map(item => {
+          const isOnline = item.is_online_merchant === true;
+          const addressOrWebsite = item.website
+            ? `<a href="${item.website.startsWith('http') ? item.website : 'https://' + item.website}" style="font-size:11px;color:#5B3FA5;text-decoration:underline;margin-top:3px;display:block;" target="_blank">🌐 ${item.website.replace(/^https?:\/\//, '')}</a>`
+            : (item.store_address && item.store_address !== 'Mobile Business')
+              ? `<div style="font-size:11px;color:#aaa;margin-top:3px;">📍 ${item.store_address}</div>`
+              : '';
+          const isMobile = !isOnline && item.store_address === 'Mobile Business';
+          const activationHint = isOnline
+            ? `<div style="font-size:11px;color:#5B3FA5;margin-top:5px;font-weight:600;">🛍️ Open the Perkfinity app → find ${item.store_name} → Reveal &amp; Copy your code</div>`
+            : isMobile
+              ? `<div style="font-size:11px;color:#1a6b2b;margin-top:5px;font-weight:600;">🚐 Find us and scan the Perkfinity QR to activate</div>`
+              : `<div style="font-size:11px;color:#1a6b2b;margin-top:5px;font-weight:600;">📍 Visit the store and scan the Perkfinity QR to activate</div>`;
+          return `
+          <div style="display:flex; align-items:flex-start; gap:14px; padding:14px 16px; background:#f9fafb; border-radius:12px; margin-bottom:10px; border:1px solid #f0f0f0;">
             ${item.logo_url ? `<img src="${item.logo_url}" alt="${item.store_name}" style="width:40px;height:40px;border-radius:50%;object-fit:contain;background:#fff;border:1px solid #eee;flex-shrink:0;"/>` : `<div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#8B5CF6,#6BC17A);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;font-weight:800;font-size:16px;">${item.store_name.charAt(0)}</div>`}
             <div style="flex:1;min-width:0;">
               <div style="font-size:14px;font-weight:700;color:#1a1a2e;margin-bottom:2px;">${item.store_name}</div>
               <div style="font-size:14px;color:#5B3FA5;font-weight:600;">${item.title}</div>
               ${item.body && item.body !== item.title ? `<div style="font-size:12px;color:#888;margin-top:2px;">${item.body}</div>` : ''}
-              ${item.store_address ? `<div style="font-size:11px;color:#aaa;margin-top:3px;">📍 ${item.store_address}</div>` : ''}
+              ${addressOrWebsite}
               ${item.offer_expires_at ? `<div style="font-size:11px;color:#B45309;margin-top:3px;font-weight:600;">Expires: ${new Date(item.offer_expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>` : ''}
               ${item.disclaimer ? `<div style="font-size:10px;color:#aaa;margin-top:3px;font-style:italic;">${item.disclaimer}</div>` : ''}
+              ${activationHint}
             </div>
           </div>
-        `).join('');
+        `}).join('');
 
         const emailHtml = `
           <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
@@ -141,12 +155,10 @@ module.exports = async (req, res) => {
             <div style="padding:20px 24px;">
               <div style="font-size:14px; color:#666; margin-bottom:16px;">Hi ${userName} 👋, here's what's new today:</div>
               ${offerCards}
-              <div style="background:rgba(107,193,122,0.12); border:1px solid rgba(107,193,122,0.3); border-radius:10px; padding:12px 18px; text-align:center; margin-top:16px;">
-                <p style="font-size:13px; color:#1a6b2b; margin:0; font-weight:500;">Scan the Perkfinity QR code in-store to activate your perks!</p>
-              </div>
             </div>
             <div style="padding:16px 24px; border-top:1px solid #f0f0f0; text-align:center;">
               <div style="font-size:11px; color:#bbb;">Powered by <strong style="color:#5B3FA5;">Perkfinity</strong></div>
+              <div style="font-size:10px;color:#ddd;margin-top:12px;">&nbsp;</div>
             </div>
           </div>
         `;
@@ -203,6 +215,9 @@ module.exports = async (req, res) => {
         title: i.title,
         body: i.body || null,
         store_address: i.store_address || null,
+        website: i.website || null,
+        is_online_merchant: i.is_online_merchant || false,
+        promo_code: i.promo_code || null,
         campaign_id: i.campaign_id,
         merchant_id: i.merchant_id,
         offer_expires_at: i.offer_expires_at || null,

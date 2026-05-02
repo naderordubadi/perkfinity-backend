@@ -303,18 +303,33 @@ module.exports = async function handler(req, res) {
     // ── POST /api/v1/merchants/signup ─────────────────────────────
     if (method === 'POST' && url.endsWith('/merchants/signup')) {
       const data = req.body || {};
+      const presence = (data.business_presence || 'physical').toLowerCase();
+      if (!['physical', 'mobile', 'online'].includes(presence)) {
+        return send(res, 400, { success: false, error: 'Invalid business_presence. Must be physical, mobile, or online.' });
+      }
 
-      // Validate all required fields
+      // Validate core required fields (all presence types)
       const missing = [];
       if (!data.name) missing.push('Store Name');
       if (!data.contactName) missing.push('Contact Name');
       if (!data.phone) missing.push('Phone Number');
       if (!data.email) missing.push('Email');
       if (!data.password) missing.push('Password');
-      if (!data.address) missing.push('Street Address');
-      if (!data.city) missing.push('City');
-      if (!data.state) missing.push('State');
-      if (!data.zip) missing.push('ZIP Code');
+      if (!data.welcome_offer_text) missing.push('Welcome Offer Description');
+
+      // Dynamic address/website validation per presence type
+      if (presence === 'physical') {
+        if (!data.address) missing.push('Street Address');
+        if (!data.city) missing.push('City');
+        if (!data.state) missing.push('State');
+        if (!data.zip) missing.push('ZIP Code');
+      } else if (presence === 'mobile') {
+        if (!data.city) missing.push('City');
+        if (!data.state) missing.push('State');
+        if (!data.zip) missing.push('ZIP Code');
+      } else if (presence === 'online') {
+        if (!data.website) missing.push('Website URL');
+      }
 
       if (missing.length > 0) {
         return send(res, 400, { success: false, error: `Missing required fields: ${missing.join(', ')}` });
@@ -325,9 +340,11 @@ module.exports = async function handler(req, res) {
       if (!phoneRegex.test(data.phone)) {
         return send(res, 400, { success: false, error: 'Phone number must be in xxx-xxx-xxxx format.' });
       }
-      const zipRegex = /^\d{5}$/;
-      if (!zipRegex.test(data.zip)) {
-        return send(res, 400, { success: false, error: 'ZIP Code must be a 5-digit number.' });
+      if (presence !== 'online') {
+        const zipRegex = /^\d{5}$/;
+        if (!zipRegex.test(data.zip)) {
+          return send(res, 400, { success: false, error: 'ZIP Code must be a 5-digit number.' });
+        }
       }
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(data.email)) {
@@ -344,40 +361,31 @@ module.exports = async function handler(req, res) {
 
       const password_hash = await bcrypt.hash(data.password, 12);
       const now = new Date();
-      const oneYear = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
-      // Promo code validation → set member_limit (or unlock Free For Life)
+      // Auto-generate welcome promo code for online merchants only
+      const welcomePromoCode = presence === 'online'
+        ? 'HELLO-' + data.name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12)
+        : null;
+
+      // Admin promo code validation → member_limit / tier
       let memberLimit = 100;
       let selectedTier = data.tier || 'trial';
       let skipStripe = false;
       let promoCode = (data.promo_code || '').trim().toUpperCase();
       let extendedTrial = false;
       if (promoCode) {
-        // Look up the promo code directly in AdminAccessCode
         const [accessCode] = await sql`
-          SELECT id, label, type, member_limit, used 
+          SELECT id, label, type, member_limit, used
           FROM "AdminAccessCode"
-          WHERE code = ${promoCode}
-            AND expires_at > NOW()
+          WHERE code = ${promoCode} AND expires_at > NOW()
           LIMIT 1
         `;
-
-        if (!accessCode) {
-          return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
-        }
-
+        if (!accessCode) return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
         if (accessCode.type === 'free_for_life') {
-          if (accessCode.used) {
-            return send(res, 400, { success: false, error: 'This promo code has already been used.' });
-          }
-          // Valid Free For Life code
-          memberLimit = 999999;
-          selectedTier = 'free_for_life';
-          skipStripe = true;
+          if (accessCode.used) return send(res, 400, { success: false, error: 'This promo code has already been used.' });
+          memberLimit = 999999; selectedTier = 'free_for_life'; skipStripe = true;
         } else if (accessCode.type === 'extended_trial') {
-          // Keep tier as trial, but bump the limit
-          memberLimit = accessCode.member_limit || 100;
-          extendedTrial = true;
+          memberLimit = accessCode.member_limit || 100; extendedTrial = true;
         } else {
           return send(res, 400, { success: false, error: 'Unrecognized promo code type.' });
         }
@@ -385,28 +393,18 @@ module.exports = async function handler(req, res) {
         promoCode = null;
       }
 
-      // Insert merchant (required fields used directly; optional fields use || '')
+      // Insert merchant with presence and welcome offer fields
       const [merchant] = await sql`
-        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, pos_system, subscription_tier, member_limit, promo_code, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${selectedTier}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
-        RETURNING id, business_name, subscription_tier, member_limit
+        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, pos_system, business_presence, welcome_promo_code, welcome_offer_text, subscription_tier, member_limit, promo_code, status, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${presence}, ${welcomePromoCode}, ${data.welcome_offer_text}, ${selectedTier}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
+        RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code
       `;
 
-      // If a free_for_life code was used, mark it as single-use
       if (skipStripe && promoCode) {
-        await sql`
-          UPDATE "AdminAccessCode"
-          SET used = true, used_by = ${merchant.id}, used_at = NOW(), use_count = use_count + 1
-          WHERE code = ${promoCode} AND type = 'free_for_life'
-        `;
+        await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchant.id}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${promoCode} AND type = 'free_for_life'`;
       }
-      // If an extended_trial code was used, increment its counter
       if (extendedTrial && promoCode) {
-        await sql`
-          UPDATE "AdminAccessCode"
-          SET use_count = use_count + 1, used_at = NOW()
-          WHERE code = ${promoCode} AND type = 'extended_trial'
-        `;
+        await sql`UPDATE "AdminAccessCode" SET use_count = use_count + 1, used_at = NOW() WHERE code = ${promoCode} AND type = 'extended_trial'`;
       }
 
       // Insert owner user
@@ -416,17 +414,29 @@ module.exports = async function handler(req, res) {
         RETURNING id, merchant_id, email, role, status, created_at
       `;
 
-      // Insert location (required fields direct; suite is optional)
-      await sql`
-        INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
-      `;
+      // Insert location — conditional per presence type
+      if (presence === 'physical') {
+        await sql`
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
+        `;
+      } else if (presence === 'mobile') {
+        await sql`
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
+        `;
+      } else {
+        // online: stub location row so relations remain intact
+        await sql`
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', NULL, NULL, NULL, 'US', true, ${now})
+        `;
+      }
 
-
-      // Insert welcome campaign
+      // Insert welcome campaign — end_at = NULL (infinite) for ALL presence types
       await sql`
-        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, status, start_at, end_at, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.perk || 'Welcome Perk'}, 10, 'active', ${now}, ${oneYear}, ${now}, ${now})
+        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, status, campaign_type, start_at, end_at, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text || 'Welcome Perk'}, 10, 'active', 'initial', ${now}, NULL, ${now}, ${now})
       `;
 
       // Insert QR code
@@ -438,7 +448,6 @@ module.exports = async function handler(req, res) {
 
       const JWT_SECRET = process.env.JWT_SECRET;
       if (!JWT_SECRET) return send(res, 500, { success: false, error: 'JWT_SECRET not configured' });
-
       const accessToken = jwt.sign(
         { userId: merchantUser.id, merchantId: merchant.id, role: merchantUser.role },
         JWT_SECRET,
@@ -454,11 +463,14 @@ module.exports = async function handler(req, res) {
           qr_public_code: public_code,
           qr_url: `https://app.perkfinity.net/qr/${public_code}`,
           skip_stripe: skipStripe,
+          welcome_promo_code: welcomePromoCode,
         }
       });
     }
 
+
     // ── POST /api/v1/auth/login ────────────────────────────────────
+
     if (method === 'POST' && (url.endsWith('/auth/login') || url.endsWith('/merchants/login'))) {
       const data = req.body || {};
       if (!data.email || !data.password) {
@@ -486,14 +498,14 @@ module.exports = async function handler(req, res) {
       );
 
       // Payment Setup Gate: block accounts that never completed Step 4.
-      // Requires BOTH billing_status AND stripe_payment_method_id to be null:
+      // Requires BOTH billing_status AND stripe_payment_method_id to be unset:
       //   - Tier 1 active: billing_status='active' → passes
       //   - Old trial with card: stripe_payment_method_id set by webhook → passes
       //   - New trial with card: billing_status='trial' set by confirm-setup → passes
       //   - FFL: excluded by tier check
-      //   - Abandoned (never finished Step 4): both null → blocked
+      //   - Abandoned (never finished Step 4): billing_status=null/'none' + no stripe_payment_method_id → blocked
       const setupIncomplete = (
-        !user.billing_status &&
+        (!user.billing_status || user.billing_status === 'none') &&
         !user.stripe_payment_method_id &&
         user.subscription_tier !== 'free_for_life'
       );
@@ -644,6 +656,36 @@ module.exports = async function handler(req, res) {
       `;
       await sql`CREATE INDEX IF NOT EXISTS idx_notif_history_user ON "NotificationHistory" (user_id, created_at DESC)`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "pos_system" TEXT`;
+
+      // ── Tasks 8 & 9: Multi Business Presence + Merchant Discovery ──
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS business_presence VARCHAR(10) DEFAULT 'physical'`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS welcome_promo_code VARCHAR(50)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS welcome_offer_text VARCHAR(200)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS review_url VARCHAR(500)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS order_url VARCHAR(500)`;
+      await sql`ALTER TABLE "Campaign" ADD COLUMN IF NOT EXISTS promo_code VARCHAR(100)`;
+      await sql`ALTER TABLE "Redemption" ALTER COLUMN expires_at DROP NOT NULL`;
+      await sql`ALTER TABLE "Redemption" ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`;
+      await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS promo_code VARCHAR(100)`;
+      await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS is_online_merchant BOOLEAN DEFAULT false`;
+      await sql`ALTER TABLE "NotificationQueue" ADD COLUMN IF NOT EXISTS website TEXT`;
+      // Retroactive: tag existing welcome campaigns (no AuditLog entry = initial campaign)
+      await sql`
+        UPDATE "Campaign" SET campaign_type = 'initial'
+        WHERE (campaign_type IS NULL OR campaign_type = '')
+          AND id NOT IN (
+            SELECT DISTINCT target_id FROM "AuditLog"
+            WHERE target_type = 'Campaign' AND target_id IS NOT NULL
+          )
+      `;
+      // Retroactive: set infinite expiration on all initial campaigns
+      await sql`UPDATE "Campaign" SET end_at = NULL WHERE campaign_type = 'initial'`;
+      // Retroactive: null out expires_at on redemptions for initial campaigns
+      await sql`
+        UPDATE "Redemption" SET expires_at = NULL
+        WHERE campaign_id IN (SELECT id FROM "Campaign" WHERE campaign_type = 'initial')
+      `;
+
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -731,7 +773,7 @@ module.exports = async function handler(req, res) {
             FROM "Campaign" c
             WHERE c.merchant_id = ${qrCode.merchant_id}
               AND c.status = 'active'
-              AND c.end_at > NOW()
+              AND (c.end_at IS NULL OR c.end_at > NOW())
               AND c.discount_percentage >= 0
               AND NOT EXISTS (
                 SELECT 1 FROM "Redemption" r2 
@@ -749,7 +791,7 @@ module.exports = async function handler(req, res) {
           // (assigned to user, not yet activated — 'created' is the canonical pending state)
           const memberCampaigns = await sql`
             SELECT c.id, c.title, c.discount_percentage, c.terms, c.status as campaign_status,
-                   c.start_at, c.end_at,
+                   c.start_at, c.end_at, c.campaign_type,
                    r.id as redemption_id, r.token, r.expires_at as redemption_expires_at,
                    r.redeemed, r.status as redemption_status
             FROM "Redemption" r
@@ -759,7 +801,7 @@ module.exports = async function handler(req, res) {
               AND r.status = 'created'
               AND r.redeemed = false
               AND c.status = 'active'
-              AND c.end_at > NOW()
+              AND (c.end_at IS NULL OR c.end_at > NOW())
               AND c.discount_percentage >= 0
             ORDER BY c.created_at ASC
           `;
@@ -778,7 +820,7 @@ module.exports = async function handler(req, res) {
           FROM "Campaign"
           WHERE merchant_id = ${qrCode.merchant_id}
             AND status = 'active'
-            AND end_at > NOW()
+            AND (end_at IS NULL OR end_at > NOW())
             AND discount_percentage >= 0
           ORDER BY created_at ASC
           LIMIT 5
@@ -804,7 +846,9 @@ module.exports = async function handler(req, res) {
 
       const [merchantData] = await sql`
         SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, m.subscription_tier,
-               m.stripe_payment_method_id, m.billing_status, l.address, l.suite, l.city, l.state, l.postal_code, u.email
+               m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
+               m.welcome_offer_text, m.review_url, m.order_url,
+               l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
         LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
@@ -821,19 +865,19 @@ module.exports = async function handler(req, res) {
         LIMIT 1
       `;
 
-      // Fetch associated welcome (or active) campaign perk
+      // Fetch associated initial campaign perk title
       const [campaignData] = await sql`
         SELECT title FROM "Campaign"
         WHERE merchant_id = ${merchantId}
           AND status = 'active'
-          AND discount_percentage >= 0
+          AND campaign_type = 'initial'
         ORDER BY created_at ASC
         LIMIT 1
       `;
 
       merchantData.qr_public_code = qrData ? qrData.public_code : null;
       merchantData.qr_url = qrData ? `https://app.perkfinity.net/qr/${qrData.public_code}` : null;
-      merchantData.perk = campaignData ? campaignData.title : 'Welcome Perk';
+      merchantData.perk = campaignData ? campaignData.title : (merchantData.welcome_offer_text || 'Welcome Perk');
 
       return send(res, 200, { success: true, data: merchantData });
     }
@@ -865,7 +909,7 @@ module.exports = async function handler(req, res) {
       // Announcements use discount_percentage = -1 as a permanent type marker
       // so they can be filtered out anywhere Redemption rows are not sufficient.
       const [campaign] = await sql`
-        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, start_at, end_at, campaign_type, created_at, updated_at)
+        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, start_at, end_at, campaign_type, promo_code, created_at, updated_at)
         VALUES (
           gen_random_uuid()::text,
           ${targetMerchantId},
@@ -876,6 +920,7 @@ module.exports = async function handler(req, res) {
           ${now},
           ${expiresAt},
           ${data.type || 'perk'},
+          ${data.promo_code || null},
           ${now},
           ${now}
         )
@@ -981,9 +1026,10 @@ module.exports = async function handler(req, res) {
       let queueErrors = [];
       if (qualifyingUsers.length > 0) {
         try {
-          // Fetch merchant info for the queue
+          // Fetch merchant info for the queue — include presence, website, and campaign promo_code
           const [merchantInfo] = await sql`
-            SELECT m.business_name, m.logo_url, l.address, l.city, l.state, l.postal_code
+            SELECT m.business_name, m.logo_url, m.business_presence, m.website,
+                   l.address, l.city, l.state, l.postal_code
             FROM "Merchant" m
             LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
             WHERE m.id = ${targetMerchantId}
@@ -991,7 +1037,16 @@ module.exports = async function handler(req, res) {
           `;
           const storeName = merchantInfo?.business_name || 'Your Local Store';
           const logoUrl = merchantInfo?.logo_url || '';
-          const storeAddress = merchantInfo ? [merchantInfo.address, merchantInfo.city, merchantInfo.state, merchantInfo.postal_code].filter(Boolean).join(', ') : '';
+          const presence = merchantInfo?.business_presence || 'physical';
+          const isOnline = presence === 'online';
+          const merchantWebsite = merchantInfo?.website || '';
+          // store_address: online → empty (website used instead), mobile → label, physical → full address
+          const storeAddress = isOnline
+            ? ''
+            : presence === 'mobile'
+              ? 'Mobile Business'
+              : merchantInfo ? [merchantInfo.address, merchantInfo.city, merchantInfo.state, merchantInfo.postal_code].filter(Boolean).join(', ') : '';
+          const campaignPromoCode = isOnline ? (data.promo_code || null) : null;
           const headline = data.title || 'New Offer';
           const condLine = data.condition_detail || '';
           const bodyText = condLine || headline;
@@ -1001,8 +1056,8 @@ module.exports = async function handler(req, res) {
           for (const userId of userIds) {
             try {
               await sql`
-                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels, offer_expires_at, disclaimer)
-                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel}, ${campaign.end_at}, ${data.disclaimer || null})
+                INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels, offer_expires_at, disclaimer, is_online_merchant, website, promo_code)
+                VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel}, ${campaign.end_at}, ${data.disclaimer || null}, ${isOnline}, ${merchantWebsite}, ${campaignPromoCode})
               `;
               queuedCount++;
             } catch (queueErr) {
@@ -1308,7 +1363,7 @@ module.exports = async function handler(req, res) {
         } catch { /* invalid/expired token — treat as unauthenticated */ }
       }
 
-      // Fetch the list of merchant IDs this user has already joined (separate simple query)
+      // Fetch the list of merchant IDs this user has already joined
       let memberMerchantIds = new Set();
       if (authedUserId) {
         const memberRows = await sql`
@@ -1317,34 +1372,115 @@ module.exports = async function handler(req, res) {
         memberMerchantIds = new Set(memberRows.map(r => r.merchant_id));
       }
 
+      // Fetch claimed initial redemptions for this user (online merchants)
+      let claimedMerchantMap = new Map(); // merchant_id → claimed_at
+      if (authedUserId) {
+        const claimedRows = await sql`
+          SELECT c.merchant_id, r.claimed_at
+          FROM "Redemption" r
+          JOIN "Campaign" c ON c.id = r.campaign_id
+          WHERE r.user_id = ${authedUserId}
+            AND c.campaign_type = 'initial'
+            AND r.status = 'claimed'
+        `;
+        claimedRows.forEach(row => claimedMerchantMap.set(row.merchant_id, row.claimed_at));
+      }
+
       const campaigns = await sql`
          SELECT DISTINCT ON (m.id)
            m.id as id,
+           c.id as campaign_id,
            m.business_name as merchant_name,
            m.logo_url,
+           m.business_presence,
+           m.website,
+           m.welcome_promo_code,
+           m.welcome_offer_text,
+           m.review_url,
+           m.order_url,
            l.postal_code as zip_code,
            q.public_code as qr_code,
            c.title as discount,
-           COALESCE(l.address, '') || CASE WHEN l.city IS NOT NULL THEN ', ' || l.city ELSE '' END || CASE WHEN l.state IS NOT NULL THEN ', ' || l.state ELSE '' END as store_address,
+           CASE
+             WHEN m.business_presence = 'online' THEN 'Online Only'
+             WHEN m.business_presence = 'mobile' THEN CASE WHEN l.city IS NOT NULL AND l.state IS NOT NULL THEN l.city || ', ' || l.state WHEN l.city IS NOT NULL THEN l.city WHEN l.state IS NOT NULL THEN l.state ELSE '' END
+             ELSE COALESCE(l.address, '') || CASE WHEN l.city IS NOT NULL THEN ', ' || l.city ELSE '' END || CASE WHEN l.state IS NOT NULL THEN ', ' || l.state ELSE '' END
+           END as store_address,
            c.title as latest_offer_title,
            c.end_at as offer_expires_at,
            (SELECT COUNT(*) FROM "Campaign" c2
-            WHERE c2.merchant_id = m.id AND c2.status = 'active' AND c2.end_at > NOW()) as offer_count
+            WHERE c2.merchant_id = m.id AND c2.status = 'active'
+              AND (c2.end_at IS NULL OR c2.end_at > NOW())) as offer_count,
+           (SELECT MAX(c2.created_at) FROM "Campaign" c2
+            WHERE c2.merchant_id = m.id AND c2.status = 'active'
+              AND (c2.end_at IS NULL OR c2.end_at > NOW())) as latest_offer_at
          FROM "Campaign" c
          JOIN "Merchant" m ON m.id = c.merchant_id
          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
          LEFT JOIN "QrCode" q ON q.merchant_id = m.id AND q.status = 'active'
-         WHERE c.status = 'active' AND m.status = 'active' AND c.end_at > NOW()
+         WHERE c.status = 'active' AND m.status = 'active'
+           AND (c.end_at IS NULL OR c.end_at > NOW())
          ORDER BY m.id, c.created_at ASC
        `;
 
-      // Map is_member onto each result in JS — avoids complex SQL subqueries
       const result = campaigns.map(c => ({
         ...c,
-        is_member: memberMerchantIds.has(c.id)
+        is_member: memberMerchantIds.has(c.id),
+        is_claimed: claimedMerchantMap.has(c.id),
+        claimed_at: claimedMerchantMap.get(c.id) || null,
       }));
 
       return send(res, 200, { success: true, data: result });
+    }
+
+    // ── GET /api/v1/consumers/merchants/:id/campaigns ─────────────
+    const consumerMerchCamsMatch = url.match(/^\/api\/v1\/consumers\/merchants\/([a-zA-Z0-9_-]+)\/campaigns$/);
+    if (method === 'GET' && consumerMerchCamsMatch) {
+      const merchantId = consumerMerchCamsMatch[1];
+      let userId = null;
+      const authHeader = req.headers.authorization;
+      if (authHeader) {
+        try {
+          const decoded = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET);
+          userId = decoded.userId || null;
+        } catch { /* ignore */ }
+      }
+      const cams = await sql`
+        SELECT
+          c.id as campaign_id,
+          c.title,
+          c.discount_percentage,
+          c.terms,
+          c.end_at,
+          c.campaign_type,
+          m.business_presence,
+          COALESCE(NULLIF(c.promo_code, ''), m.welcome_promo_code) as promo_code,
+          r.id as redemption_id,
+          r.status as redemption_status,
+          r.claimed_at,
+          r.redeemed,
+          r.redeemed_at
+        FROM "Campaign" c
+        JOIN "Merchant" m ON m.id = c.merchant_id
+        LEFT JOIN "Redemption" r ON r.campaign_id = c.id AND r.user_id = ${userId}
+        WHERE c.merchant_id = ${merchantId}
+          AND c.status = 'active'
+          AND (c.end_at IS NULL OR c.end_at > NOW())
+          AND NOT (
+            m.business_presence IN ('physical', 'mobile')
+            AND r.id IS NOT NULL
+            AND (r.status = 'redeemed' OR r.redeemed = true)
+          )
+          AND NOT (
+            m.business_presence = 'online'
+            AND c.campaign_type = 'initial'
+            AND r.id IS NOT NULL
+            AND r.status = 'claimed'
+            AND r.claimed_at + INTERVAL '30 days' < NOW()
+          )
+        ORDER BY c.created_at ASC
+      `;
+      return send(res, 200, { success: true, data: cams });
     }
 
     // ── GET /api/v1/consumers/history ─────────────────────────────
@@ -1363,13 +1499,16 @@ module.exports = async function handler(req, res) {
           r.expires_at,
           r.redeemed,
           r.redeemed_at,
+          r.claimed_at,
+          r.status,
           c.title as campaign_title,
-          m.business_name as merchant_name
+          m.business_name as merchant_name,
+          m.business_presence
         FROM "Redemption" r
         JOIN "Campaign" c ON c.id = r.campaign_id
         JOIN "Merchant" m ON m.id = c.merchant_id
         WHERE r.user_id = ${payload.userId}
-        ORDER BY r.issued_at DESC
+        ORDER BY COALESCE(r.redeemed_at, r.claimed_at, r.issued_at) DESC
       `;
 
       return send(res, 200, { success: true, data: history });
@@ -1627,8 +1766,132 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { cancelled: cancelled[0] || null } });
     }
 
-    // ── POST /api/v1/campaigns/redeem ──────────────────────────────
+    // ── POST /api/v1/consumers/merchants/:merchant_id/claim-welcome ─
+    const claimWelcomeMatch = url.match(/^\/api\/v1\/consumers\/merchants\/([a-zA-Z0-9_-]+)\/claim-welcome$/);
+    if (method === 'POST' && claimWelcomeMatch) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const targetMerchantId = claimWelcomeMatch[1];
+
+      // Verify merchant is online type
+      const [merchantInfo] = await sql`
+        SELECT id, business_presence, welcome_promo_code FROM "Merchant"
+        WHERE id = ${targetMerchantId} LIMIT 1
+      `;
+      if (!merchantInfo) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchantInfo.business_presence !== 'online') {
+        return send(res, 400, { success: false, error: 'Claim & Copy is only available for online merchants' });
+      }
+
+      // Find unclaimed initial redemption for this user + merchant
+      const [redemption] = await sql`
+        SELECT r.id FROM "Redemption" r
+        JOIN "Campaign" c ON c.id = r.campaign_id
+        WHERE r.user_id = ${payload.userId}
+          AND c.merchant_id = ${targetMerchantId}
+          AND c.campaign_type = 'initial'
+          AND r.status = 'created'
+        LIMIT 1
+      `;
+      if (!redemption) {
+        // Check if already claimed — return the code again
+        const [already] = await sql`
+          SELECT r.claimed_at FROM "Redemption" r
+          JOIN "Campaign" c ON c.id = r.campaign_id
+          WHERE r.user_id = ${payload.userId}
+            AND c.merchant_id = ${targetMerchantId}
+            AND c.campaign_type = 'initial'
+            AND r.status = 'claimed'
+          LIMIT 1
+        `;
+        if (already) {
+          return send(res, 200, { success: true, already_claimed: true, data: { promo_code: merchantInfo.welcome_promo_code, claimed_at: already.claimed_at } });
+        }
+        return send(res, 404, { success: false, error: 'No claimable welcome offer found. Make sure you have joined this merchant first.' });
+      }
+
+      // Mark as claimed
+      await sql`UPDATE "Redemption" SET status = 'claimed', claimed_at = NOW() WHERE id = ${redemption.id}`;
+
+      return send(res, 200, { success: true, data: { promo_code: merchantInfo.welcome_promo_code, claimed_at: new Date() } });
+    }
+
+    // ── POST /api/v1/consumers/redemptions/:id/claim ───────────────
+    const claimRedemptionMatch = url.match(/^\/api\/v1\/consumers\/redemptions\/([a-zA-Z0-9_-]+)\/claim$/);
+    if (method === 'POST' && claimRedemptionMatch) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const redemptionId = claimRedemptionMatch[1];
+      const [redemption] = await sql`
+        SELECT r.id, r.user_id, r.status, c.promo_code, c.id as campaign_id
+        FROM "Redemption" r
+        JOIN "Campaign" c ON c.id = r.campaign_id
+        WHERE r.id = ${redemptionId}
+        LIMIT 1
+      `;
+      if (!redemption) return send(res, 404, { success: false, error: 'Redemption not found' });
+      if (redemption.user_id !== payload.userId) return send(res, 403, { success: false, error: 'Forbidden' });
+      if (redemption.status === 'claimed') {
+        return send(res, 200, { success: true, already_claimed: true, data: { promo_code: redemption.promo_code } });
+      }
+      if (redemption.status !== 'created') {
+        return send(res, 400, { success: false, error: `Cannot claim a redemption with status: ${redemption.status}` });
+      }
+      if (!redemption.promo_code) {
+        return send(res, 400, { success: false, error: 'This offer does not have a promo code to claim' });
+      }
+      await sql`UPDATE "Redemption" SET status = 'claimed', claimed_at = NOW() WHERE id = ${redemptionId}`;
+      return send(res, 200, { success: true, data: { promo_code: redemption.promo_code, claimed_at: new Date() } });
+    }
+
+    // ── POST /api/v1/redemptions/claim ─────────────────────────────
+    // Accepts { campaign_id } in body. Finds the user's Redemption for that
+    // campaign, marks it claimed, and returns the promo_code. Idempotent.
+    if (method === 'POST' && url.endsWith('/redemptions/claim')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const data = req.body || {};
+      if (!data.campaign_id) return send(res, 400, { success: false, error: 'Missing campaign_id' });
+
+      const [redemption] = await sql`
+        SELECT r.id, r.user_id, r.status, r.claimed_at,
+               COALESCE(NULLIF(c.promo_code, ''), m.welcome_promo_code) as promo_code
+        FROM "Redemption" r
+        JOIN "Campaign" c ON c.id = r.campaign_id
+        JOIN "Merchant" m ON m.id = c.merchant_id
+        WHERE r.campaign_id = ${data.campaign_id}
+          AND r.user_id = ${payload.userId}
+        LIMIT 1
+      `;
+      if (!redemption) return send(res, 404, { success: false, error: 'Redemption not found for this campaign' });
+      if (redemption.user_id !== payload.userId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      // Already claimed — return code without re-marking
+      if (redemption.status === 'claimed' || redemption.status === 'activated') {
+        return send(res, 200, { success: true, already_claimed: true, data: { promo_code: redemption.promo_code, claimed_at: redemption.claimed_at } });
+      }
+      if (!redemption.promo_code) {
+        return send(res, 400, { success: false, error: 'This offer does not have a promo code' });
+      }
+      await sql`UPDATE "Redemption" SET status = 'claimed', claimed_at = NOW() WHERE id = ${redemption.id}`;
+      return send(res, 200, { success: true, data: { promo_code: redemption.promo_code, claimed_at: new Date() } });
+    }
+
+
     if (method === 'POST' && url.endsWith('/campaigns/redeem')) {
+
       const authHeader = req.headers.authorization;
       if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
 
@@ -1702,9 +1965,11 @@ module.exports = async function handler(req, res) {
                 'issued_at', r.issued_at,
                 'expires_at', r.expires_at,
                 'redeemed_at', r.redeemed_at,
+                'claimed_at', r.claimed_at,
                 'status', CASE
                   WHEN c.campaign_type = 'announcement' OR c.discount_percentage = -1 THEN 'Announcement'
                   WHEN r.status = 'redeemed' OR r.redeemed = true THEN 'Redeemed'
+                  WHEN r.status = 'claimed' THEN 'Claimed'
                   WHEN c.end_at IS NOT NULL AND c.end_at < NOW() THEN 'Expired'
                   WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW()) THEN 'Expired'
                   WHEN r.status = 'pending' THEN 'Pending'
@@ -1739,11 +2004,14 @@ module.exports = async function handler(req, res) {
         SELECT c.id, c.title,
                CASE WHEN c.end_at IS NOT NULL AND c.end_at < NOW() THEN 'expired' ELSE c.status END as status,
                c.start_at, c.end_at, c.created_at,
+               c.promo_code,
                (SELECT a.metadata FROM "AuditLog" a
                 WHERE a.target_id = c.id AND a.action = 'promotion_created'
                 ORDER BY a.created_at DESC LIMIT 1) as metadata,
                (SELECT COUNT(*) FROM "Redemption" r
-                WHERE r.campaign_id = c.id AND (r.status = 'redeemed' OR r.redeemed = true)) as redeemed_count
+                WHERE r.campaign_id = c.id AND (r.status = 'redeemed' OR r.redeemed = true)) as redeemed_count,
+               (SELECT COUNT(*) FROM "Redemption" r
+                WHERE r.campaign_id = c.id AND r.claimed_at IS NOT NULL) as claimed_count
         FROM "Campaign" c
         WHERE c.merchant_id = ${hMerchantId}
         ORDER BY c.created_at DESC
@@ -1795,17 +2063,41 @@ module.exports = async function handler(req, res) {
         WHERE id = ${payload.userId}
       `;
 
-      // Update Merchant Details
-      if (data.business_name || data.contact_name || data.phone || data.website !== undefined) {
+      // Update Merchant Details (welcome_promo_code is intentionally excluded — never editable)
+      if (data.business_name || data.contact_name || data.phone || data.website !== undefined ||
+          data.welcome_offer_text !== undefined || data.review_url !== undefined || data.order_url !== undefined) {
+        // Build the update safely — always update all present fields
+        const newWelcomeOfferText = data.welcome_offer_text !== undefined ? data.welcome_offer_text : null;
+        const newReviewUrl = data.review_url !== undefined ? (data.review_url || null) : undefined;
+        const newOrderUrl = data.order_url !== undefined ? (data.order_url || null) : undefined;
+
         await sql`
-           UPDATE "Merchant" 
-           SET 
-             business_name = COALESCE(${data.business_name}, business_name),
-             contact_name = COALESCE(${data.contact_name}, contact_name),
-             phone = COALESCE(${data.phone}, phone),
-             website = COALESCE(${data.website}, website)
+           UPDATE "Merchant"
+           SET
+             business_name = COALESCE(${data.business_name || null}, business_name),
+             contact_name = COALESCE(${data.contact_name || null}, contact_name),
+             phone = COALESCE(${data.phone || null}, phone),
+             website = COALESCE(${data.website !== undefined ? data.website : null}, website),
+             welcome_offer_text = COALESCE(${newWelcomeOfferText}, welcome_offer_text)
            WHERE id = ${merchantId}
          `;
+        // Update nullable URL fields separately (COALESCE would skip intentional clears)
+        if (newReviewUrl !== undefined) {
+          await sql`UPDATE "Merchant" SET review_url = ${newReviewUrl} WHERE id = ${merchantId}`;
+        }
+        if (newOrderUrl !== undefined) {
+          await sql`UPDATE "Merchant" SET order_url = ${newOrderUrl} WHERE id = ${merchantId}`;
+        }
+        // Also sync the initial campaign title so the print sign stays up to date
+        if (newWelcomeOfferText) {
+          await sql`
+            UPDATE "Campaign"
+            SET title = ${newWelcomeOfferText}, updated_at = ${new Date().toISOString()}
+            WHERE merchant_id = ${merchantId}
+              AND campaign_type = 'initial'
+              AND status = 'active'
+          `;
+        }
       }
 
       // Update Location Details (assuming 1 location for now per merchant, based on onboarding signup logic)
@@ -2179,6 +2471,7 @@ module.exports = async function handler(req, res) {
             SELECT m.id, m.business_name,
               mu.email as contact_email,
               m.subscription_tier, m.billing_status, m.account_blocked,
+              m.business_presence,
               (SELECT COUNT(*) FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
               m.created_at,
               ml.city as location_city, ml.postal_code as location_zip
@@ -2206,6 +2499,9 @@ module.exports = async function handler(req, res) {
             const lz = audience.zip_codes.map(z => z.trim());
             filtered = filtered.filter(r => r.location_zip && lz.includes(r.location_zip.trim()));
           }
+          if (audience.presences && audience.presences.length) {
+            filtered = filtered.filter(r => audience.presences.includes(r.business_presence || 'physical'));
+          }
           if (audience.joined_days) {
             const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
             filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
@@ -2219,7 +2515,9 @@ module.exports = async function handler(req, res) {
         // Member recipients — same query pattern as /admin/members
         if (audience.type === 'members' || audience.type === 'both') {
           const rows = await sql`
-            SELECT u.id, u.full_name, u.email, u.city, u.zip_code, u.created_at
+            SELECT u.id, u.full_name, u.email, u.city, u.zip_code, u.created_at,
+              u.push_token, u.device_platform,
+              (SELECT COUNT(*) FROM "Redemption" r WHERE r.user_id = u.id AND r.status IN ('redeemed','claimed')) as redemption_count
             FROM "User" u
             ORDER BY u.created_at DESC
           `;
@@ -2236,6 +2534,13 @@ module.exports = async function handler(req, res) {
             const cutoff = new Date(Date.now() - parseInt(audience.joined_days) * 86400000);
             filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
           }
+          if (audience.platforms && audience.platforms.length) {
+            filtered = filtered.filter(r => audience.platforms.includes(r.device_platform || ''));
+          }
+          if (audience.push_enabled === 'yes') filtered = filtered.filter(r => !!(r.push_token));
+          if (audience.push_enabled === 'no') filtered = filtered.filter(r => !(r.push_token));
+          if (audience.has_redeemed === 'yes') filtered = filtered.filter(r => parseInt(r.redemption_count) > 0);
+          if (audience.has_redeemed === 'no') filtered = filtered.filter(r => !(parseInt(r.redemption_count) > 0));
           recipients = recipients.concat(filtered.map(r => ({ name: r.full_name, email: r.email, type: 'member' })));
         }
 
@@ -2295,6 +2600,7 @@ module.exports = async function handler(req, res) {
         const rows = await sql`
           SELECT m.id, mu.email as contact_email,
             m.subscription_tier, m.billing_status, m.account_blocked,
+            m.business_presence,
             (SELECT COUNT(*) FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
             m.created_at,
             ml.city as location_city, ml.postal_code as location_zip
@@ -2316,6 +2622,7 @@ module.exports = async function handler(req, res) {
         }
         if (aud.cities && aud.cities.length) { const lc = aud.cities.map(c => c.toLowerCase().trim()); filtered = filtered.filter(r => r.location_city && lc.includes(r.location_city.toLowerCase().trim())); }
         if (aud.zip_codes && aud.zip_codes.length) { const lz = aud.zip_codes.map(z => z.trim()); filtered = filtered.filter(r => r.location_zip && lz.includes(r.location_zip.trim())); }
+        if (aud.presences && aud.presences.length) { filtered = filtered.filter(r => aud.presences.includes(r.business_presence || 'physical')); }
         if (aud.joined_days) {
           const cutoff = new Date(Date.now() - parseInt(aud.joined_days) * 86400000);
           filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
@@ -2326,7 +2633,9 @@ module.exports = async function handler(req, res) {
 
       if (aud.type === 'members' || aud.type === 'both') {
         const rows = await sql`
-          SELECT u.id, u.email, u.city, u.zip_code, u.created_at
+          SELECT u.id, u.email, u.city, u.zip_code, u.created_at,
+            u.push_token, u.device_platform,
+            (SELECT COUNT(*) FROM "Redemption" r WHERE r.user_id = u.id AND r.status IN ('redeemed','claimed')) as redemption_count
           FROM "User" u
           ORDER BY u.created_at DESC
         `;
@@ -2337,6 +2646,11 @@ module.exports = async function handler(req, res) {
           const cutoff = new Date(Date.now() - parseInt(aud.joined_days) * 86400000);
           filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
         }
+        if (aud.platforms && aud.platforms.length) { filtered = filtered.filter(r => aud.platforms.includes(r.device_platform || '')); }
+        if (aud.push_enabled === 'yes') filtered = filtered.filter(r => !!(r.push_token));
+        if (aud.push_enabled === 'no') filtered = filtered.filter(r => !(r.push_token));
+        if (aud.has_redeemed === 'yes') filtered = filtered.filter(r => parseInt(r.redemption_count) > 0);
+        if (aud.has_redeemed === 'no') filtered = filtered.filter(r => !(parseInt(r.redemption_count) > 0));
         recipients = recipients.concat(filtered.map(r => r.email));
       }
 
@@ -2502,6 +2816,27 @@ module.exports = async function handler(req, res) {
         return { ...c, status: st };
       });
       return send(res, 200, { success: true, data: { codes: enriched } });
+    }
+
+    // ── GET /api/v1/admin/access-codes/:id/merchants — Merchants who used a promo code
+    const acMerchantsMatch = url.match(/\/api\/v1\/admin\/access-codes\/([^/]+)\/merchants$/);
+    if (method === 'GET' && acMerchantsMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const codeId = acMerchantsMatch[1];
+      const [codeRow] = await sql`SELECT code FROM "AdminAccessCode" WHERE id = ${codeId} LIMIT 1`;
+      if (!codeRow) return send(res, 404, { success: false, error: 'Code not found' });
+      const merchants = await sql`
+        SELECT m.id, m.business_name, m.subscription_tier, m.billing_status, m.business_presence,
+          m.created_at, mu.email as contact_email,
+          ml.city as location_city, ml.postal_code as location_zip,
+          (SELECT COUNT(*) FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
+        FROM "Merchant" m
+        LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+        LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id AND ml.is_active = true
+        WHERE m.promo_code = ${codeRow.code}
+        ORDER BY m.created_at DESC
+      `;
+      return send(res, 200, { success: true, data: merchants });
     }
 
     // ── PUT /api/v1/admin/access-codes/:id/expire — Manually expire a code
@@ -2705,6 +3040,8 @@ module.exports = async function handler(req, res) {
       if (!STRIPE_KEY || !PRICE_ID) return send(res, 500, { success: false, error: 'Stripe not configured' });
       const stripeClient = Stripe(STRIPE_KEY);
 
+      const origin = data.origin || 'https://perkfinity.net';
+
       const [merchant] = await sql`SELECT id, business_name, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
 
@@ -2727,8 +3064,8 @@ module.exports = async function handler(req, res) {
         payment_method_types: ['card'],
         line_items: [{ price: PRICE_ID, quantity: 1 }],
         mode: 'subscription',
-        success_url: `https://perkfinity.net/signup.html?payment=success&merchant_id=${merchantId}`,
-        cancel_url: `https://perkfinity.net/signup.html?payment=cancelled&merchant_id=${merchantId}`,
+        success_url: `${origin}/signup.html?payment=success&merchant_id=${merchantId}&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${origin}/signup.html?payment=cancelled&merchant_id=${merchantId}`,
         metadata: { merchant_id: merchantId }
       });
 
@@ -2739,6 +3076,60 @@ module.exports = async function handler(req, res) {
           session_id: session.id
         }
       });
+    }
+
+    // ── POST /api/v1/stripe/confirm-checkout (Tier 1 return) ───────
+    // Called immediately when Stripe redirects back with ?payment=success.
+    // Verifies the checkout session server-side and writes billing state to DB.
+    // This is the primary mechanism — webhook is a backup for any delay/failure.
+    if (method === 'POST' && url.endsWith('/stripe/confirm-checkout')) {
+      const data = req.body || {};
+      const { merchant_id, session_id } = data;
+      if (!merchant_id || !session_id) {
+        return send(res, 400, { success: false, error: 'merchant_id and session_id are required' });
+      }
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      // Retrieve session from Stripe — expand subscription for billing details
+      let session;
+      try {
+        session = await stripeClient.checkout.sessions.retrieve(session_id, {
+          expand: ['subscription', 'subscription.default_payment_method']
+        });
+      } catch (e) {
+        return send(res, 400, { success: false, error: 'Could not retrieve Stripe session' });
+      }
+
+      if (session.payment_status !== 'paid') {
+        return send(res, 402, { success: false, error: 'Payment not completed' });
+      }
+
+      const sub = session.subscription;
+      const nextBilling = sub?.current_period_end
+        ? new Date(sub.current_period_end * 1000)
+        : null;
+      const paymentMethodId = sub?.default_payment_method?.id
+        || sub?.default_payment_method
+        || null;
+
+      await sql`
+        UPDATE "Merchant"
+        SET billing_status        = 'active',
+            subscription_tier     = 'tier1',
+            stripe_customer_id    = ${session.customer},
+            stripe_subscription_id = ${sub?.id || null},
+            stripe_payment_method_id = ${paymentMethodId},
+            next_billing_date     = ${nextBilling},
+            subscription_started_at = COALESCE(subscription_started_at, NOW()),
+            account_blocked       = false,
+            updated_at            = NOW()
+        WHERE id = ${merchant_id}
+      `;
+
+      return send(res, 200, { success: true });
     }
 
     // ── POST /api/v1/stripe/create-customer-portal ─────────────────
