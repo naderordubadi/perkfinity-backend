@@ -48,8 +48,58 @@ module.exports = async (req, res) => {
       `;
     }
 
+    // ── 3. Belt-and-suspenders: expire any active campaigns for deleted merchants ──
+    // Catches cases where the delete endpoint failed mid-way, or merchants were
+    // deleted before campaign expiration was added to the delete flow.
+    const orphanedCampaigns = await sql`
+      UPDATE "Campaign"
+      SET status = 'expired', updated_at = NOW()
+      WHERE status = 'active'
+        AND merchant_id IN (
+          SELECT id FROM "Merchant" WHERE billing_status = 'deleted'
+        )
+      RETURNING id
+    `;
+    if (orphanedCampaigns.length > 0) {
+      await sql`
+        UPDATE "Redemption"
+        SET status = 'expired'
+        WHERE campaign_id = ANY(${orphanedCampaigns.map(c => c.id)})
+          AND status = 'created'
+          AND redeemed = false
+      `;
+      console.log(`🧹 Orphan cleanup (deleted): ${orphanedCampaigns.length} active campaign(s) expired for deleted merchants.`);
+    }
+
+    // ── 4. Belt-and-suspenders: expire any active campaigns for blocked/cancelled merchants ──
+    // Catches cases where account_blocked was set via direct DB update, admin override,
+    // or any code path that didn't properly expire campaigns at the time.
+    const blockedOrphanedCampaigns = await sql`
+      UPDATE "Campaign"
+      SET status = 'expired', updated_at = NOW()
+      WHERE status = 'active'
+        AND merchant_id IN (
+          SELECT id FROM "Merchant"
+          WHERE account_blocked = true
+            OR billing_status IN ('cancelled')
+        )
+      RETURNING id
+    `;
+    if (blockedOrphanedCampaigns.length > 0) {
+      await sql`
+        UPDATE "Redemption"
+        SET status = 'expired'
+        WHERE campaign_id = ANY(${blockedOrphanedCampaigns.map(c => c.id)})
+          AND status = 'created'
+          AND redeemed = false
+      `;
+      console.log(`🧹 Orphan cleanup (blocked/cancelled): ${blockedOrphanedCampaigns.length} active campaign(s) expired for blocked merchants.`);
+    }
+
     const summary = {
       campaigns_expired: expiredCampaigns.length,
+      orphaned_campaigns_expired: orphanedCampaigns.length,
+      blocked_campaigns_expired: blockedOrphanedCampaigns.length,
       redemptions_expired: expiredRedemptions.length,
       campaign_details: expiredCampaigns.map(c => ({
         id: c.id,
@@ -58,11 +108,11 @@ module.exports = async (req, res) => {
       }))
     };
 
-    console.log(`🐛💥 Expire cron: ${expiredCampaigns.length} campaign(s), ${expiredRedemptions.length} redemption(s) expired.`);
+    console.log(`🐛💥 Expire cron: ${expiredCampaigns.length} campaign(s), ${expiredRedemptions.length} redemption(s) expired. Orphans: ${orphanedCampaigns.length + blockedOrphanedCampaigns.length}.`);
 
     return res.status(200).json({
       success: true,
-      message: `Expired ${expiredCampaigns.length} campaign(s) and ${expiredRedemptions.length} redemption(s)`,
+      message: `Expired ${expiredCampaigns.length} campaign(s) and ${expiredRedemptions.length} redemption(s). Orphaned: ${orphanedCampaigns.length + blockedOrphanedCampaigns.length}.`,
       stats: summary
     });
   } catch (err) {

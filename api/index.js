@@ -99,8 +99,68 @@ async function autoEnrollUser(sql, userId, publicCode) {
     // 2. Auto-tier upgrade: check if merchant hit their free member limit
     //    If they have a saved payment method, auto-charge via Stripe.
     try {
-      const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
-      if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
+      const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status, billing_starts_at_member_count FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
+      // Check online promo billing trigger FIRST (separate from trial→tier1 logic)
+      const onlinePromoTiers = ['online_starter', 'online_growth', 'online_pro'];
+      if (merchant && onlinePromoTiers.includes(merchant.subscription_tier) && merchant.billing_starts_at_member_count) {
+        const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
+        if (countRow && countRow.cnt >= merchant.billing_starts_at_member_count) {
+          const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+          const tierPriceMap = {
+            online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
+            online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+            online_pro:     process.env.STRIPE_ONLINE_PRO_PRICE_ID,
+          };
+          const priceId = tierPriceMap[merchant.subscription_tier];
+          if (STRIPE_KEY && priceId && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
+            try {
+              const stripeClient = Stripe(STRIPE_KEY);
+              const subscription = await stripeClient.subscriptions.create({
+                customer: merchant.stripe_customer_id,
+                items: [{ price: priceId }],
+                default_payment_method: merchant.stripe_payment_method_id,
+                metadata: { merchant_id: merchant.id, trigger: 'promo_member_limit' }
+              });
+              // Fix C: reset member_limit to the correct tier cap now that billing has started.
+              // During the promo period, member_limit was set to the promo threshold (e.g. 200).
+              // Once billing is active, it must reflect the actual plan cap.
+              const tierCapAfterPromo = merchant.subscription_tier === 'online_starter' ? 500
+                : merchant.subscription_tier === 'online_growth' ? 2500 : null;
+              await sql`
+                UPDATE "Merchant"
+                SET billing_starts_at_member_count = NULL,
+                    member_limit = ${tierCapAfterPromo},
+                    member_cap_notified = false,
+                    stripe_subscription_id = ${subscription.id},
+                    billing_status = 'active',
+                    subscription_started_at = NOW(),
+                    next_billing_date = NOW() + INTERVAL '30 days',
+                    updated_at = NOW()
+                WHERE id = ${qrData.merchant_id}
+              `;
+              // Send billing-started email
+              try {
+                const [mu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${qrData.merchant_id} LIMIT 1`;
+                const BREVO_KEY = process.env.BREVO_API_KEY;
+                if (BREVO_KEY && mu?.email) {
+                  const brevoClient = SibApiV3Sdk.ApiClient.instance;
+                  brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+                  const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+                  const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+                  emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+                  emailObj.to = [{ email: mu.email }];
+                  emailObj.subject = `🎉 You've reached ${merchant.billing_starts_at_member_count} members — billing has started!`;
+                  emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#5b3fa5;margin-bottom:16px;">🎉 Congratulations, ${merchant.business_name}!</div><p style="font-size:15px;color:#555;line-height:1.6;">You've reached your promo member threshold. Your subscription is now active and your card on file will be billed monthly going forward.</p><p style="font-size:15px;color:#555;">Thank you for growing with Perkfinity!</p></div></div>`;
+                  await emailApi.sendTransacEmail(emailObj);
+                }
+              } catch (emailErr) { console.error('Billing-started email failed:', emailErr.message); }
+              console.log(`Online promo billing triggered for merchant ${qrData.merchant_id} at ${countRow.cnt} members`);
+            } catch (stripeErr) {
+              console.error(`Online promo Stripe charge failed for ${qrData.merchant_id}:`, stripeErr.message);
+            }
+          }
+        }
+      } else if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
         const limit = merchant.member_limit || 100;
         const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
         if (countRow && countRow.cnt >= limit) {
@@ -131,7 +191,8 @@ async function autoEnrollUser(sql, userId, publicCode) {
               console.error(`Stripe auto-charge failed for merchant ${qrData.merchant_id}:`, stripeErr.message);
               // Block account and record failure timestamp for the reminder job
               await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', account_blocked = true, payment_failed_at = NOW(), payment_failure_reminder_count = 0, updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
-              await sql`UPDATE "Campaign" SET status = 'inactive', updated_at = NOW() WHERE merchant_id = ${qrData.merchant_id} AND status = 'active'`;
+              await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${qrData.merchant_id} AND status = 'active'`;
+              // NOTE: billing_starts_at_member_count trigger (online promo) is checked separately below
               // Send Day-0 notification email to merchant immediately
               try {
                 const [mu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${qrData.merchant_id} LIMIT 1`;
@@ -154,7 +215,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
                         <div style="font-size:20px;font-weight:700;color:#dc2626;margin-bottom:16px;">⚠️ Payment Failed — Action Required</div>
                         <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">
                           Hi${bizName},<br><br>
-                          Your account has reached the free member limit and we attempted to automatically upgrade you to <strong>Perkfinity Tier 1</strong>. Unfortunately, your payment method was declined.
+                          Your account has reached the free member limit and we attempted to automatically upgrade you to <strong>Perkfinity Connect</strong>. Unfortunately, your payment method was declined.
                         </p>
                         <div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
                           <div style="font-size:13px;font-weight:700;color:#dc2626;margin-bottom:8px;">Your account is currently paused:</div>
@@ -304,8 +365,8 @@ module.exports = async function handler(req, res) {
     if (method === 'POST' && url.endsWith('/merchants/signup')) {
       const data = req.body || {};
       const presence = (data.business_presence || 'physical').toLowerCase();
-      if (!['physical', 'mobile', 'online'].includes(presence)) {
-        return send(res, 400, { success: false, error: 'Invalid business_presence. Must be physical, mobile, or online.' });
+      if (!['physical', 'mobile', 'online', 'hybrid'].includes(presence)) {
+        return send(res, 400, { success: false, error: 'Invalid business_presence. Must be physical, mobile, online, or hybrid.' });
       }
 
       // Validate core required fields (all presence types)
@@ -468,6 +529,394 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ── POST /api/v1/merchants/apply — Online Brand / Hybrid Application ────
+    if (method === 'POST' && url.endsWith('/merchants/apply')) {
+      const data = req.body || {};
+
+      // Determine presence type — 'online' or 'hybrid'
+      const applyPresence = (data.business_presence || 'online').toLowerCase();
+      if (!['online', 'hybrid'].includes(applyPresence)) {
+        return send(res, 400, { success: false, error: 'business_presence must be online or hybrid.' });
+      }
+      const isHybridApply = applyPresence === 'hybrid';
+
+      const required = ['name', 'website', 'category', 'welcome_offer_text', 'tier', 'email', 'password', 'stripe_payment_method_id'];
+      for (const f of required) {
+        if (!data[f]) return send(res, 400, { success: false, error: `${f} is required` });
+      }
+
+      // Both Online and Hybrid: backend auto-generates HELLO-[BRANDNAME] as the welcome promo code.
+      // No separate welcome_campaign_promo field needed from the frontend.
+
+      // Hybrid single-location: address is required
+      const isMultiLocation = data.is_multi_location === true;
+      if (isHybridApply && !isMultiLocation) {
+        if (!data.address || !data.city || !data.state || !data.zip) {
+          return send(res, 400, { success: false, error: 'address, city, state, and zip are required for single-location hybrid businesses.' });
+        }
+      }
+
+      const email = data.email.toLowerCase().trim();
+      const [existing] = await sql`SELECT id FROM "MerchantUser" WHERE email = ${email} LIMIT 1`;
+      if (existing) return send(res, 409, { success: false, error: 'An account with this email already exists.' });
+
+      const password_hash = await bcrypt.hash(data.password, 12);
+      const now = new Date();
+
+      // Welcome promo code: HELLO-BRANDNAME (auto-generated system code for QR join flow)
+      const welcomePromoCode = 'HELLO-' + data.name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+
+      // Promo code validation (extended_trial only)
+      let memberLimit = data.tier === 'online_starter' ? 500 : data.tier === 'online_growth' ? 2500 : null;
+      let billingStartsAt = null;
+      let promoCode = (data.promo_code || '').trim().toUpperCase() || null;
+      if (promoCode) {
+        const [accessCode] = await sql`
+          SELECT id, type, member_limit FROM "AdminAccessCode"
+          WHERE code = ${promoCode} AND expires_at > NOW() LIMIT 1
+        `;
+        if (!accessCode) return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
+        if (accessCode.type !== 'extended_trial') return send(res, 400, { success: false, error: 'Only extended trial promo codes are accepted.' });
+        memberLimit = accessCode.member_limit || 150;
+        billingStartsAt = memberLimit;
+        await sql`UPDATE "AdminAccessCode" SET use_count = use_count + 1, used_at = NOW() WHERE code = ${promoCode}`;
+      }
+
+      // Create Stripe customer and attach payment method
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+      const customer = await stripeClient.customers.create({
+        name: data.name,
+        email: email,
+        payment_method: data.stripe_payment_method_id,
+        invoice_settings: { default_payment_method: data.stripe_payment_method_id },
+        metadata: { source: isHybridApply ? 'hybrid_application' : 'online_brand_application' }
+      });
+      await stripeClient.paymentMethods.attach(data.stripe_payment_method_id, { customer: customer.id }).catch(() => {});
+
+      // Accept logo_url (base64 string) if provided
+      const logoUrl = data.logo_url || null;
+
+      // Create merchant row
+      const [merchant] = await sql`
+        INSERT INTO "Merchant" (
+          id, business_name, contact_name, phone, website, business_presence,
+          welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
+          promo_code, status, billing_status, application_status,
+          business_category, billing_starts_at_member_count,
+          stripe_customer_id, stripe_payment_method_id, logo_url, created_at, updated_at
+        ) VALUES (
+          gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
+          ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
+          ${data.tier}, ${memberLimit}, ${promoCode}, 'active', 'trial',
+          'pending', ${data.category},
+          ${billingStartsAt}, ${customer.id}, ${data.stripe_payment_method_id}, ${logoUrl}, ${now}, ${now}
+        )
+        RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, application_status
+      `;
+
+      // Create MerchantUser
+      await sql`
+        INSERT INTO "MerchantUser" (id, merchant_id, email, password_hash, role, status, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${email}, ${password_hash}, 'owner', 'active', ${now})
+      `;
+
+      // Location row — real address for single-location hybrid; stub for online or multi-location hybrid
+      if (isHybridApply && !isMultiLocation) {
+        // Single-location hybrid: store real address for localperks discovery
+        await sql`
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
+        `;
+      } else {
+        // Online or multi-location hybrid: stub row (no physical address)
+        await sql`
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', NULL, NULL, NULL, 'US', true, ${now})
+        `;
+      }
+
+      // Initial welcome campaign — use auto-generated HELLO code as the promo for both Online and Hybrid
+      const campaignPromo = welcomePromoCode;
+      await sql`
+        INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, status, campaign_type, promo_code, start_at, end_at, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text || 'Welcome Perk'}, 10, 'active', 'initial',
+                ${campaignPromo}, ${now}, NULL, ${now}, ${now})
+      `;
+
+      // QR code
+      const public_code = crypto.randomBytes(9).toString('base64url');
+      await sql`
+        INSERT INTO "QrCode" (id, merchant_id, public_code, status, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${public_code}, 'active', ${now})
+      `;
+
+      // Notify admin of new application
+      try {
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        const ADMIN_EMAIL_ADDR = process.env.ADMIN_EMAIL || 'admin@perkfinity.net';
+        if (BREVO_KEY) {
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+          emailObj.sender = { name: 'Perkfinity System', email: 'support@perkfinity.net' };
+          emailObj.to = [{ email: ADMIN_EMAIL_ADDR }];
+          const presenceLabel = isHybridApply ? `Hybrid${isMultiLocation ? ' (Multi-Location)' : ' (Single-Location)'}` : 'Online';
+          emailObj.subject = `[New Application] ${data.name} — ${presenceLabel} — ${data.tier}`;
+          emailObj.htmlContent = `<p>New ${presenceLabel} brand application received.</p><ul><li><b>Brand:</b> ${data.name}</li><li><b>Type:</b> ${presenceLabel}</li><li><b>Website:</b> ${data.website}</li><li><b>Category:</b> ${data.category}</li><li><b>Tier:</b> ${data.tier}</li><li><b>Promo Code:</b> ${promoCode || 'None'}</li><li><b>Contact:</b> ${email}</li>${isHybridApply && !isMultiLocation ? `<li><b>Address:</b> ${data.address}, ${data.city}, ${data.state} ${data.zip}</li>` : ''}</ul><p>Review in Admin Dashboard → Applications tab.</p>`;
+          await emailApi.sendTransacEmail(emailObj);
+        }
+      } catch (notifyErr) { console.error('Admin notification email failed:', notifyErr.message); }
+
+      return send(res, 201, {
+        success: true,
+        data: {
+          merchant_id: merchant.id,
+          business_name: merchant.business_name,
+          application_status: merchant.application_status,
+          welcome_promo_code: merchant.welcome_promo_code,
+          qr_public_code: public_code,
+        }
+      });
+    }
+
+    // ── POST /api/v1/merchants/apply-create-account ───────────────
+    // NEW 5-step flow Step 3: creates merchant + user + location + campaign
+    // with application_status='in_progress'. Auto-logs the merchant in.
+    if (method === 'POST' && url.endsWith('/merchants/apply-create-account')) {
+      const data = req.body || {};
+      const applyPresence = (data.business_presence || 'online').toLowerCase();
+      if (!['online', 'hybrid'].includes(applyPresence)) {
+        return send(res, 400, { success: false, error: 'business_presence must be online or hybrid.' });
+      }
+      const isHybridApply = applyPresence === 'hybrid';
+      const isMultiLocation = data.is_multi_location === true;
+
+      const required = ['name', 'website', 'category', 'welcome_offer_text', 'tier', 'email', 'password', 'contactName'];
+      for (const f of required) {
+        if (!data[f]) return send(res, 400, { success: false, error: `${f} is required` });
+      }
+      if (isHybridApply && !isMultiLocation) {
+        if (!data.address || !data.city || !data.state || !data.zip) {
+          return send(res, 400, { success: false, error: 'Address fields are required for single-location hybrid.' });
+        }
+      }
+
+      const email = data.email.toLowerCase().trim();
+      const [existing] = await sql`SELECT id FROM "MerchantUser" WHERE email = ${email} LIMIT 1`;
+      if (existing) return send(res, 409, { success: false, error: 'An account with this email already exists.' });
+
+      const password_hash = await bcrypt.hash(data.password, 12);
+      const now = new Date();
+      const welcomePromoCode = 'HELLO-' + data.name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+
+      let memberLimit = data.tier === 'online_starter' ? 500 : data.tier === 'online_growth' ? 2500 : null;
+      let billingStartsAt = null;
+      let skipStripe = false;
+      let promoCode = (data.promo_code || '').trim().toUpperCase() || null;
+      if (promoCode) {
+        const [accessCode] = await sql`
+          SELECT id, type, member_limit, used FROM "AdminAccessCode"
+          WHERE code = ${promoCode} AND expires_at > NOW() LIMIT 1
+        `;
+        if (!accessCode) return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
+        if (accessCode.type === 'free_for_life') {
+          if (accessCode.used) return send(res, 400, { success: false, error: 'This promo code has already been used.' });
+          memberLimit = 999999; skipStripe = true;
+          data.tier = 'free_for_life';
+        } else if (accessCode.type === 'extended_trial') {
+          memberLimit = accessCode.member_limit || 150;
+          billingStartsAt = memberLimit;
+          await sql`UPDATE "AdminAccessCode" SET use_count = use_count + 1, used_at = NOW() WHERE code = ${promoCode}`;
+        } else {
+          return send(res, 400, { success: false, error: 'Unrecognized promo code type.' });
+        }
+      }
+
+      // For FFL: skip Stripe customer creation entirely
+      let customer = { id: null };
+      if (!skipStripe) {
+        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+        if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+        const stripeClient = Stripe(STRIPE_KEY);
+        customer = await stripeClient.customers.create({
+          name: data.name,
+          email: email,
+          metadata: { source: isHybridApply ? 'hybrid_application' : 'online_brand_application' }
+        });
+      }
+
+      const [merchant] = await sql`
+        INSERT INTO "Merchant" (
+          id, business_name, contact_name, phone, website, business_presence,
+          welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
+          promo_code, status, billing_status, application_status,
+          business_category, billing_starts_at_member_count,
+          stripe_customer_id, logo_url, created_at, updated_at
+        ) VALUES (
+          gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
+          ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
+          ${data.tier}, ${memberLimit}, ${promoCode}, 'active', null,
+          'in_progress', ${data.category},
+          ${billingStartsAt}, ${customer.id}, null, ${now}, ${now}
+        )
+        RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, stripe_customer_id
+      `;
+
+      const [muRow] = await sql`
+        INSERT INTO "MerchantUser" (id, merchant_id, email, password_hash, role, status, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${email}, ${password_hash}, 'owner', 'active', ${now})
+        RETURNING id
+      `;
+
+      if (isHybridApply && !isMultiLocation) {
+        await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite||''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})`;
+      } else {
+        await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', NULL, NULL, NULL, 'US', true, ${now})`;
+      }
+
+      await sql`INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, status, campaign_type, promo_code, start_at, end_at, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text||'Welcome Perk'}, 10, 'active', 'initial', ${welcomePromoCode}, ${now}, NULL, ${now}, ${now})`;
+
+      const public_code = crypto.randomBytes(9).toString('base64url');
+      await sql`INSERT INTO "QrCode" (id, merchant_id, public_code, status, created_at)
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${public_code}, 'active', ${now})`;
+
+      const JWT_SECRET = process.env.JWT_SECRET;
+      const accessToken = jwt.sign(
+        { userId: muRow.id, merchantId: merchant.id, role: 'owner' },
+        JWT_SECRET, { expiresIn: '8h' }
+      );
+
+      // Mark FFL code as used (after merchant row created so we have merchant.id)
+      if (skipStripe && promoCode) {
+        await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchant.id}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${promoCode} AND type = 'free_for_life'`;
+      }
+
+      return send(res, 201, {
+        success: true,
+        data: { merchant_id: merchant.id, access_token: accessToken, welcome_promo_code: merchant.welcome_promo_code, qr_public_code: public_code, skip_stripe: skipStripe }
+      });
+    }
+
+    // ── POST /api/v1/stripe/save-apply-payment ────────────────────
+    // Step 4 of new apply flow: attaches Stripe PM to customer + saves to DB.
+    // Does NOT set billing_status (billing starts only after admin approval).
+    if (method === 'POST' && url.endsWith('/stripe/save-apply-payment')) {
+      const data = req.body || {};
+      const { merchant_id, payment_method_id } = data;
+      if (!merchant_id || !payment_method_id) {
+        return send(res, 400, { success: false, error: 'merchant_id and payment_method_id are required' });
+      }
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let decoded;
+      try { decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET); }
+      catch (e) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (decoded.merchantId !== merchant_id) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const [merchant] = await sql`SELECT id, stripe_customer_id FROM "Merchant" WHERE id = ${merchant_id} LIMIT 1`;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (STRIPE_KEY && merchant.stripe_customer_id) {
+        try {
+          const stripeClient = Stripe(STRIPE_KEY);
+          await stripeClient.paymentMethods.attach(payment_method_id, { customer: merchant.stripe_customer_id }).catch(() => {});
+          await stripeClient.customers.update(merchant.stripe_customer_id, {
+            invoice_settings: { default_payment_method: payment_method_id }
+          });
+        } catch (e) { console.error('Stripe PM attach error:', e.message); }
+      }
+
+      await sql`UPDATE "Merchant" SET stripe_payment_method_id = ${payment_method_id}, updated_at = NOW() WHERE id = ${merchant_id}`;
+      return send(res, 200, { success: true });
+    }
+
+    // ── POST /api/v1/merchants/:id/submit-application ─────────────
+    // Step 5 of new apply flow: updates merchant fields from review,
+    // saves optional logo, changes application_status → 'pending'.
+    const submitAppMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/submit-application$/);
+    if (method === 'POST' && submitAppMatch) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let decoded;
+      try { decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET); }
+      catch (e) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      const merchantId = submitAppMatch[1];
+      if (decoded.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const data = req.body || {};
+      const [merchant] = await sql`
+        SELECT m.*, mu.email as contact_email
+        FROM "Merchant" m LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+        WHERE m.id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchant.application_status === 'pending') return send(res, 409, { success: false, error: 'Application already submitted.' });
+      if (merchant.application_status !== 'in_progress') return send(res, 400, { success: false, error: 'Cannot submit application in its current state.' });
+      if (!merchant.stripe_payment_method_id && merchant.subscription_tier !== 'free_for_life') {
+        return send(res, 400, { success: false, error: 'Payment method is required before submitting.' });
+      }
+
+      // Full field update + status change in one query
+      await sql`
+        UPDATE "Merchant" SET
+          business_name      = COALESCE(${data.name || null}, business_name),
+          website            = COALESCE(${data.website || null}, website),
+          welcome_offer_text = COALESCE(${data.welcome_offer_text || null}, welcome_offer_text),
+          business_category  = COALESCE(${data.category || null}, business_category),
+          logo_url           = CASE WHEN ${data.logo_url !== undefined} THEN ${data.logo_url || null} ELSE logo_url END,
+          application_status = 'pending',
+          updated_at         = NOW()
+        WHERE id = ${merchantId}
+      `;
+
+      if (data.welcome_offer_text) {
+        await sql`UPDATE "Campaign" SET title = ${data.welcome_offer_text}, updated_at = NOW()
+          WHERE merchant_id = ${merchantId} AND campaign_type = 'initial'`;
+      }
+
+      // Confirmation email to merchant
+      try {
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY && merchant.contact_email) {
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          const confirmEmail = new SibApiV3Sdk.SendSmtpEmail();
+          confirmEmail.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+          confirmEmail.to = [{ email: merchant.contact_email }];
+          confirmEmail.subject = `✅ Application Received — ${merchant.business_name}`;
+          confirmEmail.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center"><div style="color:#fff;font-size:24px;font-weight:800">Perkfinity</div></div><div style="padding:28px 24px"><p style="font-size:20px;font-weight:700;color:#5b3fa5">Application received! 🎉</p><p style="font-size:15px;color:#555;line-height:1.6">Thank you, <strong>${merchant.contact_name}</strong>! We received your application for <strong>${merchant.business_name}</strong>.</p><p style="font-size:15px;color:#555">Our team reviews within <strong>1–2 business days</strong>. You'll receive an email once a decision is made.</p><p style="font-size:13px;color:#888">Questions? Contact us at <a href="mailto:support@perkfinity.net">support@perkfinity.net</a>.</p></div></div>`;
+          await emailApi.sendTransacEmail(confirmEmail);
+        }
+      } catch (e) { console.error('Merchant confirmation email failed:', e.message); }
+
+      // Admin notification
+      try {
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        const ADMIN_EMAIL_ADDR = process.env.ADMIN_EMAIL || 'admin@perkfinity.net';
+        if (BREVO_KEY) {
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          const adminEmail = new SibApiV3Sdk.SendSmtpEmail();
+          adminEmail.sender = { name: 'Perkfinity System', email: 'support@perkfinity.net' };
+          adminEmail.to = [{ email: ADMIN_EMAIL_ADDR }];
+          const presenceLabel = merchant.business_presence === 'hybrid' ? 'Hybrid' : 'Online';
+          adminEmail.subject = `[New Application] ${merchant.business_name} — ${presenceLabel}`;
+          adminEmail.htmlContent = `<p>New ${presenceLabel} application ready for review.</p><ul><li><b>Brand:</b> ${merchant.business_name}</li><li><b>Tier:</b> ${merchant.subscription_tier}</li><li><b>Contact:</b> ${merchant.contact_email}</li></ul><p>Review in Admin Dashboard → Applications tab.</p>`;
+          await emailApi.sendTransacEmail(adminEmail);
+        }
+      } catch (e) { console.error('Admin notification failed:', e.message); }
+
+      return send(res, 200, { success: true, message: 'Application submitted' });
+    }
 
     // ── POST /api/v1/auth/login ────────────────────────────────────
 
@@ -479,7 +928,8 @@ module.exports = async function handler(req, res) {
 
       const [user] = await sql`
         SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status, m.logo_url,
-               m.stripe_payment_method_id, m.billing_status
+               m.stripe_payment_method_id, m.billing_status,
+               m.business_presence, m.onboarding_complete, m.application_status
         FROM "MerchantUser" u
         JOIN "Merchant" m ON m.id = u.merchant_id
         WHERE u.email = ${data.email.toLowerCase()}
@@ -497,24 +947,110 @@ module.exports = async function handler(req, res) {
         { expiresIn: '8h' }
       );
 
-      // Payment Setup Gate: block accounts that never completed Step 4.
-      // Requires BOTH billing_status AND stripe_payment_method_id to be unset:
-      //   - Tier 1 active: billing_status='active' → passes
-      //   - Old trial with card: stripe_payment_method_id set by webhook → passes
-      //   - New trial with card: billing_status='trial' set by confirm-setup → passes
-      //   - FFL: excluded by tier check
-      //   - Abandoned (never finished Step 4): billing_status=null/'none' + no stripe_payment_method_id → blocked
+      // ── Gate 1: No payment method on file (physical/mobile, any billing state) ─
+      // Fires if PM is missing for any non-FFL, non-online/hybrid merchant that hasn't
+      // been fully cancelled or is winding down. Catches both:
+      //   (a) Merchant never completed payment setup (new signup)
+      //   (b) Merchant deleted their card in Stripe after setup (payment_method.detached
+      //       cleared our DB field via webhook)
+      // Excludes pending_cancellation: their account ends at period end, no future charge needed.
       const setupIncomplete = (
-        (!user.billing_status || user.billing_status === 'none') &&
         !user.stripe_payment_method_id &&
-        user.subscription_tier !== 'free_for_life'
+        user.subscription_tier !== 'free_for_life' &&
+        !['online', 'hybrid'].includes(user.business_presence) &&
+        !['cancelled', 'deleted', 'pending_cancellation'].includes(user.billing_status)
+      );
+
+      // ── Gate 2: Logo/QR step not completed (physical/mobile/FFL) ─
+      const needsStep5 = (
+        !user.onboarding_complete &&
+        !setupIncomplete &&
+        !['online', 'hybrid'].includes(user.business_presence) &&
+        !['cancelled', 'deleted'].includes(user.billing_status)
+      );
+
+      // ── Gate 3: Online/Hybrid pending approval ────────────────────
+      const pendingApproval = (
+        ['online', 'hybrid'].includes(user.business_presence) &&
+        user.application_status === 'pending'
+      );
+
+      // ── Gate 4: Online/Hybrid application declined ────────────────
+      const applicationDeclined = (
+        ['online', 'hybrid'].includes(user.business_presence) &&
+        user.application_status === 'declined'
+      );
+
+      // ── Gate 5: Online/Hybrid in-progress, payment not yet saved ─
+      const applicationNeedsPayment = (
+        ['online', 'hybrid'].includes(user.business_presence) &&
+        user.application_status === 'in_progress' &&
+        !user.stripe_payment_method_id
+      );
+
+      // ── Gate 6: Online/Hybrid in-progress, payment saved, not submitted
+      const applicationNeedsSubmit = (
+        ['online', 'hybrid'].includes(user.business_presence) &&
+        user.application_status === 'in_progress' &&
+        !!user.stripe_payment_method_id
+      );
+
+      // ── Gate 7: Online/Hybrid approved but payment method was removed ─
+      // Mirrors Gate 1 for online/hybrid: approved merchant deleted their card.
+      // Excludes pending_cancellation (winding down, no future charge needed).
+      // Excludes cancelled/deleted (have their own scenes in dashboard).
+      const onlineNeedsPaymentUpdate = (
+        ['online', 'hybrid'].includes(user.business_presence) &&
+        user.application_status === 'approved' &&
+        !user.stripe_payment_method_id &&
+        !['cancelled', 'deleted', 'pending_cancellation'].includes(user.billing_status)
       );
 
       const { password_hash: _pw, ...safeUser } = user;
-      return send(res, 200, { success: true, data: { merchantUser: safeUser, accessToken, setup_incomplete: setupIncomplete } });
+      return send(res, 200, {
+        success: true,
+        data: {
+          merchantUser: safeUser,
+          accessToken,
+          setup_incomplete: setupIncomplete,
+          needs_step5: needsStep5,
+          pending_approval: pendingApproval,
+          application_declined: applicationDeclined,
+          application_needs_payment: applicationNeedsPayment,
+          application_needs_submit: applicationNeedsSubmit,
+          online_needs_payment_update: onlineNeedsPaymentUpdate
+        }
+      });
+    }
+    // ── POST /api/v1/merchants/:id/mark-onboarded ─────────────────
+    // Called by signup.html when the merchant reaches the QR sign screen (Step 5 complete).
+    // Sets onboarding_complete = true so next login goes to dashboard, not step5 resume.
+    const markOnboardedMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/mark-onboarded$/);
+    if (method === 'POST' && markOnboardedMatch) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return send(res, 401, { success: false, error: 'Unauthorized' });
+      }
+      let decoded;
+      try {
+        decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
+      } catch (e) {
+        return send(res, 401, { success: false, error: 'Invalid token' });
+      }
+      const merchantId = markOnboardedMatch[1];
+      if (decoded.merchantId !== merchantId) {
+        return send(res, 403, { success: false, error: 'Forbidden' });
+      }
+      await sql`
+        UPDATE "Merchant"
+        SET onboarding_complete = true, updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
+      return send(res, 200, { success: true });
     }
 
     // ── POST /api/v1/merchants/forgot-password ─────────────────────
+
     if (method === 'POST' && url.endsWith('/merchants/forgot-password')) {
       const data = req.body || {};
       if (!data.email) return send(res, 400, { success: false, error: 'Email is required' });
@@ -618,6 +1154,7 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "reset_token" TEXT`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "reset_expires_at" TIMESTAMP`;
       await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "push_token" TEXT`;
+      await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "email_unsubscribed" BOOLEAN DEFAULT false`;
       await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_token" TEXT`;
       await sql`ALTER TABLE "MerchantUser" ADD COLUMN IF NOT EXISTS "reset_expires_at" TIMESTAMP`;
       // -- Daily Digest: NotificationQueue + delivery_channel --
@@ -686,6 +1223,33 @@ module.exports = async function handler(req, res) {
         WHERE campaign_id IN (SELECT id FROM "Campaign" WHERE campaign_type = 'initial')
       `;
 
+      // ── Online Merchant Platform: New Merchant columns ────────────
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS business_category VARCHAR(50)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS application_status VARCHAR(20) DEFAULT NULL`;
+      await sql`ALTER TABLE "Merchant" DROP COLUMN IF EXISTS sales_volume_range`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS application_notes TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS billing_starts_at_member_count INT DEFAULT NULL`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS member_cap_notified BOOLEAN DEFAULT FALSE`;
+
+      // ── Onboarding completion tracking ───────────────────────────
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS onboarding_complete BOOLEAN DEFAULT false`;
+      // Backfill: all currently active/billing merchants are already through onboarding
+      await sql`
+        UPDATE "Merchant"
+        SET onboarding_complete = true
+        WHERE onboarding_complete = false
+          AND billing_status IS NOT NULL
+          AND billing_status NOT IN ('none', 'deleted')
+      `;
+      // Online/Hybrid approved merchants are also complete
+      await sql`
+        UPDATE "Merchant"
+        SET onboarding_complete = true
+        WHERE onboarding_complete = false
+          AND business_presence IN ('online', 'hybrid')
+          AND application_status = 'approved'
+      `;
+
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -735,6 +1299,158 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, zip, count: merchants.length, data: merchants });
     }
 
+    // ── GET /api/v1/public/online-merchants — for /codes page ─────
+    if (method === 'GET' && url.startsWith('/api/v1/public/online-merchants')) {
+      const qs = (req.url || '').split('?')[1] || '';
+      const params = new URLSearchParams(qs);
+      const category = params.get('category') || null;
+
+      let merchants;
+      if (category && category !== 'all') {
+        merchants = await sql`
+          SELECT m.id, m.business_name, m.logo_url, m.website, m.welcome_offer_text,
+                 m.business_category, m.welcome_promo_code,
+                 (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
+                 (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
+          FROM "Merchant" m
+          WHERE m.business_presence IN ('online', 'hybrid')
+            AND m.application_status = 'approved'
+            AND m.account_blocked = false
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_category = ${category}
+          ORDER BY m.business_name ASC
+        `;
+      } else {
+        merchants = await sql`
+          SELECT m.id, m.business_name, m.logo_url, m.website, m.welcome_offer_text,
+                 m.business_category, m.welcome_promo_code,
+                 (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
+                 (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
+          FROM "Merchant" m
+          WHERE m.business_presence IN ('online', 'hybrid')
+            AND m.application_status = 'approved'
+            AND m.account_blocked = false
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+          ORDER BY m.business_name ASC
+        `;
+      }
+      return send(res, 200, { success: true, count: merchants.length, data: merchants });
+    }
+
+    // ── GET /api/v1/public/local-merchants — for /localperks page ─
+    if (method === 'GET' && url.startsWith('/api/v1/public/local-merchants')) {
+      const qs = (req.url || '').split('?')[1] || '';
+      const params = new URLSearchParams(qs);
+      const q      = (params.get('q') || '').trim();
+      const cities = params.getAll('city').map(c => c.trim().toLowerCase()).filter(Boolean);
+      const zips   = params.getAll('zip').map(z => z.trim()).filter(Boolean);
+
+      // postgres.js does not support composing fragments dynamically.
+      // Use complete self-contained queries per filter branch (same pattern as online-merchants).
+      let merchants;
+      const like = '%' + q + '%';
+
+      if (q && cities.length > 0 && zips.length > 0) {
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
+          ORDER BY m.business_name ASC LIMIT 100`;
+      } else if (q && cities.length > 0) {
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities})
+          ORDER BY m.business_name ASC LIMIT 100`;
+      } else if (q && zips.length > 0) {
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name ILIKE ${like} AND l.postal_code=ANY(${zips})
+          ORDER BY m.business_name ASC LIMIT 100`;
+      } else if (cities.length > 0 && zips.length > 0) {
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
+          ORDER BY m.business_name ASC LIMIT 100`;
+      } else if (q) {
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name ILIKE ${like}
+          ORDER BY m.business_name ASC LIMIT 100`;
+      } else if (cities.length > 0) {
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND LOWER(l.city)=ANY(${cities})
+          ORDER BY m.business_name ASC LIMIT 100`;
+      } else if (zips.length > 0) {
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND l.postal_code=ANY(${zips})
+          ORDER BY m.business_name ASC LIMIT 100`;
+      } else {
+        // No filters — return all local/mobile merchants
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+          ORDER BY m.business_name ASC LIMIT 100`;
+      }
+
+      return send(res, 200, { success: true, count: merchants.length, data: merchants });
+    }
+
     // ── GET /api/v1/qr/resolve/:code ──────────────────────────────
     const qrMatch = url.match(/\/api\/v1\/qr\/resolve\/([a-zA-Z0-9_-]+)/);
 
@@ -743,10 +1459,45 @@ module.exports = async function handler(req, res) {
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
 
-      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked, billing_status FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
       if (merchant.billing_status === 'deleted') return send(res, 403, { success: false, error: 'This store is no longer available' });
       if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is currently inactive' });
+
+      // Fix A: Enforce online plan tier member cap (online_starter=500, online_growth=2500, online_pro=unlimited).
+      // Block new joins when a capped tier merchant is at their limit. Does not affect physical/mobile/trial merchants.
+      const _cappedOnlineTiers = ['online_starter', 'online_growth'];
+      if (_cappedOnlineTiers.includes(merchant.subscription_tier) && merchant.member_limit && merchant.billing_status === 'active') {
+        const [_capCount] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrCode.merchant_id}`;
+        if (_capCount && _capCount.cnt >= merchant.member_limit) {
+          console.log(`[MemberCap] Merchant ${qrCode.merchant_id} at tier cap (${_capCount.cnt}/${merchant.member_limit}). Join blocked.`);
+          // One-time upgrade notification email — only fires on the first blocked join, never repeats
+          if (!merchant.member_cap_notified) {
+            await sql`UPDATE "Merchant" SET member_cap_notified = true, updated_at = NOW() WHERE id = ${qrCode.merchant_id}`;
+            try {
+              const [_capMu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${qrCode.merchant_id} LIMIT 1`;
+              const BREVO_KEY = process.env.BREVO_API_KEY;
+              if (BREVO_KEY && _capMu?.email) {
+                const brevoClient = SibApiV3Sdk.ApiClient.instance;
+                brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+                const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+                const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+                emailObj.sender = { name: 'Perkfinity Support', email: 'support@perkfinity.net' };
+                emailObj.to = [{ email: _capMu.email }];
+                const _tierLabel = merchant.subscription_tier === 'online_starter' ? 'Starter (500 members)' : 'Growth (2,500 members)';
+                const _nextTier  = merchant.subscription_tier === 'online_starter' ? 'Growth' : 'Scale';
+                emailObj.subject = `⚠️ A new member couldn't join ${merchant.business_name} — your plan is full`;
+                emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#e67e22;margin-bottom:16px;">⚠️ A member just tried to join — but couldn't</div><p style="font-size:15px;color:#555;line-height:1.6;">Hi <strong>${merchant.business_name}</strong>,<br><br>Someone new just tried to join your Perkfinity page but was turned away because your <strong>${_tierLabel}</strong> plan has reached its ${merchant.member_limit}-member limit.</p><div style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:10px;padding:16px 20px;margin-bottom:20px;"><div style="font-size:13px;font-weight:700;color:#c2410c;margin-bottom:8px;">What's happening right now:</div><ul style="margin:0;padding-left:18px;font-size:13px;color:#7c2d12;line-height:2;"><li>New potential members are being turned away from your page</li><li><strong>This will keep happening</strong> until you upgrade your plan</li><li>Your current ${merchant.member_limit} members and all active campaigns are unaffected</li></ul></div><p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">Don't lose customers — upgrade now to keep your doors open to new members:</p><table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;"><tr><td style="padding-bottom:10px;"><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#5b3fa5;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Upgrade to Growth — Up to 2,500 Members</a></td></tr><tr><td><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#1e1b4b;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Go Pro — Unlimited Members</a></td></tr></table><p style="font-size:13px;color:#aaa;text-align:center;">Need help choosing? Reply to this email and our team will assist you right away.</p></div></div>`;
+                await emailApi.sendTransacEmail(emailObj);
+                console.log(`[MemberCap] Upgrade notification sent to ${_capMu.email} for merchant ${qrCode.merchant_id}`);
+              }
+            } catch (_capEmailErr) {
+              console.error('[MemberCap] Upgrade email failed:', _capEmailErr.message);
+            }
+          }
+          return send(res, 403, { success: false, error: 'This store has reached its current member capacity. Please check back later.' });
+        }
+      }
 
       const [location] = await sql`SELECT address, city, state, postal_code FROM "MerchantLocation" WHERE merchant_id = ${qrCode.merchant_id} AND is_active = true LIMIT 1`;
 
@@ -1940,6 +2691,40 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { logo_url: logoValue } });
     }
 
+    // ── POST /api/v1/merchants/:id/update-profile ──────────────────
+    // Called from signup Step 5 when merchant edits Step 1 fields before Finish Setup.
+    const updateProfileMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/update-profile$/);
+    if (method === 'POST' && updateProfileMatch) {
+      const merchantId = updateProfileMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const d = req.body || {};
+      await sql`
+        UPDATE "Merchant" SET
+          business_name      = COALESCE(${d.name      || null}, business_name),
+          website            = COALESCE(${d.website   || null}, website),
+          welcome_offer_text = COALESCE(${d.welcome_offer_text || null}, welcome_offer_text),
+          address            = COALESCE(${d.address   || null}, address),
+          suite              = COALESCE(${d.suite     || null}, suite),
+          city               = COALESCE(${d.city      || null}, city),
+          state              = COALESCE(${d.state     || null}, state),
+          zip_code           = COALESCE(${d.zip       || null}, zip_code),
+          updated_at         = NOW()
+        WHERE id = ${merchantId}
+      `;
+      // Also update the initial campaign title if offer changed
+      if (d.welcome_offer_text) {
+        await sql`UPDATE "Campaign" SET title = ${d.welcome_offer_text}, updated_at = NOW()
+          WHERE merchant_id = ${merchantId} AND campaign_type = 'initial'`;
+      }
+      return send(res, 200, { success: true });
+    }
+
     // ── GET /api/v1/merchants/:id/members ─────────────────────────
     const membersMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/members/);
     if (method === 'GET' && membersMatch) {
@@ -2227,6 +3012,12 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: 'payment_failed_at and payment_failure_reminder_count added to Merchant table.' });
     }
 
+    // ── Hybrid business_presence migration ────────────────────────
+    if (url === '/api/v1/admin/migrate-hybrid-presence' && method === 'GET') {
+      await sql`ALTER TABLE "Merchant" ALTER COLUMN business_presence TYPE VARCHAR(20)`;
+      return send(res, 200, { success: true, message: 'business_presence column widened to VARCHAR(20) for hybrid support.' });
+    }
+
     // ── AdminAccessCode migration ──────────────────────────────────
     if (url === '/api/v1/admin/migrate-access-codes' && method === 'GET') {
       await sql`
@@ -2362,20 +3153,29 @@ module.exports = async function handler(req, res) {
         ORDER BY c.created_at DESC
       `;
       const now = new Date();
-      const active = campaigns.filter(c => c.end_at && new Date(c.end_at) > now).length;
-      const totalRedemptions = campaigns.reduce((sum, c) => sum + (parseInt(c.redemption_count) || 0), 0);
-      const rate = campaigns.length ? Math.round((totalRedemptions / campaigns.length) * 100) / 100 : 0;
+
+      // Respect the DB status field as the source of truth.
+      // Only override to 'expired' if DB says 'active' but end_at has already passed
+      // (cron lag guard — nightly expire-campaigns cron should have caught these).
+      const campaignsWithStatus = campaigns.map(c => ({
+        ...c,
+        status: c.status === 'active' && c.end_at && new Date(c.end_at) < now
+          ? 'expired'
+          : c.status
+      }));
+
+      const active = campaignsWithStatus.filter(c => c.status === 'active').length;
+      const totalRedemptions = campaignsWithStatus.reduce((sum, c) => sum + (parseInt(c.redemption_count) || 0), 0);
+      const rate = campaignsWithStatus.length ? Math.round((totalRedemptions / campaignsWithStatus.length) * 100) / 100 : 0;
       return send(res, 200, {
         success: true,
         data: {
-          campaigns: campaigns.map(c => ({
-            ...c,
-            status: c.end_at && new Date(c.end_at) > now ? 'active' : 'expired'
-          })),
-          stats: { total: campaigns.length, active, redemptions: totalRedemptions, redemption_rate: rate }
+          campaigns: campaignsWithStatus,
+          stats: { total: campaignsWithStatus.length, active, redemptions: totalRedemptions, redemption_rate: rate }
         }
       });
     }
+
 
     // ── GET /api/v1/admin/billing ─────────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/billing')) {
@@ -2818,6 +3618,26 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { codes: enriched } });
     }
 
+    // ── GET /api/v1/admin/access-codes/validate — Public promo code check ──
+    // Called from apply.html to give real-time feedback before submission.
+    // No admin auth required — only looks up extended_trial codes (online brands only).
+    if (method === 'GET' && url.startsWith('/api/v1/admin/access-codes/validate')) {
+      const qs = (req.url || '').split('?')[1] || '';
+      const code = new URLSearchParams(qs).get('code') || '';
+      if (!code.trim()) return send(res, 400, { success: false, error: 'Code is required.' });
+
+      const [ac] = await sql`
+        SELECT id, code, type, member_limit, expires_at
+        FROM "AdminAccessCode"
+        WHERE UPPER(code) = UPPER(${code.trim()})
+          AND type = 'extended_trial'
+          AND (expires_at IS NULL OR expires_at > NOW())
+        LIMIT 1
+      `;
+      if (!ac) return send(res, 404, { success: false, error: 'Invalid or expired promo code.' });
+      return send(res, 200, { success: true, data: { type: ac.type, member_limit: ac.member_limit, code: ac.code } });
+    }
+
     // ── GET /api/v1/admin/access-codes/:id/merchants — Merchants who used a promo code
     const acMerchantsMatch = url.match(/\/api\/v1\/admin\/access-codes\/([^/]+)\/merchants$/);
     if (method === 'GET' && acMerchantsMatch) {
@@ -2852,6 +3672,225 @@ module.exports = async function handler(req, res) {
       await sql`UPDATE "AdminAccessCode" SET expires_at = NOW() WHERE id = ${codeId}`;
       return send(res, 200, { success: true, message: `Code ${code.code} has been expired.` });
     }
+
+    // ══════════════════════════════════════════════════════════════
+    // ONLINE BRAND APPLICATION ADMIN ENDPOINTS
+    // ══════════════════════════════════════════════════════════════
+
+    // ── GET /api/v1/admin/online-applications ─────────────────────
+    if (method === 'GET' && url.startsWith('/api/v1/admin/online-applications')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const qs = (req.url || '').split('?')[1] || '';
+      const statusFilter = new URLSearchParams(qs).get('status') || 'all';
+
+      let applications;
+      if (statusFilter === 'all') {
+        applications = await sql`
+          SELECT m.id, m.business_name, m.contact_name, m.phone, m.website, m.business_category,
+                 m.subscription_tier, m.application_status, m.application_notes,
+                 m.billing_status, m.stripe_subscription_id,
+                 m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
+                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
+                 mu.email as contact_email,
+                 (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
+          FROM "Merchant" m
+          LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+          WHERE m.business_presence IN ('online', 'hybrid') AND m.application_status IS NOT NULL
+          ORDER BY m.created_at DESC
+        `;
+      } else {
+        applications = await sql`
+          SELECT m.id, m.business_name, m.contact_name, m.phone, m.website, m.business_category,
+                 m.subscription_tier, m.application_status, m.application_notes,
+                 m.billing_status, m.stripe_subscription_id,
+                 m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
+                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
+                 mu.email as contact_email,
+                 (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
+          FROM "Merchant" m
+          LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+          WHERE m.business_presence IN ('online', 'hybrid')
+            AND m.application_status = ${statusFilter}
+          ORDER BY m.created_at DESC
+        `;
+      }
+      const pendingCount = applications.filter(a => a.application_status === 'pending').length;
+      return send(res, 200, { success: true, data: applications, pending_count: pendingCount });
+    }
+
+    // ── PUT /api/v1/admin/online-applications/:id/approve ─────────
+    const approveAppMatch = url.match(/\/api\/v1\/admin\/online-applications\/([a-zA-Z0-9_-]+)\/approve$/);
+    if (method === 'PUT' && approveAppMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = approveAppMatch[1];
+      const [merchant] = await sql`
+        SELECT m.*, mu.email as contact_email
+        FROM "Merchant" m
+        LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+        WHERE m.id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchant.application_status === 'approved') return send(res, 409, { success: false, error: 'Already approved' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      let stripeSubscriptionId = null;
+      let billingWarning = null;
+
+      // Only create subscription immediately if no promo billing delay
+      if (!merchant.billing_starts_at_member_count) {
+        // Check prerequisites and surface a warning if anything is missing
+        if (!merchant.stripe_customer_id || !merchant.stripe_payment_method_id) {
+          billingWarning = !merchant.stripe_customer_id
+            ? 'No Stripe customer ID on record. The merchant may not have completed payment setup.'
+            : 'No payment method on record. The merchant did not complete their billing setup.';
+        } else if (!STRIPE_KEY) {
+          billingWarning = 'STRIPE_SECRET_KEY environment variable is not configured on the server.';
+        } else {
+          try {
+            const stripeClient = Stripe(STRIPE_KEY);
+            const tierPriceMap = {
+              online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
+              online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+              online_pro:     process.env.STRIPE_ONLINE_PRO_PRICE_ID,
+            };
+            const priceId = tierPriceMap[merchant.subscription_tier];
+            if (!priceId) {
+              billingWarning = `No Stripe price ID configured for tier '${merchant.subscription_tier}'. Set STRIPE_ONLINE_${(merchant.subscription_tier || '').toUpperCase().replace('ONLINE_', '')}_PRICE_ID in environment variables.`;
+            } else {
+              const subscription = await stripeClient.subscriptions.create({
+                customer: merchant.stripe_customer_id,
+                items: [{ price: priceId }],
+                default_payment_method: merchant.stripe_payment_method_id,
+                metadata: { merchant_id: merchantId, trigger: 'admin_approval' }
+              });
+              stripeSubscriptionId = subscription.id;
+            }
+          } catch (stripeErr) {
+            console.error(`Stripe subscription creation on approval failed for ${merchantId}:`, stripeErr.message);
+            billingWarning = `Stripe error: ${stripeErr.message}`;
+          }
+        }
+      }
+
+      await sql`
+        UPDATE "Merchant"
+        SET application_status = 'approved',
+            onboarding_complete = true,
+            billing_status = ${stripeSubscriptionId ? 'active' : 'trial'},
+            stripe_subscription_id = ${stripeSubscriptionId},
+            subscription_started_at = ${stripeSubscriptionId ? new Date() : null},
+            next_billing_date = ${stripeSubscriptionId ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) : null},
+            updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
+
+      // Send approval email
+      try {
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY && merchant.contact_email) {
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+          emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+          emailObj.to = [{ email: merchant.contact_email }];
+          emailObj.subject = `🎉 Welcome to Perkfinity, ${merchant.business_name}! Your application is approved.`;
+          const billingNote = merchant.billing_starts_at_member_count
+            ? `Your card will be charged once you reach <strong>${merchant.billing_starts_at_member_count} members</strong> via your promo arrangement.`
+            : stripeSubscriptionId
+              ? `Your subscription is now active and your card on file will be billed monthly.`
+              : `Your account is now active. Our team will be in touch regarding your billing setup.`;
+          emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#5b3fa5;margin-bottom:16px;">🎉 You're approved, ${merchant.business_name}!</div><p style="font-size:15px;color:#555;line-height:1.6;">Your brand is now live on Perkfinity. Members can discover your offers at <a href="https://perkfinity.net/codes">perkfinity.net/codes</a>.</p><p style="font-size:14px;color:#555;">${billingNote}</p><p style="font-size:15px;color:#555;">Log in to your dashboard at <a href="https://perkfinity.net/login.html">perkfinity.net/login.html</a> to manage campaigns and view your member growth.</p></div></div>`;
+          await emailApi.sendTransacEmail(emailObj);
+        }
+      } catch (emailErr) { console.error('Approval email failed:', emailErr.message); }
+
+      return send(res, 200, {
+        success: true,
+        message: 'Application approved',
+        stripe_subscription_id: stripeSubscriptionId,
+        billing_warning: billingWarning || null,
+        stripe_customer_id: merchant.stripe_customer_id || null
+      });
+    }
+
+    // ── PUT /api/v1/admin/online-applications/:id/decline ─────────
+    const declineAppMatch = url.match(/\/api\/v1\/admin\/online-applications\/([a-zA-Z0-9_-]+)\/decline$/);
+    if (method === 'PUT' && declineAppMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = declineAppMatch[1];
+      const { notes = '' } = req.body || {};
+      const [merchant] = await sql`
+        SELECT m.*, mu.email as contact_email
+        FROM "Merchant" m
+        LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+        WHERE m.id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchant.application_status !== 'pending') {
+        return send(res, 409, { success: false, error: `Cannot decline — application is already ${merchant.application_status}` });
+      }
+
+      // Cancel Stripe Setup Intent (best-effort)
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (STRIPE_KEY && merchant.stripe_customer_id) {
+        try {
+          const stripeClient = Stripe(STRIPE_KEY);
+          await stripeClient.customers.del(merchant.stripe_customer_id);
+        } catch (e) { /* non-fatal */ }
+      }
+
+      await sql`
+        UPDATE "Merchant"
+        SET application_status = 'declined',
+            application_notes = ${notes},
+            stripe_customer_id = NULL,
+            stripe_payment_method_id = NULL,
+            updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
+
+      // Send decline email
+      try {
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY && merchant.contact_email) {
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+          emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+          emailObj.to = [{ email: merchant.contact_email }];
+          emailObj.subject = `Regarding your Perkfinity brand application`;
+          emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><p style="font-size:15px;color:#555;line-height:1.6;">Hi ${merchant.business_name},</p><p style="font-size:15px;color:#555;line-height:1.6;">Thank you for applying to join Perkfinity as an online business. After review, we're unable to move forward with your application at this time.${notes ? `</p><p style="font-size:15px;color:#555;"><strong>Reason:</strong> ${notes}` : ''}</p><p style="font-size:15px;color:#555;">Your payment information has been removed and you will not be charged. You're welcome to reapply in the future. If you have questions, please contact <a href="mailto:support@perkfinity.net">support@perkfinity.net</a>.</p></div></div>`;
+          await emailApi.sendTransacEmail(emailObj);
+        }
+      } catch (emailErr) { console.error('Decline email failed:', emailErr.message); }
+
+      return send(res, 200, { success: true, message: 'Application declined' });
+    }
+
+    // ── POST /api/v1/stripe/apply-setup-intent ────────────────────
+    // Creates a bare Stripe Setup Intent (no customer) for apply.html Step 6
+    if (method === 'POST' && url.endsWith('/stripe/apply-setup-intent')) {
+      // Origin allowlist: only accept requests from our own domain or local dev
+      const reqOrigin = req.headers.origin || req.headers.referer || '';
+      const allowedOrigins = ['perkfinity.net', 'localhost', '127.0.0.1'];
+      if (!allowedOrigins.some(h => reqOrigin.includes(h))) {
+        return send(res, 403, { success: false, error: 'Forbidden' });
+      }
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+      const setupIntent = await stripeClient.setupIntents.create({
+        usage: 'off_session',
+        metadata: { purpose: 'online_brand_application' }
+      });
+      return send(res, 200, { success: true, client_secret: setupIntent.client_secret });
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ADMIN EMAIL
+    // ══════════════════════════════════════════════════════════════
 
     // ── POST /api/v1/admin/send-email — Admin bulk email via Brevo
     if (method === 'POST' && url.endsWith('/admin/send-email')) {
@@ -3003,11 +4042,11 @@ module.exports = async function handler(req, res) {
 
     // ── POST /api/v1/stripe/confirm-setup ─────────────────────────
     // Called immediately after confirmCardSetup() succeeds on the frontend.
-    // Writes stripe_payment_method_id to the DB without waiting for a webhook,
-    // preventing the dashboard gate race condition.
+    // For Trial: saves card only — billing starts when member limit is reached.
+    // For Tier 1: saves card AND creates subscription immediately (replaces Stripe Checkout redirect).
     if (method === 'POST' && url.endsWith('/stripe/confirm-setup')) {
       const data = req.body || {};
-      const { merchant_id, payment_method_id } = data;
+      const { merchant_id, payment_method_id, tier } = data;
       if (!merchant_id || !payment_method_id) {
         return send(res, 400, { success: false, error: 'merchant_id and payment_method_id are required' });
       }
@@ -3019,13 +4058,51 @@ module.exports = async function handler(req, res) {
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
       if (payload.merchantId !== merchant_id) return send(res, 403, { success: false, error: 'Forbidden' });
 
-      await sql`
-        UPDATE "Merchant"
-        SET stripe_payment_method_id = ${payment_method_id},
-            billing_status = COALESCE(billing_status, 'trial'),
-            updated_at = NOW()
-        WHERE id = ${merchant_id}
-      `;
+      if (tier === 'tier1') {
+        // Tier 1 (Connect $29.99/mo): save card AND create subscription immediately
+        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+        const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
+        if (!STRIPE_KEY || !PRICE_ID) return send(res, 500, { success: false, error: 'Stripe not configured' });
+        const stripeClient = Stripe(STRIPE_KEY);
+
+        const [merchant] = await sql`SELECT stripe_customer_id FROM "Merchant" WHERE id = ${merchant_id} LIMIT 1`;
+        if (!merchant?.stripe_customer_id) return send(res, 400, { success: false, error: 'No Stripe customer found' });
+
+        // Set as default payment method on the customer
+        await stripeClient.customers.update(merchant.stripe_customer_id, {
+          invoice_settings: { default_payment_method: payment_method_id }
+        });
+
+        // Create subscription — charges immediately for first month
+        const subscription = await stripeClient.subscriptions.create({
+          customer: merchant.stripe_customer_id,
+          items: [{ price: PRICE_ID }],
+          default_payment_method: payment_method_id,
+          metadata: { merchant_id, trigger: 'tier1_signup' }
+        });
+
+        await sql`
+          UPDATE "Merchant"
+          SET stripe_payment_method_id   = ${payment_method_id},
+              stripe_subscription_id     = ${subscription.id},
+              billing_status             = 'active',
+              subscription_tier          = 'tier1',
+              subscription_started_at    = NOW(),
+              next_billing_date          = NOW() + INTERVAL '30 days',
+              updated_at                 = NOW()
+          WHERE id = ${merchant_id}
+        `;
+      } else {
+        // Trial: save payment method only — billing starts when member limit is reached
+        await sql`
+          UPDATE "Merchant"
+          SET stripe_payment_method_id = ${payment_method_id},
+              billing_status = COALESCE(billing_status, 'trial'),
+              updated_at = NOW()
+          WHERE id = ${merchant_id}
+        `;
+      }
+
       return send(res, 200, { success: true });
     }
 
@@ -3042,8 +4119,16 @@ module.exports = async function handler(req, res) {
 
       const origin = data.origin || 'https://perkfinity.net';
 
-      const [merchant] = await sql`SELECT id, business_name, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, stripe_customer_id, billing_status, stripe_subscription_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+
+      // Guard: prevent double-subscription if merchant already has an active subscription
+      if (merchant.billing_status === 'active' || merchant.stripe_subscription_id) {
+        return send(res, 409, {
+          success: false,
+          error: 'An active subscription already exists for this account. Please contact support if you believe this is an error.'
+        });
+      }
 
       const [merchantUser] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${merchantId} LIMIT 1`;
 
@@ -3132,6 +4217,67 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true });
     }
 
+    // ── POST /api/v1/stripe/confirm-reactivation ───────────────────
+    // Called from dashboard.html after Stripe redirects back with ?reactivated=true.
+    // Verifies the checkout session and restores the merchant account,
+    // preserving their existing subscription_tier (unlike confirm-checkout which hardcodes tier1).
+    if (method === 'POST' && url.endsWith('/stripe/confirm-reactivation')) {
+      const data = req.body || {};
+      const { merchant_id, session_id } = data;
+      if (!merchant_id || !session_id) {
+        return send(res, 400, { success: false, error: 'merchant_id and session_id are required' });
+      }
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      let session;
+      try {
+        session = await stripeClient.checkout.sessions.retrieve(session_id, {
+          expand: ['subscription', 'subscription.default_payment_method']
+        });
+      } catch (e) {
+        return send(res, 400, { success: false, error: 'Could not retrieve Stripe session' });
+      }
+
+      if (session.payment_status !== 'paid') {
+        return send(res, 402, { success: false, error: 'Payment not completed' });
+      }
+
+      // Verify session belongs to this merchant
+      if (session.metadata?.merchant_id !== merchant_id) {
+        return send(res, 403, { success: false, error: 'Session does not match merchant' });
+      }
+
+      const sub = session.subscription;
+      const nextBilling = sub?.current_period_end
+        ? new Date(sub.current_period_end * 1000)
+        : null;
+      const paymentMethodId = sub?.default_payment_method?.id
+        || sub?.default_payment_method
+        || null;
+
+      // Preserve existing subscription_tier — do NOT hardcode tier1
+      await sql`
+        UPDATE "Merchant"
+        SET billing_status               = 'active',
+            stripe_customer_id           = ${session.customer},
+            stripe_subscription_id       = ${sub?.id || null},
+            stripe_payment_method_id     = ${paymentMethodId},
+            next_billing_date            = ${nextBilling},
+            account_blocked              = false,
+            cancelled_at                 = NULL,
+            payment_failed_at            = NULL,
+            payment_failure_reminder_count = NULL,
+            subscription_started_at      = COALESCE(subscription_started_at, NOW()),
+            updated_at                   = NOW()
+        WHERE id = ${merchant_id}
+      `;
+
+      return send(res, 200, { success: true });
+    }
+
     // ── POST /api/v1/stripe/create-customer-portal ─────────────────
     if (method === 'POST' && url.endsWith('/stripe/create-customer-portal')) {
       const data = req.body || {};
@@ -3189,7 +4335,7 @@ module.exports = async function handler(req, res) {
             updated_at = NOW()
         WHERE id = ${merchantId}
       `;
-      await sql`UPDATE "Campaign" SET status = 'inactive', updated_at = NOW() WHERE merchant_id = ${merchantId} AND status = 'active'`;
+      await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchantId} AND status = 'active'`;
       return send(res, 200, { success: true, message: 'Your account has been cancelled. You can reactivate by contacting support.' });
     }
 
@@ -3246,7 +4392,8 @@ module.exports = async function handler(req, res) {
         SELECT id, business_name, subscription_tier, billing_status, account_blocked,
                stripe_customer_id, stripe_subscription_id, subscription_started_at,
                next_billing_date, member_limit, promo_code, created_at,
-               payment_failed_at, payment_failure_reminder_count
+               payment_failed_at, payment_failure_reminder_count,
+               billing_starts_at_member_count, application_status, business_presence
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -3279,6 +4426,9 @@ module.exports = async function handler(req, res) {
           has_stripe: !!merchant.stripe_customer_id,
           has_subscription: !!merchant.stripe_subscription_id,
           payment_failed_at: merchant.payment_failed_at || null,
+          billing_starts_at_member_count: merchant.billing_starts_at_member_count || null,
+          application_status: merchant.application_status || null,
+          business_presence: merchant.business_presence || 'physical',
           invoices
         }
       });
@@ -3296,12 +4446,11 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-      const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
-      if (!STRIPE_KEY || !PRICE_ID) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
       const stripeClient = Stripe(STRIPE_KEY);
 
       const [merchant] = await sql`
-        SELECT id, stripe_customer_id, stripe_subscription_id, account_blocked
+        SELECT id, stripe_customer_id, stripe_subscription_id, account_blocked, subscription_tier
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -3314,26 +4463,62 @@ module.exports = async function handler(req, res) {
         return send(res, 400, { success: false, error: 'You already have an active subscription.' });
       }
 
+      // Resolve the correct price ID for this merchant's tier
+      const tierPriceMap = {
+        tier1:          process.env.STRIPE_TIER1_PRICE_ID,
+        online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
+        online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+        online_pro:     process.env.STRIPE_ONLINE_PRO_PRICE_ID,
+      };
+      const reactivatePriceId = tierPriceMap[merchant.subscription_tier] || process.env.STRIPE_TIER1_PRICE_ID;
+      if (!reactivatePriceId) return send(res, 500, { success: false, error: `No Stripe price configured for tier '${merchant.subscription_tier}'` });
+
+      // ── Check if Stripe customer has a default payment method ──────
+      let stripeCustomer;
+      try {
+        stripeCustomer = await stripeClient.customers.retrieve(merchant.stripe_customer_id);
+      } catch (e) {
+        return send(res, 400, { success: false, error: 'Could not retrieve Stripe customer profile.' });
+      }
+      const hasPaymentMethod =
+        stripeCustomer.invoice_settings?.default_payment_method ||
+        stripeCustomer.default_source;
+
+      if (!hasPaymentMethod) {
+        // No card on file — create a Checkout Session to capture a new one
+        const origin = req.headers.origin || 'https://perkfinity.net';
+        const session = await stripeClient.checkout.sessions.create({
+          customer: merchant.stripe_customer_id,
+          payment_method_types: ['card'],
+          line_items: [{ price: reactivatePriceId, quantity: 1 }],
+          mode: 'subscription',
+          success_url: `${origin}/dashboard.html?reactivated=true&merchant_id=${merchantId}&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${origin}/dashboard.html?tab=billing`,
+          metadata: { merchant_id: merchantId, trigger: 'reactivation', tier: merchant.subscription_tier }
+        });
+        return send(res, 200, { success: false, needs_payment_method: true, checkout_url: session.url });
+      }
+
+      // ── Has payment method — create subscription directly ──────────
       try {
         const subscription = await stripeClient.subscriptions.create({
           customer: merchant.stripe_customer_id,
-          items: [{ price: PRICE_ID }],
-          // Omit default_payment_method so Stripe safely falls back to the customer's portal-managed default card
-          metadata: { merchant_id: merchantId }
+          items: [{ price: reactivatePriceId }],
+          metadata: { merchant_id: merchantId, trigger: 'reactivation', tier: merchant.subscription_tier }
         });
 
         await sql`
           UPDATE "Merchant"
-          SET subscription_tier = 'tier1',
+          SET subscription_tier     = ${merchant.subscription_tier},
               stripe_subscription_id = ${subscription.id},
-              billing_status = 'active',
-              account_blocked = false,
-              cancelled_at = NULL,
-              payment_failed_at = NULL,
+              billing_status        = 'active',
+              account_blocked       = false,
+              cancelled_at          = NULL,
+              payment_failed_at     = NULL,
               payment_failure_reminder_count = NULL,
               subscription_started_at = NOW(),
-              next_billing_date = NOW() + INTERVAL '30 days',
-              updated_at = NOW()
+              next_billing_date     = NOW() + INTERVAL '30 days',
+              updated_at            = NOW()
           WHERE id = ${merchantId}
         `;
 
@@ -3410,6 +4595,11 @@ module.exports = async function handler(req, res) {
       `;
       await sql`UPDATE "MerchantLocation" SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL WHERE merchant_id = ${merchantId}`;
 
+      // ── Expire all active campaigns for this deleted merchant ──
+      await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchantId} AND status = 'active'`;
+      // ── Expire any unredeemed redemptions tied to those campaigns ──
+      await sql`UPDATE "Redemption" SET status = 'expired' WHERE campaign_id IN (SELECT id FROM "Campaign" WHERE merchant_id = ${merchantId}) AND status = 'created' AND redeemed = false`;
+
       return send(res, 200, { success: true, message: 'Account wiped successfully' });
     }
 
@@ -3452,6 +4642,61 @@ module.exports = async function handler(req, res) {
       await sql`DELETE FROM "Merchant" WHERE id = ${merchantId}`;
 
       return send(res, 200, { success: true, message: 'Abandoned signup cleaned up' });
+    }
+
+    // ── GET /api/v1/members/unsubscribe?token=&uid= ──────────────────
+    if (method === 'GET' && url.startsWith('/api/v1/members/unsubscribe')) {
+      const qs = (req.url || '').split('?')[1] || '';
+      const params = new URLSearchParams(qs);
+      const token = params.get('token');
+      const uid   = params.get('uid');
+
+      const unsubPage = (success, message) => `<!DOCTYPE html><html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>${success ? 'Unsubscribed' : 'Invalid Link'} — Perkfinity</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', -apple-system, sans-serif; background: #f3f0fa; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: #fff; border-radius: 20px; padding: 48px 40px; max-width: 440px; width: 90%; text-align: center; box-shadow: 0 8px 32px rgba(91,63,165,0.10); }
+    .icon { font-size: 52px; margin-bottom: 20px; }
+    h1 { font-size: 22px; font-weight: 800; color: #1a1a2e; margin: 0 0 12px; }
+    p { color: #666; font-size: 15px; line-height: 1.65; margin: 0 0 28px; }
+    a { display: inline-block; color: #5B3FA5; text-decoration: none; font-weight: 700; font-size: 14px; border: 1.5px solid #5B3FA5; border-radius: 10px; padding: 10px 24px; transition: all 0.2s; }
+    a:hover { background: #5B3FA5; color: #fff; }
+  </style>
+</head><body>
+  <div class="card">
+    <div class="icon">${success ? '\u2705' : '\u274C'}</div>
+    <h1>${success ? "You've been unsubscribed" : 'Invalid or expired link'}</h1>
+    <p>${message}</p>
+    <a href="https://www.perkfinity.net">← Back to Perkfinity</a>
+  </div>
+</body></html>`;
+
+      if (!token || !uid) {
+        res.setHeader('Content-Type', 'text/html');
+        return res.status(400).end(unsubPage(false, 'This unsubscribe link is missing required information. Please contact <strong>hello@perkfinity.net</strong> if you need help.'));
+      }
+
+      const secret   = process.env.JWT_SECRET || 'perkfinity-secret';
+      const expected = crypto.createHmac('sha256', secret).update(uid).digest('hex');
+
+      if (token !== expected) {
+        res.setHeader('Content-Type', 'text/html');
+        return res.status(400).end(unsubPage(false, 'This unsubscribe link is invalid or has expired. Please contact <strong>hello@perkfinity.net</strong> if you need help.'));
+      }
+
+      try {
+        await sql`UPDATE "User" SET email_unsubscribed = true WHERE id = ${uid}`;
+        res.setHeader('Content-Type', 'text/html');
+        return res.status(200).end(unsubPage(true, "You've been successfully removed from Perkfinity's Daily Digest emails. You won't receive any more marketing emails from us. You can still use the app and manage your account normally."));
+      } catch (err) {
+        console.error('Unsubscribe error:', err);
+        res.setHeader('Content-Type', 'text/html');
+        return res.status(500).end(unsubPage(false, 'Something went wrong. Please contact <strong>hello@perkfinity.net</strong> to unsubscribe manually and we\'ll take care of it right away.'));
+      }
     }
 
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });

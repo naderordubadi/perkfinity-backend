@@ -11,6 +11,7 @@
  *   invoice.payment_failed         — Payment failed (retry will happen automatically)
  *   customer.subscription.updated  — Detects cancel_at_period_end (portal or app) → pending_cancellation
  *   customer.subscription.deleted  — Subscription cancelled → FULL BLOCK
+ *   payment_method.detached        — Card removed from Stripe → clears PM in DB → triggers dashboard gate
  */
 
 const Stripe = require('stripe');
@@ -302,9 +303,44 @@ module.exports = async (req, res) => {
               updated_at = NOW()
           WHERE id = ${merchant.id}
         `;
-        await sql`UPDATE "Campaign" SET status = 'inactive', updated_at = NOW() WHERE merchant_id = ${merchant.id} AND status = 'active'`;
+        await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchant.id} AND status = 'active'`;
 
         console.error(`[Stripe] 🚫 FULL BLOCK: Merchant ${merchant.id} (${merchant.business_name}) — subscription deleted, campaigns deactivated`);
+        break;
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // PAYMENT METHOD DETACHED — Card removed from Stripe
+      // Fires when a merchant deletes their card via the Stripe portal
+      // or any API call. Clears our DB field so the login/dashboard
+      // gate detects the missing PM and redirects to add-card flow.
+      // ═══════════════════════════════════════════════════════════
+      case 'payment_method.detached': {
+        const paymentMethod = event.data.object;
+        const paymentMethodId = paymentMethod.id;
+
+        // Find the merchant who had this payment method on file
+        const [merchant] = await sql`
+          SELECT id, business_name, subscription_tier FROM "Merchant"
+          WHERE stripe_payment_method_id = ${paymentMethodId}
+          LIMIT 1
+        `;
+
+        if (!merchant) {
+          // PM may have been attached to a customer but not the primary one on file — safe to ignore
+          console.log(`[Stripe] payment_method.detached: ${paymentMethodId} — no merchant match, ignoring`);
+          break;
+        }
+
+        // Clear the payment method from our DB
+        await sql`
+          UPDATE "Merchant"
+          SET stripe_payment_method_id = NULL,
+              updated_at = NOW()
+          WHERE id = ${merchant.id}
+        `;
+
+        console.warn(`[Stripe] ⚠️ Payment method ${paymentMethodId} detached for merchant ${merchant.id} (${merchant.business_name}, tier: ${merchant.subscription_tier}). PM cleared from DB — next login will require re-adding card.`);
         break;
       }
 

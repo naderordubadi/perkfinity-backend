@@ -145,7 +145,12 @@ export async function purgeCancelledMerchants() {
         WHERE merchant_id = ${merchant.id}
       `;
 
-      console.log(`[PurgeCancelledMerchants] ✅ PII wiped for merchant ${merchant.id} (was: ${merchant.business_name})`);
+      // Expire all active campaigns for this deleted merchant
+      await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchant.id} AND status = 'active'`;
+      // Expire any unredeemed redemptions tied to those campaigns
+      await sql`UPDATE "Redemption" SET status = 'expired' WHERE campaign_id IN (SELECT id FROM "Campaign" WHERE merchant_id = ${merchant.id}) AND status = 'created' AND redeemed = false`;
+
+      console.log(`[PurgeCancelledMerchants] ✅ PII wiped + campaigns expired for merchant ${merchant.id} (was: ${merchant.business_name})`);
     } catch (err: any) {
       console.error(`[PurgeCancelledMerchants] ❌ Failed to purge merchant ${merchant.id}:`, err.message);
     }

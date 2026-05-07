@@ -7,6 +7,7 @@
 const { neon } = require('@neondatabase/serverless');
 const SibApiV3Sdk = require('sib-api-v3-sdk');
 const admin = require('firebase-admin');
+const crypto = require('crypto');
 
 // ── Firebase Admin Init ──────────────────────────────────────────
 let firebaseInitialized = false;
@@ -68,7 +69,7 @@ module.exports = async (req, res) => {
   try {
     // ── Fetch all unsent queue items ────────────────────────────
     const pendingItems = await sql`
-      SELECT nq.*, u.email, u.push_token, u.full_name
+      SELECT nq.*, u.email, u.push_token, u.full_name, u.email_unsubscribed
       FROM "NotificationQueue" nq
       JOIN "User" u ON u.id = nq.user_id
       WHERE nq.sent = false
@@ -110,7 +111,8 @@ module.exports = async (req, res) => {
       const shouldPush = items.some(i => i.channels === 'push' || i.channels === 'both');
 
       // ── Build Digest Email ──────────────────────────────────
-      if (shouldEmail && emailApi && userEmail) {
+      const isUnsubscribed = items[0].email_unsubscribed === true;
+      if (shouldEmail && emailApi && userEmail && !isUnsubscribed) {
         const offerCount = items.length;
         const subject = offerCount === 1
           ? `🎉 New perk from ${items[0].store_name}`
@@ -145,6 +147,12 @@ module.exports = async (req, res) => {
           </div>
         `}).join('');
 
+        // Build unsubscribe link (stateless HMAC token)
+        const unsubSecret = process.env.JWT_SECRET || 'perkfinity-secret';
+        const unsubToken  = crypto.createHmac('sha256', unsubSecret).update(userId).digest('hex');
+        const backendUrl  = process.env.BACKEND_URL || 'https://perkfinity.net';
+        const unsubUrl    = `${backendUrl}/api/v1/members/unsubscribe?token=${unsubToken}&uid=${encodeURIComponent(userId)}`;
+
         const emailHtml = `
           <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
             <div style="background:linear-gradient(135deg,#5B3FA5,#6BC17A); padding:24px; text-align:center;">
@@ -158,7 +166,9 @@ module.exports = async (req, res) => {
             </div>
             <div style="padding:16px 24px; border-top:1px solid #f0f0f0; text-align:center;">
               <div style="font-size:11px; color:#bbb;">Powered by <strong style="color:#5B3FA5;">Perkfinity</strong></div>
-              <div style="font-size:10px;color:#ddd;margin-top:12px;">&nbsp;</div>
+              <div style="margin-top:10px; font-size:11px; color:#ccc;">
+                <a href="${unsubUrl}" style="color:#bbb; text-decoration:underline; font-size:11px;">Unsubscribe from Daily Digest</a>
+              </div>
             </div>
           </div>
         `;
