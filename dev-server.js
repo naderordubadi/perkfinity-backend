@@ -28,6 +28,25 @@ function parseBody(req) {
 
 const server = http.createServer(async (req, res) => {
   const start = Date.now();
+
+  // ── Stripe webhook: route to dedicated handler, skip body pre-read.
+  // The webhook handler reads the raw stream itself (needed for signature verification).
+  if (req.url === '/api/webhooks/stripe' || req.url.startsWith('/api/webhooks/stripe?')) {
+    console.log(`\n→ ${req.method} ${req.url} [STRIPE WEBHOOK]`);
+    // Add Express-like shims that the webhook handler uses
+    res.status = (code) => { res.statusCode = code; return res; };
+    res.json   = (data) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(data)); };
+    try {
+      const webhookHandler = require('./api/webhooks/stripe.js');
+      await webhookHandler(req, res);
+    } catch (err) {
+      console.error('Stripe webhook handler error:', err);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     req.body = await parseBody(req);
   } else {
@@ -59,6 +78,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`\n✅ Perkfinity local backend running at http://localhost:${PORT}`);
   console.log(`   DB: ${process.env.DATABASE_URL ? process.env.DATABASE_URL.split('@')[1]?.split('/')[0] || 'SET' : '⚠️  MISSING'}`);
+  console.log(`   Stripe webhooks → http://localhost:${PORT}/api/webhooks/stripe`);
   console.log(`   Health: http://localhost:${PORT}/health\n`);
 });
 

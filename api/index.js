@@ -78,7 +78,7 @@ function setCors(req, res) {
   const origin = req.headers.origin;
   const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:'));
   res.setHeader('Access-Control-Allow-Origin', isAllowed ? origin : '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, x-admin-secret');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 }
@@ -101,7 +101,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
     try {
       const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status, billing_starts_at_member_count FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
       // Check online promo billing trigger FIRST (separate from trial→tier1 logic)
-      const onlinePromoTiers = ['online_starter', 'online_growth', 'online_pro'];
+      const onlinePromoTiers = ['online_starter', 'online_growth', 'online_scale'];
       if (merchant && onlinePromoTiers.includes(merchant.subscription_tier) && merchant.billing_starts_at_member_count) {
         const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
         if (countRow && countRow.cnt >= merchant.billing_starts_at_member_count) {
@@ -109,7 +109,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
           const tierPriceMap = {
             online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
             online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-            online_pro:     process.env.STRIPE_ONLINE_PRO_PRICE_ID,
+            online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
           };
           const priceId = tierPriceMap[merchant.subscription_tier];
           if (STRIPE_KEY && priceId && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
@@ -351,6 +351,61 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && (url === '/' || url === '/health' || url.endsWith('/health'))) {
       await sql`SELECT 1`;
       return send(res, 200, { ok: true, status: 'healthy', db: 'connected', version: 'test-2026', timestamp: new Date().toISOString() });
+    }
+
+    // ── POST /api/v1/contact ─────────────────────────────────────
+    if (method === 'POST' && url.endsWith('/contact')) {
+      const data = req.body || {};
+      const { name, email, subject, message, attachment, hp } = data;
+      // Honeypot — bots fill this hidden field, humans don't
+      if (hp) return send(res, 200, { success: true });
+      // Validation
+      if (!name || !email || !subject || !message) {
+        return send(res, 400, { success: false, error: 'All fields are required.' });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return send(res, 400, { success: false, error: 'Please enter a valid email address.' });
+      }
+      // Send via Brevo
+      const BREVO_KEY = process.env.BREVO_API_KEY;
+      if (BREVO_KEY) {
+        const brevoClient = SibApiV3Sdk.ApiClient.instance;
+        brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+        const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+        const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+        emailObj.sender   = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+        emailObj.to       = [{ email: 'hello@perkfinity.net' }];
+        emailObj.replyTo  = { email: email.trim(), name: name.trim() };
+        emailObj.subject  = `[Contact] ${subject}`;
+        const safeMsg = String(message).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+        emailObj.htmlContent = `
+          <div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;border-radius:12px;overflow:hidden;border:1px solid #e8e4f8">
+            <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 32px">
+              <div style="color:#fff;font-size:22px;font-weight:800;letter-spacing:-0.5px">Perkfinity</div>
+              <div style="color:rgba(255,255,255,0.75);font-size:13px;margin-top:4px">New message via Contact Form</div>
+            </div>
+            <div style="padding:28px 32px;background:#fff">
+              <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
+                <tr><td style="padding:9px 0;color:#888;font-size:13px;font-weight:600;width:28%;border-bottom:1px solid #f5f3ff">From</td><td style="padding:9px 0;font-size:14px;font-weight:700;border-bottom:1px solid #f5f3ff">${name.trim()}</td></tr>
+                <tr><td style="padding:9px 0;color:#888;font-size:13px;font-weight:600;border-bottom:1px solid #f5f3ff">Email</td><td style="padding:9px 0;font-size:14px;border-bottom:1px solid #f5f3ff"><a href="mailto:${email.trim()}" style="color:#5b3fa5;font-weight:700">${email.trim()}</a></td></tr>
+                <tr><td style="padding:9px 0;color:#888;font-size:13px;font-weight:600">Subject</td><td style="padding:9px 0;font-size:14px;font-weight:700">${String(subject).replace(/</g,'&lt;')}</td></tr>
+              </table>
+              <div style="background:#f8f7ff;border-radius:10px;padding:20px 24px;margin-bottom:20px">
+                <div style="font-size:12px;font-weight:700;color:#7c3aed;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px">Message</div>
+                <div style="font-size:15px;color:#1a1a2e;line-height:1.75">${safeMsg}</div>
+              </div>
+              ${attachment ? `<div style="font-size:12px;color:#888;margin-bottom:20px">📎 Attachment included: <strong>${String(attachment.name||'file').replace(/</g,'&lt;')}</strong></div>` : ''}
+              <div style="font-size:12px;color:#aaa;border-top:1px solid #f0eeff;padding-top:16px">
+                💡 Hit <strong>Reply</strong> to respond directly to <strong>${name.trim()}</strong> at <strong>${email.trim()}</strong>
+              </div>
+            </div>
+          </div>`;
+        if (attachment && attachment.content && attachment.name) {
+          emailObj.attachment = [{ content: attachment.content, name: attachment.name }];
+        }
+        await emailApi.sendTransacEmail(emailObj);
+      }
+      return send(res, 200, { success: true });
     }
 
     // ── DB Migration: Access Codes ──────────────────────────────
@@ -604,14 +659,14 @@ module.exports = async function handler(req, res) {
           id, business_name, contact_name, phone, website, business_presence,
           welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
           promo_code, status, billing_status, application_status,
-          business_category, billing_starts_at_member_count,
+          business_category, billing_starts_at_member_count, is_multi_location,
           stripe_customer_id, stripe_payment_method_id, logo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
           ${data.tier}, ${memberLimit}, ${promoCode}, 'active', 'trial',
           'pending', ${data.category},
-          ${billingStartsAt}, ${customer.id}, ${data.stripe_payment_method_id}, ${logoUrl}, ${now}, ${now}
+          ${billingStartsAt}, ${isMultiLocation}, ${customer.id}, ${data.stripe_payment_method_id}, ${logoUrl}, ${now}, ${now}
         )
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, application_status
       `;
@@ -753,14 +808,14 @@ module.exports = async function handler(req, res) {
           id, business_name, contact_name, phone, website, business_presence,
           welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
           promo_code, status, billing_status, application_status,
-          business_category, billing_starts_at_member_count,
+          business_category, billing_starts_at_member_count, is_multi_location,
           stripe_customer_id, logo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
           ${data.tier}, ${memberLimit}, ${promoCode}, 'active', null,
           'in_progress', ${data.category},
-          ${billingStartsAt}, ${customer.id}, null, ${now}, ${now}
+          ${billingStartsAt}, ${isMultiLocation}, ${customer.id}, null, ${now}, ${now}
         )
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, stripe_customer_id
       `;
@@ -1250,6 +1305,9 @@ module.exports = async function handler(req, res) {
           AND application_status = 'approved'
       `;
 
+      // ── Multi-location flag (Online/Hybrid merchants) ─────────────
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS is_multi_location BOOLEAN NOT NULL DEFAULT false`;
+
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -1464,7 +1522,7 @@ module.exports = async function handler(req, res) {
       if (merchant.billing_status === 'deleted') return send(res, 403, { success: false, error: 'This store is no longer available' });
       if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is currently inactive' });
 
-      // Fix A: Enforce online plan tier member cap (online_starter=500, online_growth=2500, online_pro=unlimited).
+      // Fix A: Enforce online plan tier member cap (online_starter=500, online_growth=2500, online_scale=unlimited).
       // Block new joins when a capped tier merchant is at their limit. Does not affect physical/mobile/trial merchants.
       const _cappedOnlineTiers = ['online_starter', 'online_growth'];
       if (_cappedOnlineTiers.includes(merchant.subscription_tier) && merchant.member_limit && merchant.billing_status === 'active') {
@@ -1487,7 +1545,7 @@ module.exports = async function handler(req, res) {
                 const _tierLabel = merchant.subscription_tier === 'online_starter' ? 'Starter (500 members)' : 'Growth (2,500 members)';
                 const _nextTier  = merchant.subscription_tier === 'online_starter' ? 'Growth' : 'Scale';
                 emailObj.subject = `⚠️ A new member couldn't join ${merchant.business_name} — your plan is full`;
-                emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#e67e22;margin-bottom:16px;">⚠️ A member just tried to join — but couldn't</div><p style="font-size:15px;color:#555;line-height:1.6;">Hi <strong>${merchant.business_name}</strong>,<br><br>Someone new just tried to join your Perkfinity page but was turned away because your <strong>${_tierLabel}</strong> plan has reached its ${merchant.member_limit}-member limit.</p><div style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:10px;padding:16px 20px;margin-bottom:20px;"><div style="font-size:13px;font-weight:700;color:#c2410c;margin-bottom:8px;">What's happening right now:</div><ul style="margin:0;padding-left:18px;font-size:13px;color:#7c2d12;line-height:2;"><li>New potential members are being turned away from your page</li><li><strong>This will keep happening</strong> until you upgrade your plan</li><li>Your current ${merchant.member_limit} members and all active campaigns are unaffected</li></ul></div><p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">Don't lose customers — upgrade now to keep your doors open to new members:</p><table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;"><tr><td style="padding-bottom:10px;"><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#5b3fa5;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Upgrade to Growth — Up to 2,500 Members</a></td></tr><tr><td><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#1e1b4b;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Go Pro — Unlimited Members</a></td></tr></table><p style="font-size:13px;color:#aaa;text-align:center;">Need help choosing? Reply to this email and our team will assist you right away.</p></div></div>`;
+                emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#e67e22;margin-bottom:16px;">⚠️ A member just tried to join — but couldn't</div><p style="font-size:15px;color:#555;line-height:1.6;">Hi <strong>${merchant.business_name}</strong>,<br><br>Someone new just tried to join your Perkfinity page but was turned away because your <strong>${_tierLabel}</strong> plan has reached its ${merchant.member_limit}-member limit.</p><div style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:10px;padding:16px 20px;margin-bottom:20px;"><div style="font-size:13px;font-weight:700;color:#c2410c;margin-bottom:8px;">What's happening right now:</div><ul style="margin:0;padding-left:18px;font-size:13px;color:#7c2d12;line-height:2;"><li>New potential members are being turned away from your page</li><li><strong>This will keep happening</strong> until you upgrade your plan</li><li>Your current ${merchant.member_limit} members and all active campaigns are unaffected</li></ul></div><p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">Don't lose customers — upgrade now to keep your doors open to new members:</p><table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;"><tr><td style="padding-bottom:10px;"><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#5b3fa5;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Upgrade to Growth — Up to 2,500 Members</a></td></tr><tr><td><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#1e1b4b;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Go Scale — Unlimited Members</a></td></tr></table><p style="font-size:13px;color:#aaa;text-align:center;">Need help choosing? Reply to this email and our team will assist you right away.</p></div></div>`;
                 await emailApi.sendTransacEmail(emailObj);
                 console.log(`[MemberCap] Upgrade notification sent to ${_capMu.email} for merchant ${qrCode.merchant_id}`);
               }
@@ -1598,7 +1656,7 @@ module.exports = async function handler(req, res) {
       const [merchantData] = await sql`
         SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, m.subscription_tier,
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
-               m.welcome_offer_text, m.review_url, m.order_url,
+               m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location,
                l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
@@ -3107,6 +3165,7 @@ module.exports = async function handler(req, res) {
         FROM "Merchant" m
         LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
         LEFT JOIN "MerchantLocation" ml2 ON ml2.merchant_id = m.id AND ml2.is_active = true
+        WHERE (m.application_status IS NULL OR m.application_status = 'approved')
         ORDER BY m.created_at DESC
       `;
       const active = merchants.filter(m => m.status !== 'inactive' && m.billing_status !== 'deleted').length;
@@ -3190,16 +3249,20 @@ module.exports = async function handler(req, res) {
       // Billing stats from Merchant table
       const [stats] = await sql`
         SELECT
-          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND account_blocked = false AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')) as paying_merchants,
-          COUNT(*) FILTER (WHERE subscription_tier = 'tier1' AND billing_status = 'pending_cancellation') as pending_cancel,
+          COUNT(*) FILTER (WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') AND account_blocked = false AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')) as paying_merchants,
+          COUNT(*) FILTER (WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') AND billing_status = 'pending_cancellation') as pending_cancel,
           COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
           COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
           COUNT(*) FILTER (WHERE subscription_tier IN ('none','trial') AND account_blocked = false) as upgrade_eligible
         FROM "Merchant"
       `;
 
+      // MRR computed from actual paid invoices in the last 30 days
       const payingCount = parseInt(stats.paying_merchants) || 0;
-      const mrr = payingCount * 29.99; // $29.99/mo per Tier 1 merchant
+      const mrrCents = invoices
+        .filter(i => i.status === 'paid' && new Date(i.paid_at) > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+        .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
+      const mrr = mrrCents / 100;
       const totalRevenue = invoices
         .filter(i => i.status === 'paid')
         .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
@@ -3627,14 +3690,17 @@ module.exports = async function handler(req, res) {
       if (!code.trim()) return send(res, 400, { success: false, error: 'Code is required.' });
 
       const [ac] = await sql`
-        SELECT id, code, type, member_limit, expires_at
+        SELECT id, code, type, member_limit, used, expires_at
         FROM "AdminAccessCode"
         WHERE UPPER(code) = UPPER(${code.trim()})
-          AND type = 'extended_trial'
           AND (expires_at IS NULL OR expires_at > NOW())
         LIMIT 1
       `;
       if (!ac) return send(res, 404, { success: false, error: 'Invalid or expired promo code.' });
+      // FFL codes are single-use — reject if already redeemed
+      if (ac.type === 'free_for_life' && ac.used) {
+        return send(res, 404, { success: false, error: 'This Free For Life code has already been used.' });
+      }
       return send(res, 200, { success: true, data: { type: ac.type, member_limit: ac.member_limit, code: ac.code } });
     }
 
@@ -3678,7 +3744,7 @@ module.exports = async function handler(req, res) {
     // ══════════════════════════════════════════════════════════════
 
     // ── GET /api/v1/admin/online-applications ─────────────────────
-    if (method === 'GET' && url.startsWith('/api/v1/admin/online-applications')) {
+    if (method === 'GET' && url.startsWith('/api/v1/admin/online-applications') && !url.endsWith('/history')) {
       if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
       const qs = (req.url || '').split('?')[1] || '';
       const statusFilter = new URLSearchParams(qs).get('status') || 'all';
@@ -3687,7 +3753,7 @@ module.exports = async function handler(req, res) {
       if (statusFilter === 'all') {
         applications = await sql`
           SELECT m.id, m.business_name, m.contact_name, m.phone, m.website, m.business_category,
-                 m.subscription_tier, m.application_status, m.application_notes,
+                 m.business_presence, m.subscription_tier, m.application_status, m.application_notes,
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
                  m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
@@ -3701,7 +3767,7 @@ module.exports = async function handler(req, res) {
       } else {
         applications = await sql`
           SELECT m.id, m.business_name, m.contact_name, m.phone, m.website, m.business_category,
-                 m.subscription_tier, m.application_status, m.application_notes,
+                 m.business_presence, m.subscription_tier, m.application_status, m.application_notes,
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
                  m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
@@ -3737,7 +3803,7 @@ module.exports = async function handler(req, res) {
       let billingWarning = null;
 
       // Only create subscription immediately if no promo billing delay
-      if (!merchant.billing_starts_at_member_count) {
+      if (!merchant.billing_starts_at_member_count && merchant.subscription_tier !== 'free_for_life') {
         // Check prerequisites and surface a warning if anything is missing
         if (!merchant.stripe_customer_id || !merchant.stripe_payment_method_id) {
           billingWarning = !merchant.stripe_customer_id
@@ -3751,7 +3817,7 @@ module.exports = async function handler(req, res) {
             const tierPriceMap = {
               online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
               online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-              online_pro:     process.env.STRIPE_ONLINE_PRO_PRICE_ID,
+              online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
             };
             const priceId = tierPriceMap[merchant.subscription_tier];
             if (!priceId) {
@@ -3805,6 +3871,19 @@ module.exports = async function handler(req, res) {
         }
       } catch (emailErr) { console.error('Approval email failed:', emailErr.message); }
 
+      // Record application history
+      try {
+        await sql`CREATE TABLE IF NOT EXISTS "OnlineApplicationHistory" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          merchant_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          note TEXT,
+          changed_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+        await sql`INSERT INTO "OnlineApplicationHistory" (id, merchant_id, status, note, changed_at)
+          VALUES (gen_random_uuid()::text, ${merchantId}, 'approved', ${billingWarning || null}, NOW())`;
+      } catch (histErr) { console.error('History record failed (approve):', histErr.message); }
+
       return send(res, 200, {
         success: true,
         message: 'Application approved',
@@ -3827,7 +3906,7 @@ module.exports = async function handler(req, res) {
         WHERE m.id = ${merchantId} LIMIT 1
       `;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
-      if (merchant.application_status !== 'pending') {
+      if (!['pending', 'followup'].includes(merchant.application_status)) {
         return send(res, 409, { success: false, error: `Cannot decline — application is already ${merchant.application_status}` });
       }
 
@@ -3840,12 +3919,16 @@ module.exports = async function handler(req, res) {
         } catch (e) { /* non-fatal */ }
       }
 
+      // Ensure declined_at column exists (idempotent migration)
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS declined_at TIMESTAMPTZ`;
+
       await sql`
         UPDATE "Merchant"
         SET application_status = 'declined',
             application_notes = ${notes},
             stripe_customer_id = NULL,
             stripe_payment_method_id = NULL,
+            declined_at = NOW(),
             updated_at = NOW()
         WHERE id = ${merchantId}
       `;
@@ -3860,13 +3943,112 @@ module.exports = async function handler(req, res) {
           const emailObj = new SibApiV3Sdk.SendSmtpEmail();
           emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
           emailObj.to = [{ email: merchant.contact_email }];
-          emailObj.subject = `Regarding your Perkfinity brand application`;
-          emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><p style="font-size:15px;color:#555;line-height:1.6;">Hi ${merchant.business_name},</p><p style="font-size:15px;color:#555;line-height:1.6;">Thank you for applying to join Perkfinity as an online business. After review, we're unable to move forward with your application at this time.${notes ? `</p><p style="font-size:15px;color:#555;"><strong>Reason:</strong> ${notes}` : ''}</p><p style="font-size:15px;color:#555;">Your payment information has been removed and you will not be charged. You're welcome to reapply in the future. If you have questions, please contact <a href="mailto:support@perkfinity.net">support@perkfinity.net</a>.</p></div></div>`;
+          emailObj.subject = `Update on your Perkfinity application — ${merchant.business_name}`;
+          emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><p style="font-size:16px;color:#333;line-height:1.6;">Hi ${merchant.business_name},</p><p style="font-size:15px;color:#555;line-height:1.6;">Thank you for your interest in joining Perkfinity. After reviewing your application, we weren't able to move forward at this time.${notes ? '</p><p style="font-size:15px;color:#555;line-height:1.6;"><strong>Reason:</strong> ' + notes : ''}</p><p style="font-size:15px;color:#555;line-height:1.6;">We want to work with as many great businesses as possible — if you'd like to discuss this decision or address any concerns, we'd genuinely love to hear from you. Reach out at <a href="mailto:support@perkfinity.net" style="color:#5b3fa5;font-weight:700;">support@perkfinity.net</a> and we can revisit your application together.</p><p style="font-size:15px;color:#555;line-height:1.6;">Your payment information has been fully removed and you will not be charged.</p><p style="font-size:15px;color:#555;line-height:1.6;">— The Perkfinity Team</p></div></div>`;
           await emailApi.sendTransacEmail(emailObj);
         }
       } catch (emailErr) { console.error('Decline email failed:', emailErr.message); }
 
+      // Record application history
+      try {
+        await sql`CREATE TABLE IF NOT EXISTS "OnlineApplicationHistory" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          merchant_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          note TEXT,
+          changed_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+        await sql`INSERT INTO "OnlineApplicationHistory" (id, merchant_id, status, note, changed_at)
+          VALUES (gen_random_uuid()::text, ${merchantId}, 'declined', ${notes || null}, NOW())`;
+      } catch (histErr) { console.error('History record failed (decline):', histErr.message); }
+
       return send(res, 200, { success: true, message: 'Application declined' });
+    }
+
+    // ── PUT /api/v1/admin/online-applications/:id/followup ─────────
+    const followupAppMatch = url.match(/\/api\/v1\/admin\/online-applications\/([a-zA-Z0-9_-]+)\/followup$/);
+    if (method === 'PUT' && followupAppMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = followupAppMatch[1];
+      const { message = '' } = req.body || {};
+      const [merchant] = await sql`
+        SELECT m.*, mu.email as contact_email
+        FROM "Merchant" m
+        LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+        WHERE m.id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (!['pending', 'followup'].includes(merchant.application_status)) {
+        return send(res, 409, { success: false, error: `Cannot request follow-up — application is already ${merchant.application_status}` });
+      }
+
+      await sql`
+        UPDATE "Merchant"
+        SET application_status = 'followup', updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
+
+      // Send follow-up email to applicant
+      try {
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY && merchant.contact_email) {
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+          emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+          emailObj.to = [{ email: merchant.contact_email }];
+          emailObj.subject = `We'd love to learn more — ${merchant.business_name}`;
+          emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;">
+            <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;">
+              <div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div>
+            </div>
+            <div style="padding:28px 24px;">
+              <p style="font-size:16px;color:#333;line-height:1.6;">Hi ${merchant.business_name},</p>
+              <p style="font-size:15px;color:#555;line-height:1.6;">Thank you for applying to join Perkfinity! We're reviewing your application and would love to connect before we finalize our decision.</p>
+              ${message ? `<div style="background:#f5f3ff;border-left:4px solid #7c5cbf;border-radius:4px;padding:14px 16px;margin:16px 0;"><p style="font-size:14px;color:#4c1d95;margin:0;line-height:1.6;"><strong>Message from our team:</strong><br>${message}</p></div>` : ''}
+              <p style="font-size:15px;color:#555;line-height:1.6;">Please reach out to us at <a href="mailto:support@perkfinity.net" style="color:#5b3fa5;font-weight:700;">support@perkfinity.net</a> at your earliest convenience — we're looking forward to speaking with you.</p>
+              <p style="font-size:15px;color:#555;line-height:1.6;">— The Perkfinity Team</p>
+            </div>
+          </div>`;
+          await emailApi.sendTransacEmail(emailObj);
+        }
+      } catch (emailErr) { console.error('Follow-up email failed:', emailErr.message); }
+
+      // Record application history
+      try {
+        await sql`CREATE TABLE IF NOT EXISTS "OnlineApplicationHistory" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          merchant_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          note TEXT,
+          changed_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+        await sql`INSERT INTO "OnlineApplicationHistory" (id, merchant_id, status, note, changed_at)
+          VALUES (gen_random_uuid()::text, ${merchantId}, 'followup', ${message || null}, NOW())`;
+      } catch (histErr) { console.error('History record failed (followup):', histErr.message); }
+
+      return send(res, 200, { success: true, message: 'Follow-up email sent' });
+    }
+
+    // ── GET /api/v1/admin/online-applications/:id/history ──────────
+    const appHistoryMatch = url.match(/\/api\/v1\/admin\/online-applications\/([a-zA-Z0-9_-]+)\/history$/);
+    if (method === 'GET' && appHistoryMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = appHistoryMatch[1];
+      await sql`CREATE TABLE IF NOT EXISTS "OnlineApplicationHistory" (
+        id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        merchant_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        note TEXT,
+        changed_at TIMESTAMPTZ DEFAULT NOW()
+      )`;
+      const history = await sql`
+        SELECT * FROM "OnlineApplicationHistory"
+        WHERE merchant_id = ${merchantId}
+        ORDER BY changed_at ASC
+      `;
+      return send(res, 200, { success: true, data: history });
     }
 
     // ── POST /api/v1/stripe/apply-setup-intent ────────────────────
@@ -4350,28 +4532,50 @@ module.exports = async function handler(req, res) {
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
-      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
-      const stripeClient = Stripe(STRIPE_KEY);
-
-      const [merchant] = await sql`SELECT stripe_subscription_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
-      if (!merchant || !merchant.stripe_subscription_id) {
-        return send(res, 400, { success: false, error: 'No active Stripe subscription found' });
+      // Password verification — required to prevent unauthorized cancellations
+      const cancelData = req.body || {};
+      if (!cancelData.password) return send(res, 400, { success: false, error: 'Password is required to cancel your subscription.' });
+      const [cancelUser] = await sql`SELECT id, password_hash FROM "MerchantUser" WHERE id = ${payload.userId} LIMIT 1`;
+      if (!cancelUser || !(await bcrypt.compare(cancelData.password, cancelUser.password_hash))) {
+        return send(res, 401, { success: false, error: 'Incorrect password. Please try again.' });
       }
 
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      const stripeClient = STRIPE_KEY ? Stripe(STRIPE_KEY) : null;
+
+      const [merchant] = await sql`
+        SELECT stripe_subscription_id, stripe_customer_id
+        FROM "Merchant" WHERE id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+
       try {
-        await stripeClient.subscriptions.update(merchant.stripe_subscription_id, {
-          cancel_at_period_end: true,
-        });
-
-        // Update local state to pending_cancellation so UI knows
-        await sql`
-          UPDATE "Merchant"
-          SET billing_status = 'pending_cancellation'
-          WHERE id = ${merchantId}
-        `;
-
-        return send(res, 200, { success: true, message: 'Subscription will cancel at period end' });
+        if (merchant.stripe_subscription_id) {
+          // ── Active subscription: schedule cancellation at period end ──
+          if (!stripeClient) return send(res, 500, { success: false, error: 'Stripe not configured' });
+          await stripeClient.subscriptions.update(merchant.stripe_subscription_id, {
+            cancel_at_period_end: true,
+          });
+          await sql`
+            UPDATE "Merchant"
+            SET billing_status = 'pending_cancellation'
+            WHERE id = ${merchantId}
+          `;
+          return send(res, 200, { success: true, message: 'Subscription will cancel at period end' });
+        } else {
+          // ── Trial/promo: no active subscription — block immediately ──
+          // Stripe customer and saved card are preserved for reactivation within 6 months.
+          // They will be cleaned up when the account is permanently deleted.
+          await sql`
+            UPDATE "Merchant"
+            SET account_blocked = true,
+                billing_status  = 'cancelled',
+                cancelled_at    = NOW(),
+                updated_at      = NOW()
+            WHERE id = ${merchantId}
+          `;
+          return send(res, 200, { success: true, message: 'Trial account blocked immediately' });
+        }
       } catch (e) {
         return send(res, 500, { success: false, error: e.message });
       }
@@ -4468,7 +4672,7 @@ module.exports = async function handler(req, res) {
         tier1:          process.env.STRIPE_TIER1_PRICE_ID,
         online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
         online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-        online_pro:     process.env.STRIPE_ONLINE_PRO_PRICE_ID,
+        online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
       };
       const reactivatePriceId = tierPriceMap[merchant.subscription_tier] || process.env.STRIPE_TIER1_PRICE_ID;
       if (!reactivatePriceId) return send(res, 500, { success: false, error: `No Stripe price configured for tier '${merchant.subscription_tier}'` });
@@ -4528,6 +4732,173 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ── POST /api/v1/merchants/:id/billing/upgrade ─────────────────
+    // Three cases:
+    //   A) Physical/Mobile trial → tier1 (creates subscription immediately)
+    //   B) Online/Hybrid promo-phase → any tier (creates subscription immediately, clears threshold)
+    //   C) Online/Hybrid active subscription → next tier (updates price, proration:none)
+    const upgradeMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/upgrade$/);
+    if (method === 'POST' && upgradeMatch) {
+      const merchantId = upgradeMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const { target_tier } = req.body || {};
+      if (!target_tier) return send(res, 400, { success: false, error: 'target_tier is required' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      const tierPriceMap = {
+        tier1:          process.env.STRIPE_TIER1_PRICE_ID,
+        online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
+        online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+        online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
+      };
+      const tierLimitMap = {
+        tier1: 999999, online_starter: 500, online_growth: 2500, online_scale: 999999,
+      };
+      // Upgrade direction validation (no downgrades)
+      const upgradeOrder = ['online_starter', 'online_growth', 'online_scale'];
+
+      const targetPriceId = tierPriceMap[target_tier];
+      if (!targetPriceId) return send(res, 400, { success: false, error: `No Stripe price configured for target tier '${target_tier}'` });
+      const newLimit = tierLimitMap[target_tier];
+
+      const [merchant] = await sql`
+        SELECT id, subscription_tier, billing_status, account_blocked,
+               stripe_customer_id, stripe_payment_method_id, stripe_subscription_id,
+               billing_starts_at_member_count
+        FROM "Merchant" WHERE id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (!merchant.stripe_customer_id) return send(res, 400, { success: false, error: 'No Stripe customer on file' });
+      if (merchant.account_blocked) return send(res, 400, { success: false, error: 'Account is blocked. Please reactivate first.' });
+
+      const currentTier = merchant.subscription_tier;
+      const hasActiveSubscription = !!merchant.stripe_subscription_id && merchant.billing_status === 'active';
+      const isPromoPhase = !!merchant.billing_starts_at_member_count;
+      const isTrialTier = ['trial', 'free'].includes(currentTier);
+
+      // Validate upgrade direction for online tiers
+      if (!isTrialTier && !isPromoPhase) {
+        const currentIdx = upgradeOrder.indexOf(currentTier);
+        const targetIdx  = upgradeOrder.indexOf(target_tier);
+        if (currentIdx === -1 || targetIdx === -1 || targetIdx <= currentIdx) {
+          return send(res, 400, { success: false, error: 'Invalid upgrade path. Only upward tier changes are allowed.' });
+        }
+      }
+
+      try {
+        // ── Case A & B: No active subscription → create one immediately ──
+        if (isTrialTier || isPromoPhase) {
+          if (!merchant.stripe_payment_method_id) {
+            return send(res, 400, { success: false, error: 'No payment method on file. Please update your payment method before upgrading.' });
+          }
+          const subscription = await stripeClient.subscriptions.create({
+            customer: merchant.stripe_customer_id,
+            items: [{ price: targetPriceId }],
+            default_payment_method: merchant.stripe_payment_method_id,
+            metadata: { merchant_id: merchantId, trigger: 'manual_upgrade', from_tier: currentTier, to_tier: target_tier },
+          });
+
+          const nextBilling = new Date();
+          nextBilling.setDate(nextBilling.getDate() + 30);
+
+          await sql`
+            UPDATE "Merchant"
+            SET subscription_tier              = ${target_tier},
+                billing_status                 = 'active',
+                member_limit                   = ${newLimit},
+                stripe_subscription_id         = ${subscription.id},
+                billing_starts_at_member_count = NULL,
+                account_blocked                = false,
+                subscription_started_at        = NOW(),
+                next_billing_date              = ${nextBilling.toISOString()},
+                updated_at                     = NOW()
+            WHERE id = ${merchantId}
+          `;
+          console.log(`[Upgrade] Merchant ${merchantId} upgraded from '${currentTier}' to '${target_tier}' — new subscription ${subscription.id}`);
+          return send(res, 200, { success: true, message: `Upgraded to ${target_tier}! Billing starts today.` });
+        }
+
+        // ── Case C: Active subscription — update price, no proration ──
+        const existingSub = await stripeClient.subscriptions.retrieve(merchant.stripe_subscription_id);
+        if (!existingSub || !existingSub.items?.data?.length) {
+          return send(res, 400, { success: false, error: 'Could not retrieve existing Stripe subscription items.' });
+        }
+        const subItemId = existingSub.items.data[0].id;
+
+        await stripeClient.subscriptions.update(merchant.stripe_subscription_id, {
+          items: [{ id: subItemId, price: targetPriceId }],
+          proration_behavior: 'none',
+          metadata: { merchant_id: merchantId, trigger: 'manual_upgrade', from_tier: currentTier, to_tier: target_tier },
+        });
+
+        await sql`
+          UPDATE "Merchant"
+          SET subscription_tier = ${target_tier},
+              member_limit      = ${newLimit},
+              updated_at        = NOW()
+          WHERE id = ${merchantId}
+        `;
+        console.log(`[Upgrade] Merchant ${merchantId} plan updated from '${currentTier}' to '${target_tier}' — effective at next billing`);
+        return send(res, 200, { success: true, message: `Plan upgraded to ${target_tier}. New pricing takes effect at your next billing cycle.` });
+
+      } catch (stripeErr) {
+        console.error(`[Upgrade] Stripe error for merchant ${merchantId}:`, stripeErr.message);
+        return send(res, 400, { success: false, error: `Upgrade failed: ${stripeErr.message}` });
+      }
+    }
+
+    // ── POST /api/v1/merchants/:id/billing/cancel-promo ───────────
+    // For promo-phase merchants (billing_starts_at_member_count set, no active subscription).
+    // Blocks account immediately. No Stripe subscription to cancel.
+    // Stripe customer + payment method retained for reactivation.
+    const cancelPromoMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/cancel-promo$/);
+    if (method === 'POST' && cancelPromoMatch) {
+      const merchantId = cancelPromoMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const [merchant] = await sql`
+        SELECT id, subscription_tier, billing_starts_at_member_count, stripe_subscription_id
+        FROM "Merchant" WHERE id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (!merchant.billing_starts_at_member_count) {
+        return send(res, 400, { success: false, error: 'No promo billing threshold found. Use /billing/cancel for active subscriptions.' });
+      }
+      if (merchant.stripe_subscription_id) {
+        return send(res, 400, { success: false, error: 'Active subscription exists. Use /billing/cancel instead.' });
+      }
+
+      await sql`
+        UPDATE "Merchant"
+        SET billing_status                 = 'cancelled',
+            account_blocked                = true,
+            cancelled_at                   = NOW(),
+            billing_starts_at_member_count = NULL,
+            updated_at                     = NOW()
+        WHERE id = ${merchantId}
+      `;
+      await sql`
+        UPDATE "Campaign" SET status = 'expired', updated_at = NOW()
+        WHERE merchant_id = ${merchantId} AND status = 'active'
+      `;
+      console.log(`[CancelPromo] Merchant ${merchantId} cancelled promo billing (no subscription existed).`);
+      return send(res, 200, { success: true, message: 'Account cancelled. Your data is preserved and you can reactivate anytime.' });
+    }
+
     // ── GET /api/v1/admin/stuck-payments ──────────────────────────
     // Returns merchants blocked due to auto-upgrade payment failure (not normal cancellation)
     if (method === 'GET' && url.endsWith('/admin/stuck-payments')) {
@@ -4565,13 +4936,25 @@ module.exports = async function handler(req, res) {
       }
 
       // Check Billing Dependency Lock
-      const [merchant] = await sql`SELECT billing_status, account_blocked FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+      const [merchant] = await sql`SELECT billing_status, account_blocked, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
       
       const st = merchant.billing_status;
       // Protect active Stripe subscriptions from getting ghosted in DB
       if (st === 'active' || st === 'payment_failed') {
          return send(res, 403, { success: false, error: 'Forbidden. You must cancel your active subscription first.' });
+      }
+
+      // ── Stripe customer cleanup — remove saved card so they can never be charged ──
+      // Done BEFORE PII wipe so we still have the customer ID.
+      if (merchant.stripe_customer_id) {
+        try {
+          const delStripeClient = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
+          if (delStripeClient) await delStripeClient.customers.delete(merchant.stripe_customer_id);
+        } catch (stripeErr) {
+          // Non-fatal: log and continue — DB wipe must still complete
+          console.error('[Delete] Stripe customer cleanup failed:', stripeErr.message);
+        }
       }
 
       // Safe to Wipe PII
@@ -4699,7 +5082,238 @@ module.exports = async function handler(req, res) {
       }
     }
 
+
+    // ══════════════════════════════════════════════════════════════
+    // ENTERPRISE INQUIRY ENDPOINTS
+    // ══════════════════════════════════════════════════════════════
+
+    // ── POST /api/v1/enterprise/inquiry ───────────────────────────
+    if (method === 'POST' && url.endsWith('/enterprise/inquiry')) {
+      // Ensure table exists
+      await sql`
+        CREATE TABLE IF NOT EXISTS "EnterpriseInquiry" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          company_legal_name TEXT NOT NULL,
+          brand_name TEXT,
+          industry TEXT NOT NULL,
+          website TEXT NOT NULL,
+          hq_street TEXT, hq_city TEXT, hq_state TEXT, hq_zip TEXT, hq_country TEXT DEFAULT 'USA',
+          num_locations INTEGER,
+          geographic_reach TEXT,
+          location_types TEXT,
+          same_brand_name BOOLEAN DEFAULT true,
+          brand_note TEXT,
+          operation_structure TEXT,
+          operation_structure_note TEXT,
+          decision_authority TEXT,
+          decision_authority_note TEXT,
+          pos_system TEXT,
+          has_loyalty TEXT DEFAULT 'no',
+          loyalty_name TEXT,
+          loyalty_types TEXT,
+          digital_deal TEXT,
+          digital_deal_other TEXT,
+          systems_integrated TEXT DEFAULT 'no',
+          integration_note TEXT,
+          member_db_size TEXT,
+          member_capture TEXT,
+          wants_import TEXT DEFAULT 'no',
+          import_count TEXT,
+          import_format TEXT,
+          campaign_mgmt TEXT,
+          data_visibility TEXT,
+          notes TEXT,
+          contact_name TEXT NOT NULL,
+          contact_title TEXT,
+          contact_email TEXT NOT NULL,
+          contact_phone TEXT,
+          logo_url TEXT,
+          status TEXT NOT NULL DEFAULT 'new',
+          admin_notes TEXT,
+          submitted_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+
+      const data = req.body || {};
+      const d = data;
+      // Handle logo upload (base64 → store as data URL; in production could upload to storage)
+      const logoUrl = d.logo_base64 || null;
+
+      const [inquiry] = await sql`
+        INSERT INTO "EnterpriseInquiry" (
+          company_legal_name, brand_name, industry, website,
+          hq_street, hq_city, hq_state, hq_zip, hq_country,
+          num_locations, geographic_reach, location_types, same_brand_name, brand_note,
+          operation_structure, operation_structure_note, decision_authority, decision_authority_note,
+          pos_system, has_loyalty, loyalty_name, loyalty_types,
+          digital_deal, digital_deal_other, systems_integrated, integration_note, member_db_size,
+          member_capture, wants_import, import_count, import_format,
+          campaign_mgmt, data_visibility, notes,
+          contact_name, contact_title, contact_email, contact_phone, logo_url
+        ) VALUES (
+          ${d.company_legal_name}, ${d.brand_name||null}, ${d.industry}, ${d.website},
+          ${d.hq_street||null}, ${d.hq_city||null}, ${d.hq_state||null}, ${d.hq_zip||null}, ${d.hq_country||'USA'},
+          ${d.num_locations||null}, ${d.geographic_reach||null}, ${d.location_types||null},
+          ${d.same_brand_name!==false}, ${d.brand_note||null},
+          ${d.operation_structure||null}, ${d.operation_structure_note||null},
+          ${d.decision_authority||null}, ${d.decision_authority_note||null},
+          ${d.pos_system||null}, ${d.has_loyalty||'no'}, ${d.loyalty_name||null}, ${d.loyalty_types||null},
+          ${d.digital_deal||null}, ${d.digital_deal_other||null},
+          ${d.systems_integrated||'no'}, ${d.integration_note||null}, ${d.member_db_size||null},
+          ${d.member_capture||null}, ${d.wants_import||'no'}, ${d.import_count||null}, ${d.import_format||null},
+          ${d.campaign_mgmt||null}, ${d.data_visibility||null}, ${d.notes||null},
+          ${d.contact_name}, ${d.contact_title||null}, ${d.contact_email}, ${d.contact_phone||null}, ${logoUrl}
+        ) RETURNING id, submitted_at`;
+
+      // ── Admin notification email ──
+      const adminHtml = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:580px;margin:0 auto">
+        <div style="background:linear-gradient(135deg,#1e5c38,#2e7d4f);padding:28px 24px;text-align:center">
+          <div style="color:#fff;font-size:22px;font-weight:800">🏢 New Enterprise Inquiry</div>
+        </div>
+        <div style="padding:28px 24px;background:#fff">
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <tr><td style="padding:8px 0;color:#666;width:40%">Company</td><td style="padding:8px 0;font-weight:700">${d.company_legal_name}${d.brand_name?' ('+d.brand_name+')':''}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Industry</td><td style="padding:8px 0;font-weight:700">${d.industry}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Website</td><td style="padding:8px 0"><a href="${d.website}">${d.website}</a></td></tr>
+            <tr><td style="padding:8px 0;color:#666">HQ</td><td style="padding:8px 0;font-weight:700">${d.hq_city||''}, ${d.hq_state||''}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Locations</td><td style="padding:8px 0;font-weight:700">${d.num_locations} · ${d.location_types} · ${d.geographic_reach}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Structure</td><td style="padding:8px 0;font-weight:700">${d.operation_structure}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Contact</td><td style="padding:8px 0;font-weight:700">${d.contact_name} — ${d.contact_title}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Email</td><td style="padding:8px 0"><a href="mailto:${d.contact_email}">${d.contact_email}</a></td></tr>
+            <tr><td style="padding:8px 0;color:#666">Phone</td><td style="padding:8px 0;font-weight:700">${d.contact_phone}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Member Capture</td><td style="padding:8px 0;font-weight:700">${d.member_capture}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">Campaign Mgmt</td><td style="padding:8px 0;font-weight:700">${d.campaign_mgmt}</td></tr>
+            ${d.notes?`<tr><td style="padding:8px 0;color:#666;vertical-align:top">Notes</td><td style="padding:8px 0">${d.notes}</td></tr>`:''}
+          </table>
+        </div>
+      </div>`;
+
+      // ── Applicant auto-reply email ──
+      const applicantHtml = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto">
+        <div style="background:linear-gradient(135deg,#1e5c38,#2e7d4f);padding:28px 24px;text-align:center">
+          <div style="color:#fff;font-size:24px;font-weight:800">Perkfinity</div>
+        </div>
+        <div style="padding:28px 24px">
+          <p style="font-size:16px;color:#333;line-height:1.6">Hi ${d.contact_name},</p>
+          <p style="font-size:15px;color:#555;line-height:1.6">Thank you for reaching out about Perkfinity Enterprise for <strong>${d.company_legal_name}</strong>. We've received your inquiry and our team will review the details you provided.</p>
+          <p style="font-size:15px;color:#555;line-height:1.6">You can expect to hear back from us within <strong>3–5 business days</strong>. We'll reach you at <strong>${d.contact_email}</strong> or <strong>${d.contact_phone}</strong>.</p>
+          <p style="font-size:15px;color:#555;line-height:1.6">In the meantime, if you have any questions feel free to contact us at <a href="mailto:hello@perkfinity.net" style="color:#1e5c38">hello@perkfinity.net</a>.</p>
+          <p style="font-size:15px;color:#555;line-height:1.6">— The Perkfinity Team</p>
+        </div>
+      </div>`;
+
+      const brevoKey = process.env.BREVO_API_KEY;
+      if (brevoKey) {
+        try {
+          await fetch('https://api.brevo.com/v3/smtp/email', {
+            method: 'POST',
+            headers: { 'api-key': brevoKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sender: { name: 'Perkfinity', email: 'no-reply@perkfinity.net' },
+              to: [{ email: 'hello@perkfinity.net', name: 'Perkfinity Admin' }],
+              subject: `🏢 New Enterprise Inquiry — ${d.company_legal_name}`,
+              htmlContent: adminHtml
+            })
+          });
+          await fetch('https://api.brevo.com/v3/smtp/email', {
+            method: 'POST',
+            headers: { 'api-key': brevoKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sender: { name: 'Perkfinity', email: 'no-reply@perkfinity.net' },
+              to: [{ email: d.contact_email, name: d.contact_name }],
+              subject: 'We received your Perkfinity Enterprise inquiry',
+              htmlContent: applicantHtml
+            })
+          });
+        } catch (emailErr) {
+          console.error('[enterprise] email error:', emailErr.message);
+        }
+      }
+
+      // ── Record initial history entry ──
+      await sql`
+        CREATE TABLE IF NOT EXISTS "EnterpriseInquiryHistory" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          inquiry_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          note TEXT,
+          changed_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+      await sql`
+        INSERT INTO "EnterpriseInquiryHistory" (id, inquiry_id, status, note, changed_at)
+        VALUES (gen_random_uuid()::text, ${inquiry.id}, 'new', 'Inquiry submitted', NOW())`;
+
+      return send(res, 200, { success: true, data: { id: inquiry.id } });
+    }
+
+    // ── GET /api/v1/admin/enterprise-inquiries ────────────────────
+    if (method === 'GET' && url.startsWith('/api/v1/admin/enterprise-inquiries') && !url.includes('/history')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const qs = (req.url || '').split('?')[1] || '';
+      const statusFilter = new URLSearchParams(qs).get('status') || 'all';
+      let rows;
+      if (statusFilter === 'all') {
+        rows = await sql`SELECT * FROM "EnterpriseInquiry" ORDER BY submitted_at DESC`;
+      } else {
+        rows = await sql`SELECT * FROM "EnterpriseInquiry" WHERE status=${statusFilter} ORDER BY submitted_at DESC`;
+      }
+      return send(res, 200, { success: true, data: rows });
+    }
+
+    // ── PATCH /api/v1/admin/enterprise-inquiries/:id ──────────────
+    // ── GET /api/v1/admin/enterprise-inquiries/:id/history ────────
+    const entHistMatch = url.match(/\/api\/v1\/admin\/enterprise-inquiries\/([a-zA-Z0-9_-]+)\/history$/);
+    if (method === 'GET' && entHistMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const inquiryId = entHistMatch[1];
+      await sql`
+        CREATE TABLE IF NOT EXISTS "EnterpriseInquiryHistory" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          inquiry_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          note TEXT,
+          changed_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+      const rows = await sql`
+        SELECT id, status, note, changed_at
+        FROM "EnterpriseInquiryHistory"
+        WHERE inquiry_id = ${inquiryId}
+        ORDER BY changed_at ASC`;
+      return send(res, 200, { success: true, data: rows });
+    }
+
+    // ── PATCH /api/v1/admin/enterprise-inquiries/:id ──────────────
+    const entPatchMatch = url.match(/\/api\/v1\/admin\/enterprise-inquiries\/([a-zA-Z0-9_-]+)$/);
+    if (method === 'PATCH' && entPatchMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const entId = entPatchMatch[1];
+      const data = req.body || {};
+      const { status, admin_notes } = data;
+      await sql`
+        UPDATE "EnterpriseInquiry"
+        SET status=COALESCE(${status||null},status),
+            admin_notes=COALESCE(${admin_notes||null},admin_notes),
+            updated_at=NOW()
+        WHERE id=${entId}`;
+      // Record history entry
+      await sql`
+        CREATE TABLE IF NOT EXISTS "EnterpriseInquiryHistory" (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          inquiry_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          note TEXT,
+          changed_at TIMESTAMPTZ DEFAULT NOW()
+        )`;
+      if (status) {
+        await sql`
+          INSERT INTO "EnterpriseInquiryHistory" (id, inquiry_id, status, note, changed_at)
+          VALUES (gen_random_uuid()::text, ${entId}, ${status}, ${admin_notes||null}, NOW())`;
+      }
+      return send(res, 200, { success: true });
+    }
+
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
+
 
   } catch (err) {
     console.error('[perkfinity]', err.message);

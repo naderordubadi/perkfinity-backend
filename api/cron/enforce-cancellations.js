@@ -130,10 +130,167 @@ module.exports = async (req, res) => {
       `${totalCampaignsExpired} campaign(s) expired, ${totalRedemptionsExpired} redemption(s) expired.`
     );
 
+    // ── 5. 6-Month Auto-Deletion: full PII wipe for long-cancelled merchants ─
+    // Merchants cancelled for 6+ months who never reactivated are permanently
+    // deleted: Stripe customer removed, all PII wiped from DB, campaigns expired.
+    const Stripe = require('stripe');
+    const stripeClient = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
+
+    const stalemerchants = await sql`
+      SELECT m.id, m.business_name, m.cancelled_at, m.stripe_customer_id,
+             mu.id AS user_id
+      FROM "Merchant" m
+      LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+      WHERE m.billing_status = 'cancelled'
+        AND m.account_blocked = true
+        AND m.cancelled_at IS NOT NULL
+        AND m.cancelled_at < NOW() - INTERVAL '6 months'
+        AND m.business_name != '[Deleted]'
+    `;
+
+    let autoDeleted = 0;
+    if (stalemerchants.length > 0) {
+      console.log(`🗑️ Auto-deletion: found ${stalemerchants.length} merchant(s) cancelled 6+ months ago — wiping PII.`);
+
+      for (const staleMerchant of stalemerchants) {
+        // ── Step 1: Delete Stripe customer (removes saved card permanently) ──
+        if (staleMerchant.stripe_customer_id && stripeClient) {
+          try {
+            await stripeClient.customers.delete(staleMerchant.stripe_customer_id);
+            console.log(`💳 Stripe customer deleted: ${staleMerchant.stripe_customer_id}`);
+          } catch (stripeErr) {
+            // Non-fatal: Stripe customer may already be deleted, continue
+            console.error(`[Auto-Delete] Stripe cleanup failed for ${staleMerchant.id}:`, stripeErr.message);
+          }
+        }
+
+        // ── Step 2: Wipe MerchantUser PII (email + password) ──
+        if (staleMerchant.user_id) {
+          const deletedEmail = 'deleted_' + staleMerchant.user_id + '@deleted.invalid';
+          await sql`
+            UPDATE "MerchantUser"
+            SET email = ${deletedEmail}, password_hash = 'DELETED'
+            WHERE id = ${staleMerchant.user_id}
+          `;
+        }
+
+        // ── Step 3: Wipe Merchant PII ──
+        await sql`
+          UPDATE "Merchant"
+          SET business_name  = '[Deleted]',
+              contact_name   = NULL,
+              phone          = NULL,
+              website        = NULL,
+              logo_url       = NULL,
+              status         = 'cancelled',
+              billing_status = 'deleted',
+              account_blocked = true,
+              updated_at     = NOW()
+          WHERE id = ${staleMerchant.id}
+        `;
+
+        // ── Step 4: Wipe MerchantLocation PII ──
+        await sql`
+          UPDATE "MerchantLocation"
+          SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL
+          WHERE merchant_id = ${staleMerchant.id}
+        `;
+
+        // ── Step 5: Expire active campaigns ──
+        const expiredAutoC = await sql`
+          UPDATE "Campaign" SET status = 'expired', updated_at = NOW()
+          WHERE merchant_id = ${staleMerchant.id} AND status = 'active'
+          RETURNING id
+        `;
+
+        // ── Step 6: Expire pending redemptions ──
+        if (expiredAutoC.length > 0) {
+          const cids = expiredAutoC.map(c => c.id);
+          await sql`
+            UPDATE "Redemption" SET status = 'expired'
+            WHERE campaign_id = ANY(${cids})
+              AND status = 'created' AND redeemed = false
+          `;
+        }
+
+        console.log(`🗑️ Auto-deleted: ${staleMerchant.business_name || staleMerchant.id} (cancelled ${staleMerchant.cancelled_at})`);
+        autoDeleted++;
+      }
+    }
+
+    // ── 6. 6-Month Cleanup: declined Online/Hybrid applications ──────
+    // Applicants declined 6+ months ago have their PII fully wiped per privacy policy.
+    // Stripe customer was already removed at decline time, so no Stripe step needed here.
+    const declinedApps = await sql`
+      SELECT m.id, m.business_name, m.declined_at,
+             mu.id AS user_id
+      FROM "Merchant" m
+      LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id
+      WHERE m.application_status = 'declined'
+        AND m.declined_at IS NOT NULL
+        AND m.declined_at < NOW() - INTERVAL '6 months'
+        AND m.business_name != '[Deleted]'
+    `;
+
+    let declinedWiped = 0;
+    if (declinedApps.length > 0) {
+      console.log(`🗑️ Declined-app cleanup: found ${declinedApps.length} application(s) declined 6+ months ago — wiping PII.`);
+
+      for (const app of declinedApps) {
+        // Wipe MerchantUser PII
+        if (app.user_id) {
+          const deletedEmail = 'deleted_' + app.user_id + '@deleted.invalid';
+          await sql`
+            UPDATE "MerchantUser"
+            SET email = ${deletedEmail}, password_hash = 'DELETED'
+            WHERE id = ${app.user_id}
+          `;
+        }
+
+        // Wipe Merchant PII
+        await sql`
+          UPDATE "Merchant"
+          SET business_name   = '[Deleted]',
+              contact_name    = NULL,
+              phone           = NULL,
+              website         = NULL,
+              logo_url        = NULL,
+              application_status = 'deleted',
+              billing_status  = 'deleted',
+              updated_at      = NOW()
+          WHERE id = ${app.id}
+        `;
+
+        // Wipe MerchantLocation PII
+        await sql`
+          UPDATE "MerchantLocation"
+          SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL
+          WHERE merchant_id = ${app.id}
+        `;
+
+        // Expire any lingering campaigns
+        const expiredDecC = await sql`
+          UPDATE "Campaign" SET status = 'expired', updated_at = NOW()
+          WHERE merchant_id = ${app.id} AND status = 'active'
+          RETURNING id
+        `;
+        if (expiredDecC.length > 0) {
+          const cids = expiredDecC.map(c => c.id);
+          await sql`
+            UPDATE "Redemption" SET status = 'expired'
+            WHERE campaign_id = ANY(${cids}) AND status = 'created' AND redeemed = false
+          `;
+        }
+
+        console.log(`🗑️ Declined-app wiped: ${app.business_name || app.id} (declined ${app.declined_at})`);
+        declinedWiped++;
+      }
+    }
+
     return res.status(200).json({
       success: true,
-      message: `Enforced ${blockedMerchants.length} cancellation(s). ${totalCampaignsExpired} campaign(s) and ${totalRedemptionsExpired} redemption(s) expired.`,
-      stats: summary,
+      message: `Enforced ${blockedMerchants.length} cancellation(s). ${totalCampaignsExpired} campaign(s) and ${totalRedemptionsExpired} redemption(s) expired. ${autoDeleted} merchant(s) auto-deleted (6mo). ${declinedWiped} declined application(s) wiped (6mo).`,
+      stats: { ...summary, auto_deleted: autoDeleted, declined_wiped: declinedWiped },
     });
 
   } catch (err) {
