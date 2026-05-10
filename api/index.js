@@ -1009,8 +1009,12 @@ module.exports = async function handler(req, res) {
       //   (b) Merchant deleted their card in Stripe after setup (payment_method.detached
       //       cleared our DB field via webhook)
       // Excludes pending_cancellation: their account ends at period end, no future charge needed.
+      // Excludes onboarding_complete=true: already-onboarded merchants (e.g. pre-existing
+      //   merchants who signed up before stripe_payment_method_id column existed) are never
+      //   routed back to payment capture — they access their dashboard normally.
       const setupIncomplete = (
         !user.stripe_payment_method_id &&
+        !user.onboarding_complete &&
         user.subscription_tier !== 'free_for_life' &&
         !['online', 'hybrid'].includes(user.business_presence) &&
         !['cancelled', 'deleted', 'pending_cancellation'].includes(user.billing_status)
