@@ -89,6 +89,18 @@ async function autoEnrollUser(sql, userId, publicCode) {
     const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${publicCode} AND status = 'active'`;
     if (!qrData) return;
 
+    // Cap guard: block auto-enrollment for capped online tiers already at their member limit.
+    // This mirrors the same check in GET /qr/resolve/:code so auth flows cannot bypass the cap.
+    const _cappedAutoTiers = ['online_starter', 'online_growth'];
+    const [_capMerchAuto] = await sql`SELECT subscription_tier, member_limit, billing_status FROM "Merchant" WHERE id = ${qrData.merchant_id} LIMIT 1`;
+    if (_capMerchAuto && _cappedAutoTiers.includes(_capMerchAuto.subscription_tier) && _capMerchAuto.member_limit && _capMerchAuto.billing_status === 'active') {
+      const [_capCntAuto] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
+      if (_capCntAuto && _capCntAuto.cnt >= _capMerchAuto.member_limit) {
+        console.log(`[MemberCap-Auth] Auto-enroll blocked for merchant ${qrData.merchant_id} (${_capCntAuto.cnt}/${_capMerchAuto.member_limit}) — user ${userId} not enrolled`);
+        return;
+      }
+    }
+
     // 1. Add to member list
     await sql`
       INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
@@ -1289,6 +1301,7 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS application_notes TEXT`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS billing_starts_at_member_count INT DEFAULT NULL`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS member_cap_notified BOOLEAN DEFAULT FALSE`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS cap_block_count INT DEFAULT 0`;
 
       // ── Onboarding completion tracking ───────────────────────────
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS onboarding_complete BOOLEAN DEFAULT false`;
@@ -1521,7 +1534,7 @@ module.exports = async function handler(req, res) {
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
 
-      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified, cap_block_count FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
       if (merchant.billing_status === 'deleted') return send(res, 403, { success: false, error: 'This store is no longer available' });
       if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is currently inactive' });
@@ -1533,9 +1546,12 @@ module.exports = async function handler(req, res) {
         const [_capCount] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrCode.merchant_id}`;
         if (_capCount && _capCount.cnt >= merchant.member_limit) {
           console.log(`[MemberCap] Merchant ${qrCode.merchant_id} at tier cap (${_capCount.cnt}/${merchant.member_limit}). Join blocked.`);
-          // One-time upgrade notification email — only fires on the first blocked join, never repeats
-          if (!merchant.member_cap_notified) {
-            await sql`UPDATE "Merchant" SET member_cap_notified = true, updated_at = NOW() WHERE id = ${qrCode.merchant_id}`;
+          // Notification: fires on first blocked join, then every 25 blocked joins after that.
+          const _preIncCount = merchant.cap_block_count || 0;
+          const _isFirstBlock = !merchant.member_cap_notified;
+          const _isPeriodicBlock = !_isFirstBlock && (_preIncCount + 1) % 25 === 0;
+          await sql`UPDATE "Merchant" SET cap_block_count = COALESCE(cap_block_count, 0) + 1, member_cap_notified = true, updated_at = NOW() WHERE id = ${qrCode.merchant_id}`;
+          if (_isFirstBlock || _isPeriodicBlock) {
             try {
               const [_capMu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${qrCode.merchant_id} LIMIT 1`;
               const BREVO_KEY = process.env.BREVO_API_KEY;
@@ -1548,10 +1564,12 @@ module.exports = async function handler(req, res) {
                 emailObj.to = [{ email: _capMu.email }];
                 const _tierLabel = merchant.subscription_tier === 'online_starter' ? 'Starter (500 members)' : 'Growth (2,500 members)';
                 const _nextTier  = merchant.subscription_tier === 'online_starter' ? 'Growth' : 'Scale';
-                emailObj.subject = `⚠️ A new member couldn't join ${merchant.business_name} — your plan is full`;
+                emailObj.subject = _isFirstBlock
+                  ? `⚠️ A new member couldn't join ${merchant.business_name} — your plan is full`
+                  : `⚠️ Reminder: New members are still being turned away from ${merchant.business_name}`;
                 emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#e67e22;margin-bottom:16px;">⚠️ A member just tried to join — but couldn't</div><p style="font-size:15px;color:#555;line-height:1.6;">Hi <strong>${merchant.business_name}</strong>,<br><br>Someone new just tried to join your Perkfinity page but was turned away because your <strong>${_tierLabel}</strong> plan has reached its ${merchant.member_limit}-member limit.</p><div style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:10px;padding:16px 20px;margin-bottom:20px;"><div style="font-size:13px;font-weight:700;color:#c2410c;margin-bottom:8px;">What's happening right now:</div><ul style="margin:0;padding-left:18px;font-size:13px;color:#7c2d12;line-height:2;"><li>New potential members are being turned away from your page</li><li><strong>This will keep happening</strong> until you upgrade your plan</li><li>Your current ${merchant.member_limit} members and all active campaigns are unaffected</li></ul></div><p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">Don't lose customers — upgrade now to keep your doors open to new members:</p><table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;"><tr><td style="padding-bottom:10px;"><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#5b3fa5;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Upgrade to Growth — Up to 2,500 Members</a></td></tr><tr><td><a href="https://perkfinity.net/dashboard.html" style="display:block;background:#1e1b4b;color:#fff;font-weight:700;text-decoration:none;padding:14px 20px;border-radius:10px;font-size:14px;text-align:center;">Go Scale — Unlimited Members</a></td></tr></table><p style="font-size:13px;color:#aaa;text-align:center;">Need help choosing? Reply to this email and our team will assist you right away.</p></div></div>`;
                 await emailApi.sendTransacEmail(emailObj);
-                console.log(`[MemberCap] Upgrade notification sent to ${_capMu.email} for merchant ${qrCode.merchant_id}`);
+                console.log(`[MemberCap] ${_isFirstBlock ? 'First' : 'Periodic'} cap notification sent to ${_capMu.email} for merchant ${qrCode.merchant_id} (block #${_preIncCount + 1})`);
               }
             } catch (_capEmailErr) {
               console.error('[MemberCap] Upgrade email failed:', _capEmailErr.message);
@@ -4819,6 +4837,8 @@ module.exports = async function handler(req, res) {
             SET subscription_tier              = ${target_tier},
                 billing_status                 = 'active',
                 member_limit                   = ${newLimit},
+                member_cap_notified            = false,
+                cap_block_count               = 0,
                 stripe_subscription_id         = ${subscription.id},
                 billing_starts_at_member_count = NULL,
                 account_blocked                = false,
@@ -4846,9 +4866,11 @@ module.exports = async function handler(req, res) {
 
         await sql`
           UPDATE "Merchant"
-          SET subscription_tier = ${target_tier},
-              member_limit      = ${newLimit},
-              updated_at        = NOW()
+          SET subscription_tier     = ${target_tier},
+              member_limit          = ${newLimit},
+              member_cap_notified   = false,
+              cap_block_count      = 0,
+              updated_at            = NOW()
           WHERE id = ${merchantId}
         `;
         console.log(`[Upgrade] Merchant ${merchantId} plan updated from '${currentTier}' to '${target_tier}' — effective at next billing`);
