@@ -1660,7 +1660,7 @@ module.exports = async function handler(req, res) {
       const [merchantData] = await sql`
         SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, m.subscription_tier,
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
-               m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location,
+               m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location, m.onboarding_complete,
                l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
