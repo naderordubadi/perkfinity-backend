@@ -120,8 +120,8 @@ async function autoEnrollUser(sql, userId, publicCode) {
           const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
           const tierPriceMap = {
             online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-            online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-            online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
+            online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+            online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
           };
           const priceId = tierPriceMap[merchant.subscription_tier];
           if (STRIPE_KEY && priceId && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
@@ -385,11 +385,11 @@ module.exports = async function handler(req, res) {
         brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
         const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
         const emailObj = new SibApiV3Sdk.SendSmtpEmail();
-        emailObj.sender   = { name: 'Perkfinity', email: 'support@perkfinity.net' };
-        emailObj.to       = [{ email: 'hello@perkfinity.net' }];
-        emailObj.replyTo  = { email: email.trim(), name: name.trim() };
-        emailObj.subject  = `[Contact] ${subject}`;
-        const safeMsg = String(message).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+        emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+        emailObj.to = [{ email: 'hello@perkfinity.net' }];
+        emailObj.replyTo = { email: email.trim(), name: name.trim() };
+        emailObj.subject = `[Contact] ${subject}`;
+        const safeMsg = String(message).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
         emailObj.htmlContent = `
           <div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;border-radius:12px;overflow:hidden;border:1px solid #e8e4f8">
             <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 32px">
@@ -400,13 +400,13 @@ module.exports = async function handler(req, res) {
               <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
                 <tr><td style="padding:9px 0;color:#888;font-size:13px;font-weight:600;width:28%;border-bottom:1px solid #f5f3ff">From</td><td style="padding:9px 0;font-size:14px;font-weight:700;border-bottom:1px solid #f5f3ff">${name.trim()}</td></tr>
                 <tr><td style="padding:9px 0;color:#888;font-size:13px;font-weight:600;border-bottom:1px solid #f5f3ff">Email</td><td style="padding:9px 0;font-size:14px;border-bottom:1px solid #f5f3ff"><a href="mailto:${email.trim()}" style="color:#5b3fa5;font-weight:700">${email.trim()}</a></td></tr>
-                <tr><td style="padding:9px 0;color:#888;font-size:13px;font-weight:600">Subject</td><td style="padding:9px 0;font-size:14px;font-weight:700">${String(subject).replace(/</g,'&lt;')}</td></tr>
+                <tr><td style="padding:9px 0;color:#888;font-size:13px;font-weight:600">Subject</td><td style="padding:9px 0;font-size:14px;font-weight:700">${String(subject).replace(/</g, '&lt;')}</td></tr>
               </table>
               <div style="background:#f8f7ff;border-radius:10px;padding:20px 24px;margin-bottom:20px">
                 <div style="font-size:12px;font-weight:700;color:#7c3aed;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px">Message</div>
                 <div style="font-size:15px;color:#1a1a2e;line-height:1.75">${safeMsg}</div>
               </div>
-              ${attachment ? `<div style="font-size:12px;color:#888;margin-bottom:20px">📎 Attachment included: <strong>${String(attachment.name||'file').replace(/</g,'&lt;')}</strong></div>` : ''}
+              ${attachment ? `<div style="font-size:12px;color:#888;margin-bottom:20px">📎 Attachment included: <strong>${String(attachment.name || 'file').replace(/</g, '&lt;')}</strong></div>` : ''}
               <div style="font-size:12px;color:#aaa;border-top:1px solid #f0eeff;padding-top:16px">
                 💡 Hit <strong>Reply</strong> to respond directly to <strong>${name.trim()}</strong> at <strong>${email.trim()}</strong>
               </div>
@@ -660,7 +660,7 @@ module.exports = async function handler(req, res) {
         invoice_settings: { default_payment_method: data.stripe_payment_method_id },
         metadata: { source: isHybridApply ? 'hybrid_application' : 'online_brand_application' }
       });
-      await stripeClient.paymentMethods.attach(data.stripe_payment_method_id, { customer: customer.id }).catch(() => {});
+      await stripeClient.paymentMethods.attach(data.stripe_payment_method_id, { customer: customer.id }).catch(() => { });
 
       // Accept logo_url (base64 string) if provided
       const logoUrl = data.logo_url || null;
@@ -840,14 +840,14 @@ module.exports = async function handler(req, res) {
 
       if (isHybridApply && !isMultiLocation) {
         await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite||''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})`;
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})`;
       } else {
         await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
           VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', NULL, NULL, NULL, 'US', true, ${now})`;
       }
 
       await sql`INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, status, campaign_type, promo_code, start_at, end_at, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text||'Welcome Perk'}, 10, 'active', 'initial', ${welcomePromoCode}, ${now}, NULL, ${now}, ${now})`;
+        VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text || 'Welcome Perk'}, 10, 'active', 'initial', ${welcomePromoCode}, ${now}, NULL, ${now}, ${now})`;
 
       const public_code = crypto.randomBytes(9).toString('base64url');
       await sql`INSERT INTO "QrCode" (id, merchant_id, public_code, status, created_at)
@@ -893,7 +893,7 @@ module.exports = async function handler(req, res) {
       if (STRIPE_KEY && merchant.stripe_customer_id) {
         try {
           const stripeClient = Stripe(STRIPE_KEY);
-          await stripeClient.paymentMethods.attach(payment_method_id, { customer: merchant.stripe_customer_id }).catch(() => {});
+          await stripeClient.paymentMethods.attach(payment_method_id, { customer: merchant.stripe_customer_id }).catch(() => { });
           await stripeClient.customers.update(merchant.stripe_customer_id, {
             invoice_settings: { default_payment_method: payment_method_id }
           });
@@ -1416,9 +1416,9 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url.startsWith('/api/v1/public/local-merchants')) {
       const qs = (req.url || '').split('?')[1] || '';
       const params = new URLSearchParams(qs);
-      const q      = (params.get('q') || '').trim();
+      const q = (params.get('q') || '').trim();
       const cities = params.getAll('city').map(c => c.trim().toLowerCase()).filter(Boolean);
-      const zips   = params.getAll('zip').map(z => z.trim()).filter(Boolean);
+      const zips = params.getAll('zip').map(z => z.trim()).filter(Boolean);
 
       // postgres.js does not support composing fragments dynamically.
       // Use complete self-contained queries per filter branch (same pattern as online-merchants).
@@ -1563,7 +1563,7 @@ module.exports = async function handler(req, res) {
                 emailObj.sender = { name: 'Perkfinity Support', email: 'support@perkfinity.net' };
                 emailObj.to = [{ email: _capMu.email }];
                 const _tierLabel = merchant.subscription_tier === 'online_starter' ? 'Starter (500 members)' : 'Growth (2,500 members)';
-                const _nextTier  = merchant.subscription_tier === 'online_starter' ? 'Growth' : 'Scale';
+                const _nextTier = merchant.subscription_tier === 'online_starter' ? 'Growth' : 'Scale';
                 emailObj.subject = _isFirstBlock
                   ? `⚠️ A new member couldn't join ${merchant.business_name} — your plan is full`
                   : `⚠️ Reminder: New members are still being turned away from ${merchant.business_name}`;
@@ -1582,6 +1582,7 @@ module.exports = async function handler(req, res) {
       const [location] = await sql`SELECT address, city, state, postal_code FROM "MerchantLocation" WHERE merchant_id = ${qrCode.merchant_id} AND is_active = true LIMIT 1`;
 
       let campaigns = [];
+      let resolvedUserId = null; // tracks successfully authenticated user — controls fallback eligibility
 
       // If user is authenticated, return ONLY their assigned campaigns for this merchant
       const authHeader = req.headers.authorization;
@@ -1589,6 +1590,7 @@ module.exports = async function handler(req, res) {
         try {
           const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
           const userId = decoded.userId;
+          resolvedUserId = userId; // mark as successfully authenticated
           // Auto-enroll the user into the merchant's member list if they aren't already
           await sql`
             INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
@@ -1622,14 +1624,14 @@ module.exports = async function handler(req, res) {
           // (assigned to user, not yet activated — 'created' is the canonical pending state)
           const memberCampaigns = await sql`
             SELECT c.id, c.title, c.discount_percentage, c.terms, c.status as campaign_status,
-                   c.start_at, c.end_at, c.campaign_type,
+                   c.start_at, c.end_at, c.campaign_type, c.promo_code,
                    r.id as redemption_id, r.token, r.expires_at as redemption_expires_at,
                    r.redeemed, r.status as redemption_status
             FROM "Redemption" r
             JOIN "Campaign" c ON c.id = r.campaign_id
             WHERE r.user_id = ${userId}
               AND c.merchant_id = ${qrCode.merchant_id}
-              AND r.status = 'created'
+              AND r.status IN ('created', 'claimed')
               AND r.redeemed = false
               AND c.status = 'active'
               AND (c.end_at IS NULL OR c.end_at > NOW())
@@ -1643,22 +1645,43 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      // Fallback for unauthenticated or if member has no assigned campaigns:
-      // return all active campaigns for this merchant so the QR page can still show something
-      if (campaigns.length === 0) {
+      // Fallback: ONLY for truly unauthenticated users (no valid JWT).
+      // Authenticated users with no available campaigns get an empty result — they have nothing left to activate.
+      // This prevents redeemed campaigns from reappearing and targeted campaigns from leaking to wrong users.
+      if (campaigns.length === 0 && !resolvedUserId) {
         campaigns = await sql`
-          SELECT id, title, discount_percentage, terms, status, start_at, end_at, campaign_type
-          FROM "Campaign"
-          WHERE merchant_id = ${qrCode.merchant_id}
-            AND status = 'active'
-            AND (end_at IS NULL OR end_at > NOW())
-            AND discount_percentage >= 0
-          ORDER BY created_at ASC
+          SELECT id, title, discount_percentage, terms, status, start_at, end_at, campaign_type, promo_code
+          FROM "Campaign" c
+          WHERE c.merchant_id = ${qrCode.merchant_id}
+            AND c.status = 'active'
+            AND (c.end_at IS NULL OR c.end_at > NOW())
+            AND c.discount_percentage >= 0
+            AND NOT EXISTS (
+              SELECT 1 FROM "AuditLog" al
+              WHERE al.target_id = c.id
+                AND al.action = 'promotion_created'
+            )
+          ORDER BY c.created_at ASC
           LIMIT 5
         `;
       }
 
-      return send(res, 200, { success: true, data: { qrCode, merchant, location, campaigns } });
+      // When authenticated user has no available campaigns, check if they've redeemed
+      // something from this merchant so we can show a contextual message vs. silent redirect.
+      let allRedeemed = false;
+      if (campaigns.length === 0 && resolvedUserId) {
+        const [redeemedCheck] = await sql`
+          SELECT 1 FROM "Redemption" r
+          JOIN "Campaign" c ON c.id = r.campaign_id
+          WHERE r.user_id = ${resolvedUserId}
+            AND c.merchant_id = ${qrCode.merchant_id}
+            AND r.redeemed = true
+          LIMIT 1
+        `;
+        allRedeemed = !!redeemedCheck;
+      }
+
+      return send(res, 200, { success: true, data: { qrCode, merchant, location, campaigns, all_redeemed: allRedeemed } });
     }
 
 
@@ -1736,6 +1759,11 @@ module.exports = async function handler(req, res) {
       const now = new Date();
       const expiresAt = data.expires_at ? new Date(data.expires_at) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
+      // Sanitize promo code: uppercase, alphanumeric + dash + underscore only, max 18 chars
+      const sanitizedPromoCode = data.promo_code
+        ? data.promo_code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 18) || null
+        : null;
+
       // Save as a Campaign so it appears in campaign history.
       // Announcements use discount_percentage = -1 as a permanent type marker
       // so they can be filtered out anywhere Redemption rows are not sufficient.
@@ -1751,7 +1779,7 @@ module.exports = async function handler(req, res) {
           ${now},
           ${expiresAt},
           ${data.type || 'perk'},
-          ${data.promo_code || null},
+          ${sanitizedPromoCode},
           ${now},
           ${now}
         )
@@ -2241,7 +2269,18 @@ module.exports = async function handler(req, res) {
            c.end_at as offer_expires_at,
            (SELECT COUNT(*) FROM "Campaign" c2
             WHERE c2.merchant_id = m.id AND c2.status = 'active'
-              AND (c2.end_at IS NULL OR c2.end_at > NOW())) as offer_count,
+              AND (c2.end_at IS NULL OR c2.end_at > NOW())
+              AND (
+                ${authedUserId}::text IS NULL
+                OR NOT EXISTS (SELECT 1 FROM "AuditLog" al WHERE al.target_id = c2.id AND al.action = 'promotion_created')
+                OR EXISTS (SELECT 1 FROM "Redemption" r2 WHERE r2.campaign_id = c2.id AND r2.user_id = ${authedUserId})
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM "Redemption" r3
+                WHERE r3.campaign_id = c2.id
+                  AND r3.user_id = ${authedUserId}
+                  AND (r3.status = 'redeemed' OR r3.redeemed = true)
+              )) as offer_count,
            (SELECT MAX(c2.created_at) FROM "Campaign" c2
             WHERE c2.merchant_id = m.id AND c2.status = 'active'
               AND (c2.end_at IS NULL OR c2.end_at > NOW())) as latest_offer_at
@@ -2298,8 +2337,7 @@ module.exports = async function handler(req, res) {
           AND c.status = 'active'
           AND (c.end_at IS NULL OR c.end_at > NOW())
           AND NOT (
-            m.business_presence IN ('physical', 'mobile')
-            AND r.id IS NOT NULL
+            r.id IS NOT NULL
             AND (r.status = 'redeemed' OR r.redeemed = true)
           )
           AND NOT (
@@ -2308,6 +2346,16 @@ module.exports = async function handler(req, res) {
             AND r.id IS NOT NULL
             AND r.status = 'claimed'
             AND r.claimed_at + INTERVAL '30 days' < NOW()
+          )
+          AND (
+            -- Welcome/initial campaigns (no AuditLog): visible to all members
+            NOT EXISTS (
+              SELECT 1 FROM "AuditLog" al
+              WHERE al.target_id = c.id AND al.action = 'promotion_created'
+            )
+            OR
+            -- Targeted campaigns: only visible to members who were in the original audience
+            r.id IS NOT NULL
           )
         ORDER BY c.created_at ASC
       `;
@@ -2487,7 +2535,7 @@ module.exports = async function handler(req, res) {
           LIMIT 1
         )
         UPDATE "Redemption"
-        SET expires_at = NOW() + INTERVAL '5 minutes',
+        SET expires_at = NOW() + INTERVAL '3 minutes',
             status = 'pending',
             issued_at = NOW(),
             token = ${code}
@@ -2500,10 +2548,33 @@ module.exports = async function handler(req, res) {
       if (updated.length > 0) {
         redemption = updated[0];
       } else {
-        // True fallback: no prior assignment row at all — insert fresh
+        // Guard 1: Block re-activation of an already-redeemed campaign
+        const [alreadyRedeemed] = await sql`
+          SELECT 1 FROM "Redemption"
+          WHERE user_id = ${payload.userId}
+            AND campaign_id = ${campaignId}
+            AND redeemed = true
+          LIMIT 1
+        `;
+        if (alreadyRedeemed) {
+          return send(res, 400, { success: false, error: 'You have already redeemed this offer.' });
+        }
+
+        // Guard 2: Block activation of targeted campaigns by non-audience members
+        const [auditEntry] = await sql`
+          SELECT 1 FROM "AuditLog"
+          WHERE target_id = ${campaignId}
+            AND action = 'promotion_created'
+          LIMIT 1
+        `;
+        if (auditEntry) {
+          return send(res, 403, { success: false, error: 'This offer is not available to you.' });
+        }
+
+        // Safe to insert — first-time activation for a valid initial/welcome campaign
         const [inserted] = await sql`
           INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status)
-          VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '5 minutes', false, 'pending')
+          VALUES (gen_random_uuid()::text, ${payload.userId}, ${campaignId}, ${code}, NOW(), NOW() + INTERVAL '3 minutes', false, 'pending')
           RETURNING *
         `;
         redemption = inserted;
@@ -2574,7 +2645,7 @@ module.exports = async function handler(req, res) {
           LIMIT 1
         )
         UPDATE "Redemption"
-        SET status = 'created',
+        SET status = CASE WHEN claimed_at IS NOT NULL THEN 'claimed' ELSE 'created' END,
             expires_at = (SELECT end_at FROM "Campaign" WHERE id = ${cancelCampaignId})
         FROM target
         WHERE "Redemption".id = target.id
@@ -2706,10 +2777,92 @@ module.exports = async function handler(req, res) {
           AND r.user_id = ${payload.userId}
         LIMIT 1
       `;
-      if (!redemption) return send(res, 404, { success: false, error: 'Redemption not found for this campaign' });
+
+      if (!redemption) {
+        // No pre-existing Redemption row — attempt on-demand creation.
+        // This covers two cases:
+        //   (a) Targeted promotions that were excluded from QR-scan auto-assignment
+        //       (they have an AuditLog 'promotion_created' entry, so the batch INSERT skips them).
+        //   (b) Members who joined via the in-app 'Join Member List' button rather than
+        //       scanning a QR code — autoEnrollUser creates MerchantMember but no Redemption rows.
+        // We verify the campaign is valid and the user is a member before creating anything.
+
+        const [campaign] = await sql`
+          SELECT c.id, c.merchant_id, c.status, c.end_at,
+                 COALESCE(NULLIF(c.promo_code, ''), m.welcome_promo_code) AS promo_code
+          FROM "Campaign" c
+          JOIN "Merchant" m ON m.id = c.merchant_id
+          WHERE c.id = ${data.campaign_id}
+            AND c.status IN ('active', 'created')
+            AND (c.end_at IS NULL OR c.end_at > NOW())
+          LIMIT 1
+        `;
+        if (!campaign) {
+          return send(res, 404, { success: false, error: 'Campaign not found or has expired' });
+        }
+
+        // Block on-demand creation for targeted campaigns. Only members who were in the
+        // original audience (and already have a Redemption row) may claim them.
+        // Welcome/initial campaigns have no AuditLog entry and are open to all members.
+        const [auditEntry] = await sql`
+          SELECT 1 FROM "AuditLog"
+          WHERE target_id = ${data.campaign_id}
+            AND action = 'promotion_created'
+          LIMIT 1
+        `;
+        if (auditEntry) {
+          return send(res, 403, { success: false, error: 'This offer is not available to you.' });
+        }
+
+        if (!campaign.promo_code) {
+          return send(res, 400, { success: false, error: 'This offer does not have a promo code' });
+        }
+
+        // Confirm the user is a member of the merchant that owns this campaign.
+        const [membership] = await sql`
+          SELECT id FROM "MerchantMember"
+          WHERE merchant_id = ${campaign.merchant_id}
+            AND user_id = ${payload.userId}
+          LIMIT 1
+        `;
+        if (!membership) {
+          return send(res, 403, { success: false, error: 'You must be a member of this merchant to reveal this offer' });
+        }
+
+        // Atomically insert a claimed Redemption row if none exists yet.
+        // The INSERT ... SELECT ... WHERE NOT EXISTS guard prevents duplicate rows
+        // in the rare case of two simultaneous requests for the same user+campaign.
+        await sql`
+          INSERT INTO "Redemption" (id, user_id, campaign_id, token, issued_at, expires_at, redeemed, status, claimed_at)
+          SELECT
+            gen_random_uuid()::text,
+            ${payload.userId},
+            ${data.campaign_id},
+            gen_random_uuid()::text,
+            NOW(),
+            ${campaign.end_at || null},
+            false,
+            'claimed',
+            NOW()
+          WHERE NOT EXISTS (
+            SELECT 1 FROM "Redemption"
+            WHERE campaign_id = ${data.campaign_id}
+              AND user_id = ${payload.userId}
+          )
+        `;
+
+        return send(res, 200, { success: true, data: { promo_code: campaign.promo_code, claimed_at: new Date() } });
+      }
+
+      // Pre-existing Redemption found — safety check (WHERE already filters by userId, but belt-and-suspenders).
       if (redemption.user_id !== payload.userId) return send(res, 403, { success: false, error: 'Forbidden' });
 
-      // Already claimed — return code without re-marking
+      // Backend last line of defense — block re-claiming an already-redeemed offer.
+      if (redemption.redeemed || redemption.status === 'redeemed') {
+        return send(res, 400, { success: false, error: 'You have already redeemed this offer.' });
+      }
+
+      // Already claimed — return code idempotently without re-marking.
       if (redemption.status === 'claimed' || redemption.status === 'activated') {
         return send(res, 200, { success: true, already_claimed: true, data: { promo_code: redemption.promo_code, claimed_at: redemption.claimed_at } });
       }
@@ -2786,14 +2939,14 @@ module.exports = async function handler(req, res) {
       const d = req.body || {};
       await sql`
         UPDATE "Merchant" SET
-          business_name      = COALESCE(${d.name      || null}, business_name),
-          website            = COALESCE(${d.website   || null}, website),
+          business_name      = COALESCE(${d.name || null}, business_name),
+          website            = COALESCE(${d.website || null}, website),
           welcome_offer_text = COALESCE(${d.welcome_offer_text || null}, welcome_offer_text),
-          address            = COALESCE(${d.address   || null}, address),
-          suite              = COALESCE(${d.suite     || null}, suite),
-          city               = COALESCE(${d.city      || null}, city),
-          state              = COALESCE(${d.state     || null}, state),
-          zip_code           = COALESCE(${d.zip       || null}, zip_code),
+          address            = COALESCE(${d.address || null}, address),
+          suite              = COALESCE(${d.suite || null}, suite),
+          city               = COALESCE(${d.city || null}, city),
+          state              = COALESCE(${d.state || null}, state),
+          zip_code           = COALESCE(${d.zip || null}, zip_code),
           updated_at         = NOW()
         WHERE id = ${merchantId}
       `;
@@ -2930,7 +3083,7 @@ module.exports = async function handler(req, res) {
 
       // Update Merchant Details (welcome_promo_code is intentionally excluded — never editable)
       if (data.business_name || data.contact_name || data.phone || data.website !== undefined ||
-          data.welcome_offer_text !== undefined || data.review_url !== undefined || data.order_url !== undefined) {
+        data.welcome_offer_text !== undefined || data.review_url !== undefined || data.order_url !== undefined) {
         // Build the update safely — always update all present fields
         const newWelcomeOfferText = data.welcome_offer_text !== undefined ? data.welcome_offer_text : null;
         const newReviewUrl = data.review_url !== undefined ? (data.review_url || null) : undefined;
@@ -3643,7 +3796,7 @@ module.exports = async function handler(req, res) {
       const data = req.body || {};
       const label = (data.label || '').trim() || null;
       const type = data.type === 'extended_trial' ? 'extended_trial' : 'free_for_life';
-      
+
       let code;
       const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
       if (type === 'extended_trial') {
@@ -3689,7 +3842,7 @@ module.exports = async function handler(req, res) {
       const enriched = codes.map(c => {
         let st = 'available';
         const expired = new Date(c.expires_at) < now;
-        
+
         if (c.type === 'free_for_life' || !c.type) {
           if (c.used) st = 'used';
           else if (expired) st = 'expired';
@@ -3697,7 +3850,7 @@ module.exports = async function handler(req, res) {
           // extended_trial codes are infinite use until they expire
           if (expired) st = 'expired';
         }
-        
+
         return { ...c, status: st };
       });
       return send(res, 200, { success: true, data: { codes: enriched } });
@@ -3838,8 +3991,8 @@ module.exports = async function handler(req, res) {
             const stripeClient = Stripe(STRIPE_KEY);
             const tierPriceMap = {
               online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-              online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-              online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
+              online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+              online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
             };
             const priceId = tierPriceMap[merchant.subscription_tier];
             if (!priceId) {
@@ -4691,10 +4844,10 @@ module.exports = async function handler(req, res) {
 
       // Resolve the correct price ID for this merchant's tier
       const tierPriceMap = {
-        tier1:          process.env.STRIPE_TIER1_PRICE_ID,
+        tier1: process.env.STRIPE_TIER1_PRICE_ID,
         online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-        online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-        online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
+        online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+        online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
       };
       const reactivatePriceId = tierPriceMap[merchant.subscription_tier] || process.env.STRIPE_TIER1_PRICE_ID;
       if (!reactivatePriceId) return send(res, 500, { success: false, error: `No Stripe price configured for tier '${merchant.subscription_tier}'` });
@@ -4777,10 +4930,10 @@ module.exports = async function handler(req, res) {
       const stripeClient = Stripe(STRIPE_KEY);
 
       const tierPriceMap = {
-        tier1:          process.env.STRIPE_TIER1_PRICE_ID,
+        tier1: process.env.STRIPE_TIER1_PRICE_ID,
         online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-        online_growth:  process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-        online_scale:     process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
+        online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+        online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
       };
       const tierLimitMap = {
         tier1: 999999, online_starter: 500, online_growth: 2500, online_scale: 999999,
@@ -4810,7 +4963,7 @@ module.exports = async function handler(req, res) {
       // Validate upgrade direction for online tiers
       if (!isTrialTier && !isPromoPhase) {
         const currentIdx = upgradeOrder.indexOf(currentTier);
-        const targetIdx  = upgradeOrder.indexOf(target_tier);
+        const targetIdx = upgradeOrder.indexOf(target_tier);
         if (currentIdx === -1 || targetIdx === -1 || targetIdx <= currentIdx) {
           return send(res, 400, { success: false, error: 'Invalid upgrade path. Only upward tier changes are allowed.' });
         }
@@ -4964,11 +5117,11 @@ module.exports = async function handler(req, res) {
       // Check Billing Dependency Lock
       const [merchant] = await sql`SELECT billing_status, account_blocked, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
-      
+
       const st = merchant.billing_status;
       // Protect active Stripe subscriptions from getting ghosted in DB
       if (st === 'active' || st === 'payment_failed') {
-         return send(res, 403, { success: false, error: 'Forbidden. You must cancel your active subscription first.' });
+        return send(res, 403, { success: false, error: 'Forbidden. You must cancel your active subscription first.' });
       }
 
       // ── Stripe customer cleanup — remove saved card so they can never be charged ──
@@ -5058,7 +5211,7 @@ module.exports = async function handler(req, res) {
       const qs = (req.url || '').split('?')[1] || '';
       const params = new URLSearchParams(qs);
       const token = params.get('token');
-      const uid   = params.get('uid');
+      const uid = params.get('uid');
 
       const unsubPage = (success, message) => `<!DOCTYPE html><html lang="en">
 <head>
@@ -5089,7 +5242,7 @@ module.exports = async function handler(req, res) {
         return res.status(400).end(unsubPage(false, 'This unsubscribe link is missing required information. Please contact <strong>hello@perkfinity.net</strong> if you need help.'));
       }
 
-      const secret   = process.env.JWT_SECRET || 'perkfinity-secret';
+      const secret = process.env.JWT_SECRET || 'perkfinity-secret';
       const expected = crypto.createHmac('sha256', secret).update(uid).digest('hex');
 
       if (token !== expected) {
@@ -5177,18 +5330,18 @@ module.exports = async function handler(req, res) {
           campaign_mgmt, data_visibility, notes,
           contact_name, contact_title, contact_email, contact_phone, logo_url
         ) VALUES (
-          ${d.company_legal_name}, ${d.brand_name||null}, ${d.industry}, ${d.website},
-          ${d.hq_street||null}, ${d.hq_city||null}, ${d.hq_state||null}, ${d.hq_zip||null}, ${d.hq_country||'USA'},
-          ${d.num_locations||null}, ${d.geographic_reach||null}, ${d.location_types||null},
-          ${d.same_brand_name!==false}, ${d.brand_note||null},
-          ${d.operation_structure||null}, ${d.operation_structure_note||null},
-          ${d.decision_authority||null}, ${d.decision_authority_note||null},
-          ${d.pos_system||null}, ${d.has_loyalty||'no'}, ${d.loyalty_name||null}, ${d.loyalty_types||null},
-          ${d.digital_deal||null}, ${d.digital_deal_other||null},
-          ${d.systems_integrated||'no'}, ${d.integration_note||null}, ${d.member_db_size||null},
-          ${d.member_capture||null}, ${d.wants_import||'no'}, ${d.import_count||null}, ${d.import_format||null},
-          ${d.campaign_mgmt||null}, ${d.data_visibility||null}, ${d.notes||null},
-          ${d.contact_name}, ${d.contact_title||null}, ${d.contact_email}, ${d.contact_phone||null}, ${logoUrl}
+          ${d.company_legal_name}, ${d.brand_name || null}, ${d.industry}, ${d.website},
+          ${d.hq_street || null}, ${d.hq_city || null}, ${d.hq_state || null}, ${d.hq_zip || null}, ${d.hq_country || 'USA'},
+          ${d.num_locations || null}, ${d.geographic_reach || null}, ${d.location_types || null},
+          ${d.same_brand_name !== false}, ${d.brand_note || null},
+          ${d.operation_structure || null}, ${d.operation_structure_note || null},
+          ${d.decision_authority || null}, ${d.decision_authority_note || null},
+          ${d.pos_system || null}, ${d.has_loyalty || 'no'}, ${d.loyalty_name || null}, ${d.loyalty_types || null},
+          ${d.digital_deal || null}, ${d.digital_deal_other || null},
+          ${d.systems_integrated || 'no'}, ${d.integration_note || null}, ${d.member_db_size || null},
+          ${d.member_capture || null}, ${d.wants_import || 'no'}, ${d.import_count || null}, ${d.import_format || null},
+          ${d.campaign_mgmt || null}, ${d.data_visibility || null}, ${d.notes || null},
+          ${d.contact_name}, ${d.contact_title || null}, ${d.contact_email}, ${d.contact_phone || null}, ${logoUrl}
         ) RETURNING id, submitted_at`;
 
       // ── Admin notification email ──
@@ -5198,10 +5351,10 @@ module.exports = async function handler(req, res) {
         </div>
         <div style="padding:28px 24px;background:#fff">
           <table style="width:100%;border-collapse:collapse;font-size:14px">
-            <tr><td style="padding:8px 0;color:#666;width:40%">Company</td><td style="padding:8px 0;font-weight:700">${d.company_legal_name}${d.brand_name?' ('+d.brand_name+')':''}</td></tr>
+            <tr><td style="padding:8px 0;color:#666;width:40%">Company</td><td style="padding:8px 0;font-weight:700">${d.company_legal_name}${d.brand_name ? ' (' + d.brand_name + ')' : ''}</td></tr>
             <tr><td style="padding:8px 0;color:#666">Industry</td><td style="padding:8px 0;font-weight:700">${d.industry}</td></tr>
             <tr><td style="padding:8px 0;color:#666">Website</td><td style="padding:8px 0"><a href="${d.website}">${d.website}</a></td></tr>
-            <tr><td style="padding:8px 0;color:#666">HQ</td><td style="padding:8px 0;font-weight:700">${d.hq_city||''}, ${d.hq_state||''}</td></tr>
+            <tr><td style="padding:8px 0;color:#666">HQ</td><td style="padding:8px 0;font-weight:700">${d.hq_city || ''}, ${d.hq_state || ''}</td></tr>
             <tr><td style="padding:8px 0;color:#666">Locations</td><td style="padding:8px 0;font-weight:700">${d.num_locations} · ${d.location_types} · ${d.geographic_reach}</td></tr>
             <tr><td style="padding:8px 0;color:#666">Structure</td><td style="padding:8px 0;font-weight:700">${d.operation_structure}</td></tr>
             <tr><td style="padding:8px 0;color:#666">Contact</td><td style="padding:8px 0;font-weight:700">${d.contact_name} — ${d.contact_title}</td></tr>
@@ -5209,7 +5362,7 @@ module.exports = async function handler(req, res) {
             <tr><td style="padding:8px 0;color:#666">Phone</td><td style="padding:8px 0;font-weight:700">${d.contact_phone}</td></tr>
             <tr><td style="padding:8px 0;color:#666">Member Capture</td><td style="padding:8px 0;font-weight:700">${d.member_capture}</td></tr>
             <tr><td style="padding:8px 0;color:#666">Campaign Mgmt</td><td style="padding:8px 0;font-weight:700">${d.campaign_mgmt}</td></tr>
-            ${d.notes?`<tr><td style="padding:8px 0;color:#666;vertical-align:top">Notes</td><td style="padding:8px 0">${d.notes}</td></tr>`:''}
+            ${d.notes ? `<tr><td style="padding:8px 0;color:#666;vertical-align:top">Notes</td><td style="padding:8px 0">${d.notes}</td></tr>` : ''}
           </table>
         </div>
       </div>`;
@@ -5317,8 +5470,8 @@ module.exports = async function handler(req, res) {
       const { status, admin_notes } = data;
       await sql`
         UPDATE "EnterpriseInquiry"
-        SET status=COALESCE(${status||null},status),
-            admin_notes=COALESCE(${admin_notes||null},admin_notes),
+        SET status=COALESCE(${status || null},status),
+            admin_notes=COALESCE(${admin_notes || null},admin_notes),
             updated_at=NOW()
         WHERE id=${entId}`;
       // Record history entry
@@ -5333,7 +5486,7 @@ module.exports = async function handler(req, res) {
       if (status) {
         await sql`
           INSERT INTO "EnterpriseInquiryHistory" (id, inquiry_id, status, note, changed_at)
-          VALUES (gen_random_uuid()::text, ${entId}, ${status}, ${admin_notes||null}, NOW())`;
+          VALUES (gen_random_uuid()::text, ${entId}, ${status}, ${admin_notes || null}, NOW())`;
       }
       return send(res, 200, { success: true });
     }
@@ -5342,14 +5495,26 @@ module.exports = async function handler(req, res) {
 
 
   } catch (err) {
-    console.error('[perkfinity]', err.message);
+    // Detect PostgreSQL / Neon driver errors by SQLSTATE code or known message patterns.
+    // Raw DB schema information (column names, table names, constraint details) must
+    // never reach the client — it leaks internal structure and confuses users.
+    const _rawMsg = err.message || '';
+    const _isDbError = (
+      (err.code && /^[0-9A-Z]{5}$/.test(String(err.code))) ||
+      /column|relation|table|syntax error|null value|does not exist|violates|permission denied|ssl|tcp/i.test(_rawMsg)
+    );
+    // Always log the full details server-side for debugging.
+    console.error('[perkfinity]', {
+      message: _rawMsg,
+      code: err.code || 'N/A',
+      db: process.env.DATABASE_URL ? 'SET' : 'MISSING',
+      jwt: process.env.JWT_SECRET ? 'SET' : 'MISSING',
+    });
     return send(res, 500, {
       success: false,
-      error: err.message,
-      _env: {
-        DATABASE_URL: process.env.DATABASE_URL ? 'SET' : 'MISSING',
-        JWT_SECRET: process.env.JWT_SECRET ? 'SET' : 'MISSING',
-      }
+      error: _isDbError
+        ? 'An unexpected error occurred. Please try again shortly.'
+        : (_rawMsg || 'An unexpected error occurred.'),
     });
   }
 };
