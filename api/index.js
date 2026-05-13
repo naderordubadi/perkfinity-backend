@@ -523,8 +523,8 @@ module.exports = async function handler(req, res) {
 
       // Insert merchant with presence and welcome offer fields
       const [merchant] = await sql`
-        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, pos_system, business_presence, welcome_promo_code, welcome_offer_text, subscription_tier, member_limit, promo_code, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${presence}, ${welcomePromoCode}, ${data.welcome_offer_text}, ${selectedTier}, ${memberLimit}, ${promoCode}, 'active', ${now}, ${now})
+        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, pos_system, business_presence, welcome_promo_code, welcome_offer_text, subscription_tier, member_limit, promo_code, business_category, status, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${presence}, ${welcomePromoCode}, ${data.welcome_offer_text}, ${selectedTier}, ${memberLimit}, ${promoCode}, ${data.business_category || null}, 'active', ${now}, ${now})
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code
       `;
 
@@ -1427,7 +1427,7 @@ module.exports = async function handler(req, res) {
 
       if (q && cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1439,7 +1439,7 @@ module.exports = async function handler(req, res) {
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1451,7 +1451,7 @@ module.exports = async function handler(req, res) {
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1463,7 +1463,7 @@ module.exports = async function handler(req, res) {
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1475,7 +1475,7 @@ module.exports = async function handler(req, res) {
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1487,7 +1487,7 @@ module.exports = async function handler(req, res) {
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1499,7 +1499,7 @@ module.exports = async function handler(req, res) {
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1512,7 +1512,7 @@ module.exports = async function handler(req, res) {
       } else {
         // No filters — return all local/mobile merchants
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,
+          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
