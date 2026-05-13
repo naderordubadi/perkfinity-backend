@@ -2252,6 +2252,7 @@ module.exports = async function handler(req, res) {
            m.business_name as merchant_name,
            m.logo_url,
            m.business_presence,
+           m.business_category,
            m.website,
            m.welcome_promo_code,
            m.welcome_offer_text,
