@@ -103,8 +103,8 @@ async function autoEnrollUser(sql, userId, publicCode) {
 
     // 1. Add to member list
     await sql`
-      INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
-      VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${userId}, NOW())
+      INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
+      VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${userId}, 'qr_scan', NOW())
       ON CONFLICT DO NOTHING
     `;
 
@@ -1593,8 +1593,8 @@ module.exports = async function handler(req, res) {
           resolvedUserId = userId; // mark as successfully authenticated
           // Auto-enroll the user into the merchant's member list if they aren't already
           await sql`
-            INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
-            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, NOW())
+            INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
+            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, 'qr_scan', NOW())
             ON CONFLICT DO NOTHING
           `;
 
@@ -2513,12 +2513,12 @@ module.exports = async function handler(req, res) {
       const campaignId = activateMatch[1];
       const code = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6 chars
 
-      // Auto-join merchant member
+      // Auto-join merchant member (source = app_discovery — user found merchant via Near Me/Nearby Deals)
       const [campaign] = await sql`SELECT merchant_id FROM "Campaign" WHERE id = ${campaignId}`;
       if (campaign) {
         await sql`
-           INSERT INTO "MerchantMember" (id, merchant_id, user_id, created_at)
-           VALUES (gen_random_uuid()::text, ${campaign.merchant_id}, ${payload.userId}, NOW())
+           INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
+           VALUES (gen_random_uuid()::text, ${campaign.merchant_id}, ${payload.userId}, 'app_discovery', NOW())
            ON CONFLICT DO NOTHING
         `;
       }
@@ -2975,6 +2975,7 @@ module.exports = async function handler(req, res) {
       const membersResult = await sql`
         SELECT
           u.id as user_id, u.city, u.zip_code, u.full_name,
+          mm.join_source,
           COALESCE(
             json_agg(
               json_build_object(
@@ -3002,7 +3003,7 @@ module.exports = async function handler(req, res) {
         LEFT JOIN "Redemption" r ON r.user_id = u.id
         LEFT JOIN "Campaign" c ON c.id = r.campaign_id AND c.merchant_id = mm.merchant_id
         WHERE mm.merchant_id = ${merchantId}
-        GROUP BY u.id, u.city, u.zip_code, u.full_name
+        GROUP BY u.id, u.city, u.zip_code, u.full_name, mm.join_source
       `;
 
       return send(res, 200, { success: true, data: membersResult });
@@ -3433,12 +3434,24 @@ module.exports = async function handler(req, res) {
         FROM "Merchant"
       `;
 
-      // MRR computed from actual paid invoices in the last 30 days
+      // MRR: sum of the most recent paid invoice per currently active merchant.
+      // Uses actual Stripe-confirmed amounts from the Invoice table — no hardcoded prices.
+      // Only includes merchants with billing_status='active' and a live stripe_subscription_id.
+      const [mrrResult] = await sql`
+        SELECT COALESCE(SUM(last_invoice.amount_cents), 0) AS mrr_cents
+        FROM (
+          SELECT DISTINCT ON (i.merchant_id) i.amount_cents
+          FROM "Invoice" i
+          JOIN "Merchant" m ON m.id = i.merchant_id
+          WHERE i.status = 'paid'
+            AND m.billing_status = 'active'
+            AND m.stripe_subscription_id IS NOT NULL
+            AND m.account_blocked = false
+          ORDER BY i.merchant_id, i.paid_at DESC
+        ) last_invoice
+      `;
+      const mrr = (parseInt(mrrResult.mrr_cents) || 0) / 100;
       const payingCount = parseInt(stats.paying_merchants) || 0;
-      const mrrCents = invoices
-        .filter(i => i.status === 'paid' && new Date(i.paid_at) > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
-        .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
-      const mrr = mrrCents / 100;
       const totalRevenue = invoices
         .filter(i => i.status === 'paid')
         .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
@@ -3766,6 +3779,79 @@ module.exports = async function handler(req, res) {
         success: true,
         data: { sent: sentCount, failed: failCount, total_recipients: recipients.length, scheduled: isScheduled }
       });
+    }
+
+    // ── POST /api/v1/admin/send-individual-email ──────────────────
+    // Individual outreach: sends directly TO the recipient (no BCC).
+    // Uses a clean plain-text-style email — no branded banner.
+    if (method === 'POST' && url.endsWith('/admin/send-individual-email')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const data = req.body || {};
+      const { recipient_email, subject, body, sender } = data;
+
+      if (!recipient_email || !recipient_email.includes('@')) {
+        return send(res, 400, { success: false, error: 'Valid recipient email is required' });
+      }
+      if (!subject) return send(res, 400, { success: false, error: 'Subject is required' });
+      if (!body) return send(res, 400, { success: false, error: 'Body is required' });
+
+      const BREVO_KEY = process.env.BREVO_API_KEY;
+      if (!BREVO_KEY) return send(res, 500, { success: false, error: 'Brevo API key not configured' });
+
+      const SibApiV3Sdk = require('sib-api-v3-sdk');
+      const brevoClient = SibApiV3Sdk.ApiClient.instance;
+      brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+      const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+
+      // Use personal sender name for outreach feel
+      const senderMap = {
+        'hello@perkfinity.net': { name: 'Nader | Perkfinity', email: 'hello@perkfinity.net' },
+        'support@perkfinity.net': { name: 'Perkfinity Support', email: 'support@perkfinity.net' },
+        'noreply@perkfinity.net': { name: 'Perkfinity', email: 'noreply@perkfinity.net' }
+      };
+      const senderObj = senderMap[sender] || senderMap['hello@perkfinity.net'];
+
+      // Convert plain text to clean HTML paragraphs (no banner)
+      const paragraphs = body.split(/\n\n+/).map(p => {
+        const html = p.replace(/\n/g, '<br>');
+        return `<p style="margin:0 0 16px 0;">${html}</p>`;
+      }).join('');
+
+      const html_body = `<div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;line-height:1.7;font-size:15px;padding:24px 0;">${paragraphs}<p style="margin-top:32px;padding-top:16px;border-top:1px solid #eee;font-size:12px;color:#aaa;margin-bottom:0;">Perkfinity &middot; <a href="https://perkfinity.net" style="color:#5b3fa5;text-decoration:none;">perkfinity.net</a><br>If you'd prefer not to receive outreach from us, simply reply "Unsubscribe".</p></div>`;
+
+      try {
+        const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+        sendSmtpEmail.sender = senderObj;
+        sendSmtpEmail.to = [{ email: recipient_email }];
+        sendSmtpEmail.subject = subject;
+        sendSmtpEmail.htmlContent = html_body;
+        await emailApi.sendTransacEmail(sendSmtpEmail);
+
+        // Log to AnnouncementLog
+        try {
+          await sql`
+            INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, html_body)
+            VALUES (
+              ${subject},
+              ${senderObj.email},
+              'individual',
+              ${JSON.stringify({ recipient: recipient_email })}::jsonb,
+              1,
+              1,
+              false,
+              'sent',
+              ${html_body}
+            )
+          `;
+        } catch (logErr) {
+          console.error('AnnouncementLog insert error (individual):', logErr.message);
+        }
+
+        return send(res, 200, { success: true, data: { sent: 1, recipient: recipient_email } });
+      } catch (sendErr) {
+        console.error('Individual email send error:', sendErr.message || sendErr);
+        return send(res, 500, { success: false, error: sendErr.message || 'Send failed' });
+      }
     }
 
     // ── GET /api/v1/admin/announcement-history ────────────────────
