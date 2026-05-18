@@ -1070,10 +1070,13 @@ module.exports = async function handler(req, res) {
       // Mirrors Gate 1 for online/hybrid: approved merchant deleted their card.
       // Excludes pending_cancellation (winding down, no future charge needed).
       // Excludes cancelled/deleted (have their own scenes in dashboard).
+      // Excludes free_for_life: FFL merchants never go through Stripe setup,
+      //   so the absence of a payment method is expected and correct for them.
       const onlineNeedsPaymentUpdate = (
         ['online', 'hybrid'].includes(user.business_presence) &&
         user.application_status === 'approved' &&
         !user.stripe_payment_method_id &&
+        user.subscription_tier !== 'free_for_life' &&
         !['cancelled', 'deleted', 'pending_cancellation'].includes(user.billing_status)
       );
 
