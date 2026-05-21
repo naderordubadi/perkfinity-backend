@@ -1,24 +1,30 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  schemas  = ["public", "enterprise"]
 }
 
+// ─── Public Schema ────────────────────────────────────────────────────────────
+
 model User {
-  id          String       @id @default(uuid())
+  id          String         @id @default(uuid())
   email_enc   Bytes?
   phone_enc   Bytes?
   city        Bytes?
   postal_code Bytes?
-  created_at  DateTime     @default(now())
+  created_at  DateTime       @default(now())
   last_active DateTime?
   redemptions Redemption[]
   activations Activation[]
   events      Event[]
   memberships MerchantMember[]
+
+  @@schema("public")
 }
 
 model Merchant {
@@ -39,6 +45,8 @@ model Merchant {
   audit_logs        AuditLog[]
   merchant_logos    MerchantLogo?
   members           MerchantMember[]
+
+  @@schema("public")
 }
 
 model MerchantLocation {
@@ -57,6 +65,8 @@ model MerchantLocation {
   qr_codes      QrCode[]
   campaigns     Campaign[]
   events        Event[]
+
+  @@schema("public")
 }
 
 model MerchantUser {
@@ -69,6 +79,8 @@ model MerchantUser {
   status        String       @default("active")
   created_at    DateTime     @default(now())
   redemptions   Redemption[]
+
+  @@schema("public")
 }
 
 model Campaign {
@@ -89,6 +101,8 @@ model Campaign {
   redemptions                   Redemption[]
   activations                   Activation[]
   events                        Event[]
+
+  @@schema("public")
 }
 
 model QrCode {
@@ -100,6 +114,8 @@ model QrCode {
   public_code String            @unique
   status      String            @default("active")
   created_at  DateTime          @default(now())
+
+  @@schema("public")
 }
 
 model Activation {
@@ -110,6 +126,8 @@ model Activation {
   campaign        Campaign @relation(fields: [campaign_id], references: [id])
   idempotency_key String?  @unique
   created_at      DateTime @default(now())
+
+  @@schema("public")
 }
 
 model Redemption {
@@ -125,6 +143,8 @@ model Redemption {
   redeemed_at                  DateTime?
   redeemed_by_merchant_user_id String?
   redeemed_by                  MerchantUser? @relation(fields: [redeemed_by_merchant_user_id], references: [id])
+
+  @@schema("public")
 }
 
 model Subscription {
@@ -137,6 +157,8 @@ model Subscription {
   status                   String    @default("inactive")
   current_period_end       DateTime?
   created_at               DateTime  @default(now())
+
+  @@schema("public")
 }
 
 model Event {
@@ -152,6 +174,8 @@ model Event {
   location    MerchantLocation? @relation(fields: [location_id], references: [id])
   metadata    Json              @default("{}")
   created_at  DateTime          @default(now())
+
+  @@schema("public")
 }
 
 model AuditLog {
@@ -165,5 +189,73 @@ model AuditLog {
   target_id   String?
   metadata    Json      @default("{}")
   created_at  DateTime  @default(now())
+
+  @@schema("public")
 }
 
+// ─── Enterprise Schema ────────────────────────────────────────────────────────
+// Tables live in the "enterprise" PostgreSQL schema, separate from "public".
+// Inquiry data is captured from enterprise.html before a contract is signed.
+// Post-contract operational tables (EnterpriseOrg, roles, hierarchy) will be
+// added here once the first client signs.
+
+model EnterpriseInquiry {
+  id                       String                     @id @default(dbgenerated("gen_random_uuid()::text"))
+  company_legal_name       String
+  brand_name               String?
+  industry                 String
+  website                  String
+  hq_street                String?
+  hq_city                  String?
+  hq_state                 String?
+  hq_zip                   String?
+  hq_country               String                     @default("USA")
+  num_locations            Int?
+  geographic_reach         String?
+  location_types           String?
+  same_brand_name          Boolean                    @default(true)
+  brand_note               String?
+  operation_structure      String?
+  operation_structure_note String?
+  decision_authority       String?
+  decision_authority_note  String?
+  pos_system               String?
+  has_loyalty              String                     @default("no")
+  loyalty_name             String?
+  loyalty_types            String?
+  digital_deal             String?
+  digital_deal_other       String?
+  systems_integrated       String                     @default("no")
+  integration_note         String?
+  member_db_size           String?
+  member_capture           String?
+  wants_import             String                     @default("no")
+  import_count             String?
+  import_format            String?
+  campaign_mgmt            String?
+  data_visibility          String?
+  notes                    String?
+  contact_name             String
+  contact_title            String?
+  contact_email            String
+  contact_phone            String?
+  logo_url                 String?
+  status                   String                     @default("new")
+  admin_notes              String?
+  submitted_at             DateTime                   @default(now())
+  updated_at               DateTime                   @default(now()) @updatedAt
+  history                  EnterpriseInquiryHistory[]
+
+  @@schema("enterprise")
+}
+
+model EnterpriseInquiryHistory {
+  id         String            @id @default(dbgenerated("gen_random_uuid()::text"))
+  inquiry_id String
+  inquiry    EnterpriseInquiry @relation(fields: [inquiry_id], references: [id])
+  status     String
+  note       String?
+  changed_at DateTime          @default(now())
+
+  @@schema("enterprise")
+}

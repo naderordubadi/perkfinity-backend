@@ -5358,9 +5358,10 @@ module.exports = async function handler(req, res) {
 
     // ── POST /api/v1/enterprise/inquiry ───────────────────────────
     if (method === 'POST' && url.endsWith('/enterprise/inquiry')) {
-      // Ensure table exists
+      // Ensure enterprise schema and tables exist
+      await sql`CREATE SCHEMA IF NOT EXISTS enterprise`;
       await sql`
-        CREATE TABLE IF NOT EXISTS "EnterpriseInquiry" (
+        CREATE TABLE IF NOT EXISTS enterprise."EnterpriseInquiry" (
           id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
           company_legal_name TEXT NOT NULL,
           brand_name TEXT,
@@ -5409,7 +5410,7 @@ module.exports = async function handler(req, res) {
       const logoUrl = d.logo_base64 || null;
 
       const [inquiry] = await sql`
-        INSERT INTO "EnterpriseInquiry" (
+        INSERT INTO enterprise."EnterpriseInquiry" (
           company_legal_name, brand_name, industry, website,
           hq_street, hq_city, hq_state, hq_zip, hq_country,
           num_locations, geographic_reach, location_types, same_brand_name, brand_note,
@@ -5501,7 +5502,7 @@ module.exports = async function handler(req, res) {
 
       // ── Record initial history entry ──
       await sql`
-        CREATE TABLE IF NOT EXISTS "EnterpriseInquiryHistory" (
+        CREATE TABLE IF NOT EXISTS enterprise."EnterpriseInquiryHistory" (
           id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
           inquiry_id TEXT NOT NULL,
           status TEXT NOT NULL,
@@ -5509,7 +5510,7 @@ module.exports = async function handler(req, res) {
           changed_at TIMESTAMPTZ DEFAULT NOW()
         )`;
       await sql`
-        INSERT INTO "EnterpriseInquiryHistory" (id, inquiry_id, status, note, changed_at)
+        INSERT INTO enterprise."EnterpriseInquiryHistory" (id, inquiry_id, status, note, changed_at)
         VALUES (gen_random_uuid()::text, ${inquiry.id}, 'new', 'Inquiry submitted', NOW())`;
 
       return send(res, 200, { success: true, data: { id: inquiry.id } });
@@ -5522,9 +5523,9 @@ module.exports = async function handler(req, res) {
       const statusFilter = new URLSearchParams(qs).get('status') || 'all';
       let rows;
       if (statusFilter === 'all') {
-        rows = await sql`SELECT * FROM "EnterpriseInquiry" ORDER BY submitted_at DESC`;
+        rows = await sql`SELECT * FROM enterprise."EnterpriseInquiry" ORDER BY submitted_at DESC`;
       } else {
-        rows = await sql`SELECT * FROM "EnterpriseInquiry" WHERE status=${statusFilter} ORDER BY submitted_at DESC`;
+        rows = await sql`SELECT * FROM enterprise."EnterpriseInquiry" WHERE status=${statusFilter} ORDER BY submitted_at DESC`;
       }
       return send(res, 200, { success: true, data: rows });
     }
@@ -5535,8 +5536,9 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && entHistMatch) {
       if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
       const inquiryId = entHistMatch[1];
+      await sql`CREATE SCHEMA IF NOT EXISTS enterprise`;
       await sql`
-        CREATE TABLE IF NOT EXISTS "EnterpriseInquiryHistory" (
+        CREATE TABLE IF NOT EXISTS enterprise."EnterpriseInquiryHistory" (
           id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
           inquiry_id TEXT NOT NULL,
           status TEXT NOT NULL,
@@ -5545,7 +5547,7 @@ module.exports = async function handler(req, res) {
         )`;
       const rows = await sql`
         SELECT id, status, note, changed_at
-        FROM "EnterpriseInquiryHistory"
+        FROM enterprise."EnterpriseInquiryHistory"
         WHERE inquiry_id = ${inquiryId}
         ORDER BY changed_at ASC`;
       return send(res, 200, { success: true, data: rows });
@@ -5559,14 +5561,15 @@ module.exports = async function handler(req, res) {
       const data = req.body || {};
       const { status, admin_notes } = data;
       await sql`
-        UPDATE "EnterpriseInquiry"
+        UPDATE enterprise."EnterpriseInquiry"
         SET status=COALESCE(${status || null},status),
             admin_notes=COALESCE(${admin_notes || null},admin_notes),
             updated_at=NOW()
         WHERE id=${entId}`;
       // Record history entry
+      await sql`CREATE SCHEMA IF NOT EXISTS enterprise`;
       await sql`
-        CREATE TABLE IF NOT EXISTS "EnterpriseInquiryHistory" (
+        CREATE TABLE IF NOT EXISTS enterprise."EnterpriseInquiryHistory" (
           id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
           inquiry_id TEXT NOT NULL,
           status TEXT NOT NULL,
@@ -5575,7 +5578,7 @@ module.exports = async function handler(req, res) {
         )`;
       if (status) {
         await sql`
-          INSERT INTO "EnterpriseInquiryHistory" (id, inquiry_id, status, note, changed_at)
+          INSERT INTO enterprise."EnterpriseInquiryHistory" (id, inquiry_id, status, note, changed_at)
           VALUES (gen_random_uuid()::text, ${entId}, ${status}, ${admin_notes || null}, NOW())`;
       }
       return send(res, 200, { success: true });
