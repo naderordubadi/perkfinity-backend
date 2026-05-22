@@ -84,12 +84,12 @@ export class QrService {
 
     return {
       qr,
-      url: `https://perkfinity.net/qr/${public_code}`
+      url: `https://www.perkfinity.net/qr/${public_code}`
     };
   }
   async generateMerchantQrImage(public_code: string): Promise<string> {
     const qrcode = await import('qrcode');
-    const url = `https://perkfinity.net/qr/${public_code}`;
+    const url = `https://www.perkfinity.net/qr/${public_code}`;
     
     // Generate raw QR code options (high error correction for center logo)
     const qrDataUrl = await qrcode.default.toDataURL(url, {
