@@ -69,9 +69,10 @@ const ALLOWED_ORIGINS = [
   'https://www.perkfinity.net',
   'https://app.perkfinity.net',
   'https://perkfinity-app.vercel.app',  // legacy — keep for backwards compat
-  'capacitor://localhost',   // Capacitor iOS WKWebView origin (production)
-  'https://localhost',       // Capacitor iOS fallback
-  'http://localhost',        // Capacitor Android WebView origin (production)
+  'capacitor://perkfinity.net',  // Capacitor iOS WKWebView — actual prod origin (hostname set in capacitor.config.ts)
+  'capacitor://localhost',       // Capacitor iOS fallback (default hostname)
+  'https://localhost',           // Capacitor iOS https fallback
+  'http://localhost',            // Capacitor Android fallback (default hostname)
 ];
 
 function setCors(req, res) {
