@@ -69,18 +69,51 @@ const ALLOWED_ORIGINS = [
   'https://www.perkfinity.net',
   'https://app.perkfinity.net',
   'https://perkfinity-app.vercel.app',  // legacy — keep for backwards compat
-  'capacitor://localhost',   // Capacitor iOS WKWebView origin
+  'capacitor://localhost',   // Capacitor iOS WKWebView origin (production)
   'https://localhost',       // Capacitor iOS fallback
-  'null', // Allows local file:// based HTML testing
+  'http://localhost',        // Capacitor Android WebView origin (production)
 ];
 
 function setCors(req, res) {
   const origin = req.headers.origin;
   const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:'));
-  res.setHeader('Access-Control-Allow-Origin', isAllowed ? origin : '*');
+  // Only echo back the origin if it is explicitly allowed.
+  // Unknown origins get no Access-Control-Allow-Origin header — browser blocks them.
+  // Note: this does not stop curl/Postman (CORS is browser-only); rate limiting handles that.
+  if (isAllowed) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, x-admin-secret');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+}
+
+// ── Signup rate limiter (in-memory, per Vercel instance) ─────────
+// Protects /consumers/signup from bot/bulk account creation.
+// 5 attempts per IP per hour. Resets automatically after the window.
+// Note: in-memory state resets on cold start — this is acceptable for
+// basic protection. Upgrade to Redis/Upstash if stricter limits needed.
+const _signupRateMap = new Map(); // ip -> { count: number, resetAt: number }
+const SIGNUP_RATE_LIMIT = 5;
+const SIGNUP_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+function checkSignupRateLimit(req) {
+  const ip =
+    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+    req.socket?.remoteAddress ||
+    'unknown';
+  const now = Date.now();
+  const entry = _signupRateMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    _signupRateMap.set(ip, { count: 1, resetAt: now + SIGNUP_RATE_WINDOW_MS });
+    return { allowed: true };
+  }
+  if (entry.count >= SIGNUP_RATE_LIMIT) {
+    const retryAfterSec = Math.ceil((entry.resetAt - now) / 1000);
+    return { allowed: false, retryAfterSec };
+  }
+  entry.count++;
+  return { allowed: true };
 }
 
 async function autoEnrollUser(sql, userId, publicCode) {
@@ -2042,6 +2075,13 @@ module.exports = async function handler(req, res) {
     // ── POST /api/v1/consumers/signup ─────────────────────────────
 
     if (method === 'POST' && url.endsWith('/consumers/signup')) {
+      // Rate limit: 5 sign-up attempts per IP per hour
+      const rl = checkSignupRateLimit(req);
+      if (!rl.allowed) {
+        res.setHeader('Retry-After', rl.retryAfterSec);
+        return send(res, 429, { success: false, error: `Too many sign-up attempts. Please try again in ${Math.ceil(rl.retryAfterSec / 60)} minute(s).` });
+      }
+
       const data = req.body || {};
       if (!data.email || !data.password) return send(res, 400, { success: false, error: 'Missing email or password' });
 
