@@ -117,6 +117,26 @@ function checkSignupRateLimit(req) {
   return { allowed: true };
 }
 
+// ── Stripe price ID maps ─────────────────────────────────────
+// Central helper so all billing paths (checkout, admin approval,
+// reactivate, auto-charge) resolve the correct Stripe price in one place.
+const MONTHLY_PRICE_IDS = {
+  tier1:          () => process.env.STRIPE_TIER1_PRICE_ID,
+  online_starter: () => process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
+  online_growth:  () => process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
+  online_scale:   () => process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
+};
+const ANNUAL_PRICE_IDS = {
+  tier1:          () => process.env.STRIPE_TIER1_ANNUAL_PRICE_ID,
+  online_starter: () => process.env.STRIPE_ONLINE_STARTER_ANNUAL_PRICE_ID,
+  online_growth:  () => process.env.STRIPE_ONLINE_GROWTH_ANNUAL_PRICE_ID,
+  online_scale:   () => process.env.STRIPE_ONLINE_SCALE_ANNUAL_PRICE_ID,
+};
+function getPriceId(tier, billingCycle) {
+  const map = billingCycle === 'annual' ? ANNUAL_PRICE_IDS : MONTHLY_PRICE_IDS;
+  return map[tier]?.() || null;
+}
+
 async function autoEnrollUser(sql, userId, publicCode) {
   if (!publicCode || !userId) return;
   try {
@@ -145,19 +165,14 @@ async function autoEnrollUser(sql, userId, publicCode) {
     // 2. Auto-tier upgrade: check if merchant hit their free member limit
     //    If they have a saved payment method, auto-charge via Stripe.
     try {
-      const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status, billing_starts_at_member_count FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
+      const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status, billing_starts_at_member_count, billing_cycle FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
       // Check online promo billing trigger FIRST (separate from trial→tier1 logic)
       const onlinePromoTiers = ['online_starter', 'online_growth', 'online_scale'];
       if (merchant && onlinePromoTiers.includes(merchant.subscription_tier) && merchant.billing_starts_at_member_count) {
         const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
         if (countRow && countRow.cnt >= merchant.billing_starts_at_member_count) {
           const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-          const tierPriceMap = {
-            online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-            online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-            online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
-          };
-          const priceId = tierPriceMap[merchant.subscription_tier];
+          const priceId = getPriceId(merchant.subscription_tier, merchant.billing_cycle || 'monthly');
           if (STRIPE_KEY && priceId && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
             try {
               const stripeClient = Stripe(STRIPE_KEY);
@@ -172,6 +187,10 @@ async function autoEnrollUser(sql, userId, publicCode) {
               // Once billing is active, it must reflect the actual plan cap.
               const tierCapAfterPromo = merchant.subscription_tier === 'online_starter' ? 500
                 : merchant.subscription_tier === 'online_growth' ? 2500 : null;
+              // Use Stripe's period_end for the next billing date — always accurate for monthly and annual
+              const promoNextBillingDate = subscription.current_period_end
+                ? new Date(subscription.current_period_end * 1000)
+                : null;
               await sql`
                 UPDATE "Merchant"
                 SET billing_starts_at_member_count = NULL,
@@ -180,7 +199,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
                     stripe_subscription_id = ${subscription.id},
                     billing_status = 'active',
                     subscription_started_at = NOW(),
-                    next_billing_date = NOW() + INTERVAL '30 days',
+                    next_billing_date = ${promoNextBillingDate},
                     updated_at = NOW()
                 WHERE id = ${qrData.merchant_id}
               `;
@@ -222,13 +241,17 @@ async function autoEnrollUser(sql, userId, publicCode) {
                 // Omit default_payment_method so Stripe safely falls back to the customer's portal-managed default card
                 metadata: { merchant_id: merchant.id }
               });
+              // Use Stripe's period_end for the next billing date (correct for both monthly and annual)
+              const trialNextBillingDate = subscription.current_period_end
+                ? new Date(subscription.current_period_end * 1000)
+                : null;
               await sql`
                 UPDATE "Merchant" 
                 SET subscription_tier = 'tier1', 
                     stripe_subscription_id = ${subscription.id},
                     billing_status = 'active',
                     subscription_started_at = NOW(),
-                    next_billing_date = NOW() + INTERVAL '30 days',
+                    next_billing_date = ${trialNextBillingDate},
                     updated_at = NOW() 
                 WHERE id = ${qrData.merchant_id}
               `;
@@ -608,6 +631,18 @@ module.exports = async function handler(req, res) {
         VALUES (gen_random_uuid()::text, ${merchant.id}, ${public_code}, 'active', ${now})
       `;
 
+      // ── Contractor attribution (Task 3) ────────────────────────────
+      const _signupRefCode = (data.contractor_code || '').toUpperCase().trim();
+      if (_signupRefCode) {
+        const [_signupContr] = await sql`SELECT id FROM "Contractor" WHERE referral_code = ${_signupRefCode} AND status = 'active' LIMIT 1`;
+        if (_signupContr) {
+          await sql`
+            INSERT INTO "ContractorMerchantAttribution" (id, contractor_id, merchant_id, source, created_at, updated_at)
+            VALUES (gen_random_uuid()::text, ${_signupContr.id}, ${merchant.id}, 'self', NOW(), NOW())
+            ON CONFLICT (merchant_id) DO NOTHING
+          `;
+        }
+      }
       const JWT_SECRET = process.env.JWT_SECRET;
       if (!JWT_SECRET) return send(res, 500, { success: false, error: 'JWT_SECRET not configured' });
       const accessToken = jwt.sign(
@@ -700,19 +735,24 @@ module.exports = async function handler(req, res) {
       const logoUrl = data.logo_url || null;
 
       // Create merchant row
+      const billingCycleValue = data.billing_cycle === 'annual' ? 'annual' : 'monthly';
+
       const [merchant] = await sql`
         INSERT INTO "Merchant" (
           id, business_name, contact_name, phone, website, business_presence,
           welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
           promo_code, status, billing_status, application_status,
           business_category, billing_starts_at_member_count, is_multi_location,
+          billing_cycle,
           stripe_customer_id, stripe_payment_method_id, logo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
           ${data.tier}, ${memberLimit}, ${promoCode}, 'active', 'trial',
           'pending', ${data.category},
-          ${billingStartsAt}, ${isMultiLocation}, ${customer.id}, ${data.stripe_payment_method_id}, ${logoUrl}, ${now}, ${now}
+          ${billingStartsAt}, ${isMultiLocation},
+          ${billingCycleValue},
+          ${customer.id}, ${data.stripe_payment_method_id}, ${logoUrl}, ${now}, ${now}
         )
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, application_status
       `;
@@ -849,19 +889,24 @@ module.exports = async function handler(req, res) {
         });
       }
 
+      const billingCycleValue2 = data.billing_cycle === 'annual' ? 'annual' : 'monthly';
+
       const [merchant] = await sql`
         INSERT INTO "Merchant" (
           id, business_name, contact_name, phone, website, business_presence,
           welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
           promo_code, status, billing_status, application_status,
           business_category, billing_starts_at_member_count, is_multi_location,
+          billing_cycle,
           stripe_customer_id, logo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
           ${data.tier}, ${memberLimit}, ${promoCode}, 'active', null,
           'in_progress', ${data.category},
-          ${billingStartsAt}, ${isMultiLocation}, ${customer.id}, null, ${now}, ${now}
+          ${billingStartsAt}, ${isMultiLocation},
+          ${billingCycleValue2},
+          ${customer.id}, null, ${now}, ${now}
         )
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, stripe_customer_id
       `;
@@ -887,6 +932,18 @@ module.exports = async function handler(req, res) {
       await sql`INSERT INTO "QrCode" (id, merchant_id, public_code, status, created_at)
         VALUES (gen_random_uuid()::text, ${merchant.id}, ${public_code}, 'active', ${now})`;
 
+      // ── Contractor attribution (Task 3) ────────────────────────────
+      const _applyRefCode = (data.contractor_code || '').toUpperCase().trim();
+      if (_applyRefCode) {
+        const [_applyContr] = await sql`SELECT id FROM "Contractor" WHERE referral_code = ${_applyRefCode} AND status = 'active' LIMIT 1`;
+        if (_applyContr) {
+          await sql`
+            INSERT INTO "ContractorMerchantAttribution" (id, contractor_id, merchant_id, source, created_at, updated_at)
+            VALUES (gen_random_uuid()::text, ${_applyContr.id}, ${merchant.id}, 'self', NOW(), NOW())
+            ON CONFLICT (merchant_id) DO NOTHING
+          `;
+        }
+      }
       const JWT_SECRET = process.env.JWT_SECRET;
       const accessToken = jwt.sign(
         { userId: muRow.id, merchantId: merchant.id, role: 'owner' },
@@ -1361,6 +1418,10 @@ module.exports = async function handler(req, res) {
 
       // ── Multi-location flag (Online/Hybrid merchants) ─────────────
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS is_multi_location BOOLEAN NOT NULL DEFAULT false`;
+
+      // ── Annual billing cycle tracking (Task 4) ────────────────
+      // 'monthly' | 'annual'. Existing merchants default to 'monthly' safely.
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS billing_cycle TEXT DEFAULT 'monthly'`;
 
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
@@ -3270,7 +3331,6 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "MerchantLocation" ADD COLUMN IF NOT EXISTS "suite" TEXT`;
       return send(res, 200, { success: true, message: "Task 3 DB fields added!" });
     }
-
     // ── Promo code + auto-tier migration ──────────────────────────
     if (url === '/api/v1/migrate-promo' && method === 'GET') {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "member_limit" INT DEFAULT 100`;
@@ -3369,6 +3429,132 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, token });
     }
 
+    // ── Helper: verify rep JWT Bearer token ─────────────────────
+    function verifyRepAuth(req) {
+      const authHeader = req.headers['authorization'] || '';
+      if (!authHeader.startsWith('Bearer ')) return null;
+      try {
+        const payload = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+        return payload.role === 'rep' ? payload.contractorId : null;
+      } catch (e) { return null; }
+    }
+
+    // ── POST /api/v1/rep/login ───────────────────────────────────
+    if (method === 'POST' && url.endsWith('/rep/login')) {
+      const { email, password } = req.body || {};
+      if (!email || !password) return send(res, 400, { success: false, error: 'Email and password are required.' });
+      const [repLoginRow] = await sql`
+        SELECT id, full_name, email, referral_code, status, w9_status, ica_status, password_hash
+        FROM "Contractor"
+        WHERE email = ${email.toLowerCase().trim()}
+        LIMIT 1
+      `;
+      if (!repLoginRow) return send(res, 401, { success: false, error: 'Invalid email or password.' });
+      if (!repLoginRow.password_hash) return send(res, 401, { success: false, error: 'Portal access not yet set up. Please contact your administrator.' });
+      const repMatch = await bcrypt.compare(password, repLoginRow.password_hash);
+      if (!repMatch) return send(res, 401, { success: false, error: 'Invalid email or password.' });
+      const repToken = jwt.sign({ role: 'rep', contractorId: repLoginRow.id }, process.env.JWT_SECRET, { expiresIn: '8h' });
+      return send(res, 200, { success: true, token: repToken, contractor: {
+        id: repLoginRow.id, full_name: repLoginRow.full_name, email: repLoginRow.email,
+        referral_code: repLoginRow.referral_code, status: repLoginRow.status
+      }});
+    }
+
+    // ── GET /api/v1/rep/profile ──────────────────────────────────
+    if (method === 'GET' && url === '/api/v1/rep/profile') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const [repProfile] = await sql`
+        SELECT id, full_name, legal_name, email, phone, referral_code, status, w9_status, ica_status, entity_type, created_at
+        FROM "Contractor" WHERE id = ${repId} LIMIT 1
+      `;
+      if (!repProfile) return send(res, 404, { success: false, error: 'Not found.' });
+      return send(res, 200, { success: true, data: repProfile });
+    }
+
+    // ── GET /api/v1/rep/merchants ────────────────────────────────
+    if (method === 'GET' && url === '/api/v1/rep/merchants') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const repMerchants = await sql`
+        SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
+               a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
+               me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
+               me.billing_status, me.contact_name
+        FROM "ContractorMerchantAttribution" a
+        JOIN "Merchant" me ON me.id = a.merchant_id
+        WHERE a.contractor_id = ${repId}
+        ORDER BY a.created_at DESC
+      `;
+      return send(res, 200, { success: true, data: repMerchants });
+    }
+
+    // ── GET /api/v1/rep/earnings ─────────────────────────────────
+    if (method === 'GET' && url === '/api/v1/rep/earnings') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const [repW9] = await sql`SELECT w9_status FROM "Contractor" WHERE id = ${repId} LIMIT 1`;
+      if (!repW9) return send(res, 404, { success: false, error: 'Not found.' });
+      if (repW9.w9_status !== 'verified')
+        return send(res, 200, { success: true, gated: true, message: 'Complete your W-9 to view earnings.' });
+      const repPayoutsAll = await sql`SELECT status, total_cents, commission_cents, retainer_cents FROM "ContractorPayout" WHERE contractor_id = ${repId}`;
+      const total_earned_cents = repPayoutsAll.reduce((s, p) => s + (p.total_cents || 0), 0);
+      const pending_cents = repPayoutsAll.filter(p => p.status === 'pending' || p.status === 'approved').reduce((s, p) => s + (p.total_cents || 0), 0);
+      const paid_cents = repPayoutsAll.filter(p => p.status === 'paid').reduce((s, p) => s + (p.total_cents || 0), 0);
+      const [repRule] = await sql`SELECT commission_rate, commission_duration_months, retainer_cents FROM "ContractorCompensationRule" WHERE contractor_id = ${repId} LIMIT 1`;
+      return send(res, 200, { success: true, gated: false, data: { total_earned_cents, pending_cents, paid_cents, rule: repRule || null } });
+    }
+
+    // ── GET /api/v1/rep/payouts ──────────────────────────────────
+    if (method === 'GET' && url === '/api/v1/rep/payouts') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const [repPayW9] = await sql`SELECT w9_status FROM "Contractor" WHERE id = ${repId} LIMIT 1`;
+      if (!repPayW9) return send(res, 404, { success: false, error: 'Not found.' });
+      if (repPayW9.w9_status !== 'verified')
+        return send(res, 200, { success: true, gated: true, message: 'Complete your W-9 to view payouts.' });
+      const repPayoutsList = await sql`
+        SELECT id, period_start, period_end, commission_cents, retainer_cents,
+               milestone_bonus_cents, retention_bonus_cents, special_bonus_cents,
+               total_cents, status, payment_method, paid_at, created_at
+        FROM "ContractorPayout"
+        WHERE contractor_id = ${repId}
+        ORDER BY created_at DESC
+      `;
+      return send(res, 200, { success: true, data: repPayoutsList });
+    }
+
+    // ── GET /api/v1/rep/quota ────────────────────────────────────
+    if (method === 'GET' && url === '/api/v1/rep/quota') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const [repQuota] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${repId} LIMIT 1`;
+      if (!repQuota) return send(res, 200, { success: true, data: null });
+      const [repQCount] = await sql`
+        SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a
+        JOIN "Merchant" m ON m.id = a.merchant_id
+        WHERE a.contractor_id = ${repId} AND m.billing_status = 'active'
+      `;
+      const rqCount = repQCount?.cnt || 0;
+      const rqPercent = Math.min(Math.round((rqCount / (repQuota.quota_target || 30)) * 100), 100);
+      const rqEnd = new Date(repQuota.period_end);
+      const rqDays = Math.max(0, Math.ceil((rqEnd - new Date()) / 86400000));
+      return send(res, 200, { success: true, data: { period: repQuota, current_count: rqCount, percent: rqPercent, days_remaining: rqDays } });
+    }
+
+    // ── GET /api/v1/rep/territory ────────────────────────────────
+    if (method === 'GET' && url === '/api/v1/rep/territory') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const [repTerritory] = await sql`
+        SELECT id, label, zip_codes, status, assigned_at
+        FROM "ContractorTerritory"
+        WHERE contractor_id = ${repId} AND status = 'active'
+        LIMIT 1
+      `;
+      return send(res, 200, { success: true, data: repTerritory || null });
+    }
+
     // ── GET /api/v1/admin/merchants ─────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/merchants')) {
       const merchants = await sql`
@@ -3461,7 +3647,7 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url.endsWith('/admin/billing')) {
       // Invoices with merchant names and billing details
       const invoices = await sql`
-        SELECT i.*, m.business_name as merchant_name, m.subscription_tier, m.next_billing_date, m.billing_status
+        SELECT i.*, m.business_name as merchant_name, m.subscription_tier, m.next_billing_date, m.billing_status, m.billing_cycle
         FROM "Invoice" i
         LEFT JOIN "Merchant" m ON m.id = i.merchant_id
         ORDER BY i.created_at DESC
@@ -3478,13 +3664,16 @@ module.exports = async function handler(req, res) {
         FROM "Merchant"
       `;
 
-      // MRR: sum of the most recent paid invoice per currently active merchant.
-      // Uses actual Stripe-confirmed amounts from the Invoice table — no hardcoded prices.
-      // Only includes merchants with billing_status='active' and a live stripe_subscription_id.
-      const [mrrResult] = await sql`
-        SELECT COALESCE(SUM(last_invoice.amount_cents), 0) AS mrr_cents
+      // MRR + ARR: split by billing_cycle using the most recent paid invoice per active merchant.
+      // MRR = monthly subscribers only. ARR = annual subscribers only (actual Stripe invoice amounts).
+      // Blended MRR = MRR + ARR/12 (total monthly-equivalent recurring revenue across all cycle types).
+      const [revenueResult] = await sql`
+        SELECT
+          COALESCE(SUM(amount_cents) FILTER (WHERE billing_cycle IS NULL OR billing_cycle = 'monthly'), 0) AS mrr_cents,
+          COALESCE(SUM(amount_cents) FILTER (WHERE billing_cycle = 'annual'), 0) AS arr_cents,
+          COUNT(*) FILTER (WHERE billing_cycle = 'annual') AS annual_merchant_count
         FROM (
-          SELECT DISTINCT ON (i.merchant_id) i.amount_cents
+          SELECT DISTINCT ON (i.merchant_id) i.amount_cents, m.billing_cycle
           FROM "Invoice" i
           JOIN "Merchant" m ON m.id = i.merchant_id
           WHERE i.status = 'paid'
@@ -3492,9 +3681,12 @@ module.exports = async function handler(req, res) {
             AND m.stripe_subscription_id IS NOT NULL
             AND m.account_blocked = false
           ORDER BY i.merchant_id, i.paid_at DESC
-        ) last_invoice
+        ) last_invoices
       `;
-      const mrr = (parseInt(mrrResult.mrr_cents) || 0) / 100;
+      const mrr = (parseInt(revenueResult.mrr_cents) || 0) / 100;
+      const arr = (parseInt(revenueResult.arr_cents) || 0) / 100;
+      const blendedMrr = mrr + arr / 12;
+      const annualMerchantCount = parseInt(revenueResult.annual_merchant_count) || 0;
       const payingCount = parseInt(stats.paying_merchants) || 0;
       const totalRevenue = invoices
         .filter(i => i.status === 'paid')
@@ -3506,6 +3698,9 @@ module.exports = async function handler(req, res) {
           invoices,
           stats: {
             mrr: mrr.toFixed(2),
+            arr: arr.toFixed(2),
+            blended_mrr: blendedMrr.toFixed(2),
+            annual_merchant_count: annualMerchantCount,
             paying_merchants: payingCount,
             pending_cancel: parseInt(stats.pending_cancel) || 0,
             failed_payments: parseInt(stats.failed_payments) || 0,
@@ -4120,20 +4315,15 @@ module.exports = async function handler(req, res) {
         } else {
           try {
             const stripeClient = Stripe(STRIPE_KEY);
-            const tierPriceMap = {
-              online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-              online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-              online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
-            };
-            const priceId = tierPriceMap[merchant.subscription_tier];
+            const priceId = getPriceId(merchant.subscription_tier, merchant.billing_cycle || 'monthly');
             if (!priceId) {
-              billingWarning = `No Stripe price ID configured for tier '${merchant.subscription_tier}'. Set STRIPE_ONLINE_${(merchant.subscription_tier || '').toUpperCase().replace('ONLINE_', '')}_PRICE_ID in environment variables.`;
+              billingWarning = `No Stripe price ID configured for tier '${merchant.subscription_tier}' (cycle: ${merchant.billing_cycle || 'monthly'}). Check STRIPE_*_PRICE_ID env vars.`;
             } else {
               const subscription = await stripeClient.subscriptions.create({
                 customer: merchant.stripe_customer_id,
                 items: [{ price: priceId }],
                 default_payment_method: merchant.stripe_payment_method_id,
-                metadata: { merchant_id: merchantId, trigger: 'admin_approval' }
+                metadata: { merchant_id: merchantId, trigger: 'admin_approval', billing_cycle: merchant.billing_cycle || 'monthly' }
               });
               stripeSubscriptionId = subscription.id;
             }
@@ -4423,35 +4613,7 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { sent, failed, total: users.length } });
     }
 
-    // ── DELETE /api/v1/admin/merchants/:id — Admin hard delete
-    const adminDeleteMatch = url.match(/\/api\/v1\/admin\/merchants\/([a-zA-Z0-9_-]+)$/);
-    if (method === 'DELETE' && adminDeleteMatch) {
-      if (!verifyAdminAuth(req)) {
-        return send(res, 401, { success: false, error: 'Unauthorized' });
-      }
-      const merchantId = adminDeleteMatch[1];
-      const [merchant] = await sql`SELECT id, stripe_customer_id FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
-      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
 
-      // Cancel Stripe customer if exists
-      if (merchant.stripe_customer_id) {
-        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-        if (STRIPE_KEY) {
-          try { await Stripe(STRIPE_KEY).customers.del(merchant.stripe_customer_id); } catch (e) { /* non-fatal */ }
-        }
-      }
-
-      // Wipe all related rows
-      await sql`DELETE FROM "Redemption" WHERE campaign_id IN (SELECT id FROM "Campaign" WHERE merchant_id = ${merchantId})`;
-      await sql`DELETE FROM "MerchantMember" WHERE merchant_id = ${merchantId}`;
-      await sql`DELETE FROM "QrCode" WHERE merchant_id = ${merchantId}`;
-      await sql`DELETE FROM "Campaign" WHERE merchant_id = ${merchantId}`;
-      await sql`DELETE FROM "MerchantLocation" WHERE merchant_id = ${merchantId}`;
-      await sql`DELETE FROM "MerchantUser" WHERE merchant_id = ${merchantId}`;
-      await sql`DELETE FROM "Merchant" WHERE id = ${merchantId}`;
-
-      return send(res, 200, { success: true, message: `Merchant ${merchantId} permanently deleted.` });
-    }
 
     // ══════════════════════════════════════════════════════════════
     // STRIPE BILLING ENDPOINTS
@@ -4600,10 +4762,15 @@ module.exports = async function handler(req, res) {
       const merchantId = data.merchant_id;
       if (!merchantId) return send(res, 400, { success: false, error: 'merchant_id is required' });
 
+      // Accept billing_cycle from the frontend toggle ('monthly' | 'annual')
+      const billingCycle = data.billing_cycle === 'annual' ? 'annual' : 'monthly';
+
       const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-      const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
-      if (!STRIPE_KEY || !PRICE_ID) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
       const stripeClient = Stripe(STRIPE_KEY);
+
+      const checkoutPriceId = getPriceId('tier1', billingCycle);
+      if (!checkoutPriceId) return send(res, 500, { success: false, error: `Stripe price not configured for tier1 (${billingCycle})` });
 
       const origin = data.origin || 'https://perkfinity.net';
 
@@ -4631,15 +4798,15 @@ module.exports = async function handler(req, res) {
         await sql`UPDATE "Merchant" SET stripe_customer_id = ${customerId} WHERE id = ${merchantId}`;
       }
 
-      // Create Checkout Session for $29.99/mo subscription
+      // Create Checkout Session with the correct billing cycle price
       const session = await stripeClient.checkout.sessions.create({
         customer: customerId,
         payment_method_types: ['card'],
-        line_items: [{ price: PRICE_ID, quantity: 1 }],
+        line_items: [{ price: checkoutPriceId, quantity: 1 }],
         mode: 'subscription',
         success_url: `${origin}/signup.html?payment=success&merchant_id=${merchantId}&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${origin}/signup.html?payment=cancelled&merchant_id=${merchantId}`,
-        metadata: { merchant_id: merchantId }
+        metadata: { merchant_id: merchantId, billing_cycle: billingCycle }
       });
 
       return send(res, 200, {
@@ -4688,10 +4855,14 @@ module.exports = async function handler(req, res) {
         || sub?.default_payment_method
         || null;
 
+      // Read billing_cycle from Stripe session metadata (set when checkout was created)
+      const confirmedBillingCycle = session.metadata?.billing_cycle || 'monthly';
+
       await sql`
         UPDATE "Merchant"
         SET billing_status        = 'active',
             subscription_tier     = 'tier1',
+            billing_cycle         = ${confirmedBillingCycle},
             stripe_customer_id    = ${session.customer},
             stripe_subscription_id = ${sub?.id || null},
             stripe_payment_method_id = ${paymentMethodId},
@@ -4903,7 +5074,8 @@ module.exports = async function handler(req, res) {
                stripe_customer_id, stripe_subscription_id, subscription_started_at,
                next_billing_date, member_limit, promo_code, created_at,
                payment_failed_at, payment_failure_reminder_count,
-               billing_starts_at_member_count, application_status, business_presence
+               billing_starts_at_member_count, application_status, business_presence,
+               billing_cycle
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -4939,6 +5111,7 @@ module.exports = async function handler(req, res) {
           billing_starts_at_member_count: merchant.billing_starts_at_member_count || null,
           application_status: merchant.application_status || null,
           business_presence: merchant.business_presence || 'physical',
+          billing_cycle: merchant.billing_cycle || 'monthly',
           invoices
         }
       });
@@ -4960,7 +5133,7 @@ module.exports = async function handler(req, res) {
       const stripeClient = Stripe(STRIPE_KEY);
 
       const [merchant] = await sql`
-        SELECT id, stripe_customer_id, stripe_subscription_id, account_blocked, subscription_tier
+        SELECT id, stripe_customer_id, stripe_subscription_id, account_blocked, subscription_tier, billing_cycle
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -4973,15 +5146,9 @@ module.exports = async function handler(req, res) {
         return send(res, 400, { success: false, error: 'You already have an active subscription.' });
       }
 
-      // Resolve the correct price ID for this merchant's tier
-      const tierPriceMap = {
-        tier1: process.env.STRIPE_TIER1_PRICE_ID,
-        online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-        online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-        online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
-      };
-      const reactivatePriceId = tierPriceMap[merchant.subscription_tier] || process.env.STRIPE_TIER1_PRICE_ID;
-      if (!reactivatePriceId) return send(res, 500, { success: false, error: `No Stripe price configured for tier '${merchant.subscription_tier}'` });
+      // Resolve the correct price ID for this merchant's tier and billing cycle
+      const reactivatePriceId = getPriceId(merchant.subscription_tier, merchant.billing_cycle || 'monthly') || process.env.STRIPE_TIER1_PRICE_ID;
+      if (!reactivatePriceId) return send(res, 500, { success: false, error: `No Stripe price configured for tier '${merchant.subscription_tier}' (cycle: ${merchant.billing_cycle || 'monthly'})` });
 
       // ── Check if Stripe customer has a default payment method ──────
       let stripeCustomer;
@@ -5004,7 +5171,7 @@ module.exports = async function handler(req, res) {
           mode: 'subscription',
           success_url: `${origin}/dashboard.html?reactivated=true&merchant_id=${merchantId}&session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${origin}/dashboard.html?tab=billing`,
-          metadata: { merchant_id: merchantId, trigger: 'reactivation', tier: merchant.subscription_tier }
+          metadata: { merchant_id: merchantId, trigger: 'reactivation', tier: merchant.subscription_tier, billing_cycle: merchant.billing_cycle || 'monthly' }
         });
         return send(res, 200, { success: false, needs_payment_method: true, checkout_url: session.url });
       }
@@ -5014,7 +5181,7 @@ module.exports = async function handler(req, res) {
         const subscription = await stripeClient.subscriptions.create({
           customer: merchant.stripe_customer_id,
           items: [{ price: reactivatePriceId }],
-          metadata: { merchant_id: merchantId, trigger: 'reactivation', tier: merchant.subscription_tier }
+          metadata: { merchant_id: merchantId, trigger: 'reactivation', tier: merchant.subscription_tier, billing_cycle: merchant.billing_cycle || 'monthly' }
         });
 
         await sql`
@@ -5623,6 +5790,973 @@ module.exports = async function handler(req, res) {
           VALUES (gen_random_uuid()::text, ${entId}, ${status}, ${admin_notes || null}, NOW())`;
       }
       return send(res, 200, { success: true });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // CONTRACTOR MANAGEMENT — Task 3
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── GET /api/v1/admin/migrate-contractors ──────────────────────────
+    // Creates all 8 contractor tables + seeds milestone config. Idempotent.
+    if (method === 'GET' && url === '/api/v1/admin/migrate-contractors') {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      await sql`CREATE TABLE IF NOT EXISTS "Contractor" (
+        id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        full_name      TEXT NOT NULL,
+        legal_name     TEXT,
+        email          TEXT UNIQUE NOT NULL,
+        phone          TEXT,
+        address        TEXT,
+        referral_code  TEXT UNIQUE NOT NULL,
+        status         TEXT NOT NULL DEFAULT 'inactive',
+        w9_status      TEXT NOT NULL DEFAULT 'not_submitted',
+        ica_status     TEXT NOT NULL DEFAULT 'not_sent',
+        payment_method TEXT NOT NULL DEFAULT 'check',
+        notes          TEXT,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorCompensationRule" (
+        id                         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id              TEXT NOT NULL UNIQUE REFERENCES "Contractor"(id),
+        commission_rate            NUMERIC(5,4) NOT NULL DEFAULT 0.25,
+        commission_duration_months INT          NOT NULL DEFAULT 12,
+        retainer_cents             INT          NOT NULL DEFAULT 0,
+        created_at                 TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        updated_at                 TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorMerchantAttribution" (
+        id                     TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id          TEXT NOT NULL REFERENCES "Contractor"(id),
+        merchant_id            TEXT NOT NULL UNIQUE REFERENCES "Merchant"(id),
+        commission_start_date  DATE,
+        commission_end_date    DATE,
+        retention_bonuses_paid INT  NOT NULL DEFAULT 0,
+        source                 TEXT NOT NULL DEFAULT 'self',
+        created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorPayout" (
+        id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id         TEXT NOT NULL REFERENCES "Contractor"(id),
+        period_start          DATE NOT NULL,
+        period_end            DATE NOT NULL,
+        commission_cents      INT  NOT NULL DEFAULT 0,
+        retainer_cents        INT  NOT NULL DEFAULT 0,
+        milestone_bonus_cents INT  NOT NULL DEFAULT 0,
+        retention_bonus_cents INT  NOT NULL DEFAULT 0,
+        special_bonus_cents   INT  NOT NULL DEFAULT 0,
+        total_cents           INT  NOT NULL DEFAULT 0,
+        breakdown             JSONB,
+        status                TEXT NOT NULL DEFAULT 'pending',
+        approved_by           TEXT,
+        approved_at           TIMESTAMPTZ,
+        payment_method        TEXT,
+        payment_reference     TEXT,
+        paid_at               TIMESTAMPTZ,
+        created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorEarningsSummary" (
+        id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id        TEXT NOT NULL REFERENCES "Contractor"(id),
+        year                 INT  NOT NULL,
+        commission_ytd_cents INT  NOT NULL DEFAULT 0,
+        retainer_ytd_cents   INT  NOT NULL DEFAULT 0,
+        bonus_ytd_cents      INT  NOT NULL DEFAULT 0,
+        total_ytd_cents      INT  NOT NULL DEFAULT 0,
+        updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(contractor_id, year)
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS "SystemMilestoneConfig" (
+        id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        threshold   INT  NOT NULL UNIQUE,
+        bonus_cents INT  NOT NULL,
+        label       TEXT NOT NULL,
+        is_active   BOOLEAN NOT NULL DEFAULT true,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorMilestoneRecord" (
+        id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id TEXT NOT NULL REFERENCES "Contractor"(id),
+        milestone_id  TEXT NOT NULL REFERENCES "SystemMilestoneConfig"(id),
+        payout_id     TEXT REFERENCES "ContractorPayout"(id),
+        earned_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(contractor_id, milestone_id)
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorSpecialBonus" (
+        id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id TEXT NOT NULL REFERENCES "Contractor"(id),
+        label         TEXT NOT NULL,
+        amount_cents  INT  NOT NULL CHECK (amount_cents > 0 AND amount_cents <= 200000),
+        reason        TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending',
+        payout_id     TEXT REFERENCES "ContractorPayout"(id),
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await sql`
+        INSERT INTO "SystemMilestoneConfig" (id, threshold, bonus_cents, label)
+        VALUES
+          (gen_random_uuid()::text, 100,  25000, '100 Paying Subscribers'),
+          (gen_random_uuid()::text, 250,  50000, '250 Paying Subscribers'),
+          (gen_random_uuid()::text, 500, 100000, '500 Paying Subscribers')
+        ON CONFLICT (threshold) DO NOTHING
+      `;
+      // Idempotent: add taxbandits_submission_id column for W-9 webhook correlation
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS taxbandits_submission_id TEXT`;
+      // Idempotent: rep portal password hash
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS password_hash TEXT`;
+      // Idempotent: entity type for 1099-NEC eligibility
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS entity_type TEXT`;
+      // Territory table — one active territory per rep
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorTerritory" (
+        id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id TEXT NOT NULL REFERENCES "Contractor"(id) ON DELETE CASCADE,
+        label         TEXT NOT NULL,
+        zip_codes     TEXT[] NOT NULL DEFAULT '{}',
+        status        TEXT NOT NULL DEFAULT 'active',
+        assigned_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_contractor_territory_active
+        ON "ContractorTerritory"(contractor_id) WHERE status = 'active'`;
+      // Quota period table — one-time 3-month qualification gate per rep
+      await sql`CREATE TABLE IF NOT EXISTS "ContractorQuotaPeriod" (
+        id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        contractor_id TEXT NOT NULL UNIQUE REFERENCES "Contractor"(id) ON DELETE CASCADE,
+        period_start  DATE NOT NULL,
+        period_end    DATE NOT NULL,
+        quota_target  INT  NOT NULL DEFAULT 30,
+        status        TEXT NOT NULL DEFAULT 'active',
+        alert_sent    BOOLEAN NOT NULL DEFAULT false,
+        locked_at     TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      return send(res, 200, { success: true, message: 'All 10 contractor tables up to date: password_hash, entity_type, ContractorTerritory, ContractorQuotaPeriod added.' });
+    }
+
+    // ── GET /api/v1/contractors/validate-code?code=REF-XXXXX ──────────
+    // PUBLIC — validates a contractor referral code before signup
+    if (method === 'GET' && url.startsWith('/api/v1/contractors/validate-code')) {
+      const vcCode = ((new URL('http://x' + url)).searchParams.get('code') || '').toUpperCase().trim();
+      if (!vcCode) return send(res, 400, { success: false, error: 'code is required.' });
+      const [vcContractor] = await sql`
+        SELECT id, full_name, referral_code
+        FROM "Contractor"
+        WHERE referral_code = ${vcCode} AND status = 'active'
+        LIMIT 1
+      `;
+      if (!vcContractor) return send(res, 200, { valid: false });
+      return send(res, 200, { valid: true, contractor_id: vcContractor.id, contractor_name: vcContractor.full_name, referral_code: vcContractor.referral_code });
+    }
+
+    // ── PATCH /api/v1/merchants/referral-code ─────────────────────────
+    // Merchant-auth required. Sets referral code for resume flow.
+    // Idempotent: returns success if attribution already exists.
+    if (method === 'PATCH' && url.endsWith('/merchants/referral-code')) {
+      const rcAuthHeader = req.headers.authorization;
+      if (!rcAuthHeader || !rcAuthHeader.startsWith('Bearer ')) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let rcDecoded;
+      try { rcDecoded = jwt.verify(rcAuthHeader.slice(7), process.env.JWT_SECRET); }
+      catch (e) { return send(res, 401, { success: false, error: 'Invalid or expired token' }); }
+      const rcMerchantId = rcDecoded.merchantId;
+      if (!rcMerchantId) return send(res, 401, { success: false, error: 'Invalid token claims' });
+      const [rcExisting] = await sql`SELECT id FROM "ContractorMerchantAttribution" WHERE merchant_id = ${rcMerchantId} LIMIT 1`;
+      if (rcExisting) return send(res, 200, { success: true, message: 'Referral attribution already recorded.' });
+      const rcData = req.body || {};
+      const rcCode = (rcData.contractor_code || '').toUpperCase().trim();
+      if (rcCode) {
+        const [rcContractor] = await sql`
+          SELECT id FROM "Contractor" WHERE referral_code = ${rcCode} AND status = 'active' LIMIT 1
+        `;
+        if (!rcContractor) return send(res, 400, { success: false, error: 'Referral code not found or inactive.' });
+        await sql`
+          INSERT INTO "ContractorMerchantAttribution" (id, contractor_id, merchant_id, source, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${rcContractor.id}, ${rcMerchantId}, 'self', NOW(), NOW())
+          ON CONFLICT (merchant_id) DO NOTHING
+        `;
+      }
+      // If no code (= "I don't have one"), no attribution row — correct behaviour.
+      return send(res, 200, { success: true, message: 'Referral preference recorded.' });
+    }
+
+    // ── POST /api/v1/admin/contractors ────────────────────────────────
+    // Create a new contractor. Auto-generates referral_code.
+    if (method === 'POST' && url === '/api/v1/admin/contractors') {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const ncData = req.body || {};
+      if (!ncData.full_name || !ncData.email) return send(res, 400, { success: false, error: 'full_name and email are required.' });
+      if (!ncData.password) return send(res, 400, { success: false, error: 'password is required to enable portal access.' });
+      if (ncData.password.length < 8) return send(res, 400, { success: false, error: 'password must be at least 8 characters.' });
+      const ncEmail = ncData.email.toLowerCase().trim();
+      const [ncExisting] = await sql`SELECT id FROM "Contractor" WHERE email = ${ncEmail} LIMIT 1`;
+      if (ncExisting) return send(res, 409, { success: false, error: 'A contractor with this email already exists.' });
+      // Generate REF-{FIRSTNAME_UP_TO_6}{LAST_INITIAL}{4_DIGITS}
+      const ncParts = ncData.full_name.trim().split(/\s+/);
+      const ncFirst = (ncParts[0] || 'X').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 6);
+      const ncLastInit = ncParts.length > 1 ? (ncParts[ncParts.length - 1][0] || '').toUpperCase().replace(/[^A-Z]/, '') : '';
+      let ncRefCode; let ncAttempts = 0;
+      do {
+        const ncDigits = Math.floor(1000 + Math.random() * 9000);
+        ncRefCode = `REF-${ncFirst}${ncLastInit}${ncDigits}`;
+        const [ncClash] = await sql`SELECT id FROM "Contractor" WHERE referral_code = ${ncRefCode} LIMIT 1`;
+        if (!ncClash) break;
+        ncAttempts++;
+      } while (ncAttempts < 10);
+      // Hash password before storing
+      const ncPasswordHash = await bcrypt.hash(ncData.password, 10);
+      // Validate entity_type if provided
+      const validEntityTypes = ['individual', 'sole_proprietor', 'llc_single', 'llc_partnership', 's_corporation', 'c_corporation', 'other'];
+      const ncEntityType = validEntityTypes.includes(ncData.entity_type) ? ncData.entity_type : null;
+      const [ncContractor] = await sql`
+        INSERT INTO "Contractor" (id, full_name, legal_name, email, phone, address, referral_code, status, w9_status, ica_status, payment_method, notes, password_hash, entity_type, created_at, updated_at)
+        VALUES (
+          gen_random_uuid()::text,
+          ${ncData.full_name.trim()},
+          ${ncData.legal_name || null},
+          ${ncEmail},
+          ${ncData.phone || null},
+          ${ncData.address || null},
+          ${ncRefCode},
+          ${ncData.status || 'inactive'},
+          ${ncData.w9_status || 'not_submitted'},
+          ${ncData.ica_status || 'not_sent'},
+          ${ncData.payment_method || 'check'},
+          ${ncData.notes || null},
+          ${ncPasswordHash},
+          ${ncEntityType},
+          NOW(), NOW()
+        ) RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, w9_status, ica_status, payment_method, notes, entity_type, created_at, updated_at
+      `;
+      if (ncData.commission_rate !== undefined || ncData.commission_duration_months !== undefined || ncData.retainer_cents !== undefined) {
+        const ncRate = Math.min(Math.max(parseFloat(ncData.commission_rate) || 0.25, 0), 0.50);
+        const ncDur = Math.min(Math.max(parseInt(ncData.commission_duration_months) || 12, 1), 24);
+        const ncRet = Math.max(parseInt(ncData.retainer_cents) || 0, 0);
+        await sql`
+          INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${ncContractor.id}, ${ncRate}, ${ncDur}, ${ncRet}, NOW(), NOW())
+          ON CONFLICT (contractor_id) DO UPDATE SET commission_rate=${ncRate}, commission_duration_months=${ncDur}, retainer_cents=${ncRet}, updated_at=NOW()
+        `;
+      }
+      return send(res, 201, { success: true, data: ncContractor });
+    }
+
+      // ── GET /api/v1/admin/contractors ─────────────────────────────────
+      if (method === 'GET' && url === '/api/v1/admin/contractors') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const lcList = await sql`
+          SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents,
+            COUNT(DISTINCT a.merchant_id)::int AS attributed_merchants,
+            COUNT(DISTINCT CASE WHEN a.commission_start_date IS NOT NULL THEN a.merchant_id END)::int AS active_attributed,
+            COALESCE(SUM(CASE WHEN p.status='paid' THEN p.total_cents ELSE 0 END)::int, 0) AS total_paid_cents
+          FROM "Contractor" c
+          LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
+          LEFT JOIN "ContractorMerchantAttribution" a ON a.contractor_id = c.id
+          LEFT JOIN "ContractorPayout" p ON p.contractor_id = c.id
+          GROUP BY c.id, r.commission_rate, r.commission_duration_months, r.retainer_cents
+          ORDER BY c.created_at DESC
+        `;
+        return send(res, 200, { success: true, data: lcList });
+      }
+
+      // ── GET /api/v1/admin/contractors/:id ─────────────────────────────
+      {
+        const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)$/);
+        if (m && method === 'GET') {
+          if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+          const [gcRow] = await sql`
+            SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents
+            FROM "Contractor" c
+            LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
+            WHERE c.id = ${m[1]}
+          `;
+          if (!gcRow) return send(res, 404, { success: false, error: 'Contractor not found.' });
+          // Fetch related data in parallel
+          const [gcMerchants, gcBonuses, gcPayouts] = await Promise.all([
+            sql`SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
+                       a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
+                       me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
+                       me.billing_status, me.contact_name
+                FROM "ContractorMerchantAttribution" a
+                JOIN "Merchant" me ON me.id = a.merchant_id
+                WHERE a.contractor_id = ${m[1]}
+                ORDER BY a.created_at DESC`,
+            sql`SELECT * FROM "ContractorSpecialBonus" WHERE contractor_id = ${m[1]} ORDER BY created_at DESC`,
+            sql`SELECT * FROM "ContractorPayout" WHERE contractor_id = ${m[1]} ORDER BY created_at DESC`,
+          ]);
+          // Territory and quota (new tables — defensive)
+          let gcTerritory = null; let gcQuota = null;
+          try {
+            const [t] = await sql`SELECT * FROM "ContractorTerritory" WHERE contractor_id = ${m[1]} AND status = 'active' LIMIT 1`;
+            gcTerritory = t || null;
+          } catch (_) {}
+          try {
+            const [q] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
+            if (q) {
+              const [qc] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+              const qCount = qc?.cnt || 0;
+              gcQuota = { ...q, current_count: qCount, percent: Math.min(Math.round((qCount / (q.quota_target || 30)) * 100), 100), days_remaining: Math.max(0, Math.ceil((new Date(q.period_end) - new Date()) / 86400000)) };
+            }
+          } catch (_) {}
+          return send(res, 200, { success: true, data: { ...gcRow, attributed_merchants: gcMerchants, special_bonuses: gcBonuses, payouts: gcPayouts, territory: gcTerritory, quota: gcQuota } });
+        }
+      }
+
+      // ── PATCH /api/v1/admin/contractors/:id ───────────────────────────
+      {
+        const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)$/);
+        if (m && method === 'PATCH') {
+          if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+          const ucData = req.body || {};
+          const ucValidEntityTypes = ['individual', 'sole_proprietor', 'llc_single', 'llc_partnership', 's_corporation', 'c_corporation', 'other'];
+          const ucEntityType = ucData.entity_type && ucValidEntityTypes.includes(ucData.entity_type) ? ucData.entity_type : (ucData.entity_type === null ? null : undefined);
+          const [ucUpdated] = await sql`
+            UPDATE "Contractor"
+            SET full_name      = COALESCE(${ucData.full_name || null}, full_name),
+                legal_name     = COALESCE(${ucData.legal_name != null ? ucData.legal_name : null}, legal_name),
+                email          = COALESCE(${ucData.email ? ucData.email.toLowerCase().trim() : null}, email),
+                phone          = COALESCE(${ucData.phone != null ? ucData.phone : null}, phone),
+                address        = COALESCE(${ucData.address != null ? ucData.address : null}, address),
+                status         = COALESCE(${ucData.status || null}, status),
+                w9_status      = COALESCE(${ucData.w9_status || null}, w9_status),
+                ica_status     = COALESCE(${ucData.ica_status || null}, ica_status),
+                payment_method = COALESCE(${ucData.payment_method || null}, payment_method),
+                notes          = COALESCE(${ucData.notes != null ? ucData.notes : null}, notes),
+                entity_type    = COALESCE(${ucEntityType !== undefined ? ucEntityType : null}, entity_type),
+                updated_at     = NOW()
+            WHERE id = ${m[1]}
+            RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, w9_status, ica_status, payment_method, notes, entity_type, created_at, updated_at
+          `;
+          if (!ucUpdated) return send(res, 404, { success: false, error: 'Contractor not found.' });
+          return send(res, 200, { success: true, data: ucUpdated });
+        }
+      }
+
+    // ── GET /api/v1/admin/contractors/1099-report ─────────────────────
+    // Must appear BEFORE the generic /:id route to avoid ID collision.
+    if (method === 'GET' && url.startsWith('/api/v1/admin/contractors/1099-report')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const rptYear = parseInt((new URL('http://x' + url)).searchParams.get('year')) || new Date().getFullYear();
+      const rptData = await sql`
+        SELECT c.id, c.full_name, c.legal_name, c.email, c.address,
+          COALESCE(SUM(p.total_cents)::int, 0) AS total_paid_cents,
+          COALESCE(SUM(p.total_cents)::int, 0) >= 60000 AS requires_1099
+        FROM "Contractor" c
+        JOIN "ContractorPayout" p ON p.contractor_id = c.id
+        WHERE p.status = 'paid' AND EXTRACT(YEAR FROM p.paid_at) = ${rptYear}
+        GROUP BY c.id, c.full_name, c.legal_name, c.email, c.address
+        ORDER BY total_paid_cents DESC
+      `;
+      return send(res, 200, { success: true, year: rptYear, data: rptData });
+    }
+
+    // ── GET /api/v1/admin/contractor-payouts ──────────────────────────
+    if (method === 'GET' && url.startsWith('/api/v1/admin/contractor-payouts') && !url.match(/\/(approve|mark-paid|void)$/)) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const cpQp = new URL('http://x' + url).searchParams;
+      const cpContId = cpQp.get('contractor_id') || null;
+      const cpStatus = cpQp.get('status') || null;
+      const cpList = await sql`
+        SELECT p.*, c.full_name AS contractor_name
+        FROM "ContractorPayout" p
+        JOIN "Contractor" c ON c.id = p.contractor_id
+        WHERE (${cpContId}::text IS NULL OR p.contractor_id = ${cpContId})
+          AND (${cpStatus}::text IS NULL OR p.status = ${cpStatus})
+        ORDER BY p.created_at DESC
+        LIMIT 200
+      `;
+      return send(res, 200, { success: true, data: cpList });
+    }
+
+    // ── PATCH /api/v1/admin/contractor-payouts/:id/approve ────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractor-payouts\/([^/]+)\/approve$/);
+      if (m && method === 'PATCH') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const appPayout = await sql`
+          UPDATE "ContractorPayout"
+          SET status = 'approved', approved_at = NOW(), updated_at = NOW()
+          WHERE id = ${m[1]} AND status = 'pending'
+          RETURNING *
+        `;
+        if (!appPayout[0]) return send(res, 404, { success: false, error: 'Payout not found or not in pending status.' });
+        return send(res, 200, { success: true, data: appPayout[0] });
+      }
+    }
+
+    // ── PATCH /api/v1/admin/contractor-payouts/:id/mark-paid ──────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractor-payouts\/([^/]+)\/mark-paid$/);
+      if (m && method === 'PATCH') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const mpData = req.body || {};
+        const mpPayout = await sql`
+          UPDATE "ContractorPayout"
+          SET status = 'paid',
+              payment_method = ${mpData.payment_method || null},
+              payment_reference = ${mpData.payment_reference || null},
+              paid_at = NOW(),
+              updated_at = NOW()
+          WHERE id = ${m[1]} AND status = 'approved'
+          RETURNING *
+        `;
+        if (!mpPayout[0]) return send(res, 404, { success: false, error: 'Payout not found or not in approved status.' });
+        const mp = mpPayout[0];
+        const mpYear = new Date().getFullYear();
+        const mpBonusCents = mp.milestone_bonus_cents + mp.retention_bonus_cents + mp.special_bonus_cents;
+        await sql`
+          INSERT INTO "ContractorEarningsSummary" (id, contractor_id, year, commission_ytd_cents, retainer_ytd_cents, bonus_ytd_cents, total_ytd_cents, updated_at)
+          VALUES (gen_random_uuid()::text, ${mp.contractor_id}, ${mpYear}, ${mp.commission_cents}, ${mp.retainer_cents}, ${mpBonusCents}, ${mp.total_cents}, NOW())
+          ON CONFLICT (contractor_id, year) DO UPDATE SET
+            commission_ytd_cents = "ContractorEarningsSummary".commission_ytd_cents + ${mp.commission_cents},
+            retainer_ytd_cents   = "ContractorEarningsSummary".retainer_ytd_cents   + ${mp.retainer_cents},
+            bonus_ytd_cents      = "ContractorEarningsSummary".bonus_ytd_cents      + ${mpBonusCents},
+            total_ytd_cents      = "ContractorEarningsSummary".total_ytd_cents      + ${mp.total_cents},
+            updated_at           = NOW()
+        `;
+        return send(res, 200, { success: true, data: mp });
+      }
+    }
+
+    // ── PATCH /api/v1/admin/contractor-payouts/:id/void ───────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractor-payouts\/([^/]+)\/void$/);
+      if (m && method === 'PATCH') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const vpPayout = await sql`
+          UPDATE "ContractorPayout"
+          SET status = 'voided', updated_at = NOW()
+          WHERE id = ${m[1]} AND status IN ('pending', 'approved')
+          RETURNING *
+        `;
+        if (!vpPayout[0]) return send(res, 404, { success: false, error: 'Payout not found or already paid/voided.' });
+        return send(res, 200, { success: true, data: vpPayout[0] });
+      }
+    }
+
+    // ── GET /api/v1/admin/milestone-config ────────────────────────────
+    if (method === 'GET' && url === '/api/v1/admin/milestone-config') {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const mcTiers = await sql`SELECT * FROM "SystemMilestoneConfig" ORDER BY threshold ASC`;
+      return send(res, 200, { success: true, data: mcTiers });
+    }
+
+    // ── PATCH /api/v1/admin/milestone-config/:id ──────────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/milestone-config\/([^/]+)$/);
+      if (m && method === 'PATCH') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const mcData = req.body || {};
+        const mcUpdated = await sql`
+          UPDATE "SystemMilestoneConfig"
+          SET bonus_cents = COALESCE(${mcData.bonus_cents != null ? mcData.bonus_cents : null}, bonus_cents),
+              label       = COALESCE(${mcData.label || null}, label),
+              is_active   = COALESCE(${mcData.is_active != null ? mcData.is_active : null}, is_active),
+              updated_at  = NOW()
+          WHERE id = ${m[1]}
+          RETURNING *
+        `;
+        if (!mcUpdated[0]) return send(res, 404, { success: false, error: 'Milestone config not found.' });
+        return send(res, 200, { success: true, data: mcUpdated[0] });
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/:id/compensation ───────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/compensation$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const compData = req.body || {};
+        const compRate = Math.min(Math.max(parseFloat(compData.commission_rate) || 0.25, 0), 0.50);
+        const compDur  = Math.min(Math.max(parseInt(compData.commission_duration_months) || 12, 1), 24);
+        const compRet  = Math.max(parseInt(compData.retainer_cents) || 0, 0);
+        const [compRule] = await sql`
+          INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${m[1]}, ${compRate}, ${compDur}, ${compRet}, NOW(), NOW())
+          ON CONFLICT (contractor_id) DO UPDATE SET
+            commission_rate = ${compRate},
+            commission_duration_months = ${compDur},
+            retainer_cents = ${compRet},
+            updated_at = NOW()
+          RETURNING *
+        `;
+        return send(res, 200, { success: true, data: compRule });
+      }
+    }
+
+    // ── GET /api/v1/admin/contractors/:id/merchants ───────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/merchants$/);
+      if (m && method === 'GET') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const cmMerchants = await sql`
+          SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
+                 a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
+                 me.id AS merchant_id, me.business_name, me.subscription_tier,
+                 me.billing_status, me.contact_name, mu.email AS merchant_email
+          FROM "ContractorMerchantAttribution" a
+          JOIN "Merchant" me ON me.id = a.merchant_id
+          LEFT JOIN "MerchantUser" mu ON mu.merchant_id = me.id AND mu.role = 'owner'
+          WHERE a.contractor_id = ${m[1]}
+          ORDER BY a.created_at DESC
+        `;
+        return send(res, 200, { success: true, data: cmMerchants });
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/attribute-merchant ─────────────
+    if (method === 'POST' && url.endsWith('/admin/contractors/attribute-merchant')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const amData = req.body || {};
+      if (!amData.contractor_id || !amData.merchant_id) return send(res, 400, { success: false, error: 'contractor_id and merchant_id are required.' });
+      const [amContr] = await sql`SELECT id FROM "Contractor" WHERE id = ${amData.contractor_id} LIMIT 1`;
+      if (!amContr) return send(res, 404, { success: false, error: 'Contractor not found.' });
+      const [amMerch] = await sql`SELECT id FROM "Merchant" WHERE id = ${amData.merchant_id} LIMIT 1`;
+      if (!amMerch) return send(res, 404, { success: false, error: 'Merchant not found.' });
+      const amAttr = await sql`
+        INSERT INTO "ContractorMerchantAttribution" (id, contractor_id, merchant_id, source, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${amData.contractor_id}, ${amData.merchant_id}, 'manual', NOW(), NOW())
+        ON CONFLICT (merchant_id) DO NOTHING
+        RETURNING *
+      `;
+      if (!amAttr[0]) return send(res, 409, { success: false, error: 'This merchant is already attributed to a contractor.' });
+      return send(res, 201, { success: true, data: amAttr[0] });
+    }
+
+    // ── DELETE /api/v1/admin/contractors/attribute-merchant/:merchant_id
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/attribute-merchant\/([^/]+)$/);
+      if (m && method === 'DELETE') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const dmDeleted = await sql`
+          DELETE FROM "ContractorMerchantAttribution"
+          WHERE merchant_id = ${m[1]} AND commission_start_date IS NULL
+          RETURNING id
+        `;
+      if (!dmDeleted[0]) return send(res, 400, { success: false, error: 'Attribution not found or commission has already started — cannot remove.' });
+        return send(res, 200, { success: true, message: 'Attribution removed.' });
+      }
+    }
+
+    // ── GET /api/v1/admin/merchants/:id/attribution ───────────────────
+    // Returns the contractor/rep info attributed to a specific merchant.
+    {
+      const m = url.match(/^\/api\/v1\/admin\/merchants\/([^/]+)\/attribution$/);
+      if (m && method === 'GET') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const [attr] = await sql`
+          SELECT
+            a.id            AS attribution_id,
+            a.contractor_id,
+            a.merchant_id,
+            a.source,
+            a.commission_start_date,
+            a.commission_end_date,
+            a.retention_bonuses_paid,
+            a.created_at    AS attributed_at,
+            c.full_name     AS contractor_name,
+            c.referral_code,
+            c.email         AS contractor_email,
+            c.phone         AS contractor_phone,
+            c.status        AS contractor_status,
+            c.start_date    AS contractor_start_date,
+            r.commission_rate,
+            r.commission_duration_months,
+            r.retainer_cents
+          FROM "ContractorMerchantAttribution" a
+          JOIN "Contractor"                   c ON c.id = a.contractor_id
+          LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = a.contractor_id
+          WHERE a.merchant_id = ${m[1]}
+          LIMIT 1
+        `;
+        if (!attr) return send(res, 200, { success: true, data: null }); // no attribution = unattributed
+        return send(res, 200, { success: true, data: attr });
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/:id/special-bonus ─────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/special-bonus$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const sbData = req.body || {};
+        if (!sbData.label || !sbData.amount_cents) return send(res, 400, { success: false, error: 'label and amount_cents are required.' });
+        const sbAmt = parseInt(sbData.amount_cents);
+        if (sbAmt <= 0 || sbAmt > 200000) return send(res, 400, { success: false, error: 'amount_cents must be between 1 and 200000 (max $2,000).' });
+        const [sbBonus] = await sql`
+          INSERT INTO "ContractorSpecialBonus" (id, contractor_id, label, amount_cents, reason, status, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${m[1]}, ${sbData.label}, ${sbAmt}, ${sbData.reason || null}, 'pending', NOW(), NOW())
+          RETURNING *
+        `;
+        return send(res, 201, { success: true, data: sbBonus });
+      }
+    }
+
+    // ── GET /api/v1/admin/contractors/:id/special-bonuses ────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/special-bonuses$/);
+      if (m && method === 'GET') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const sbList = await sql`
+          SELECT * FROM "ContractorSpecialBonus"
+          WHERE contractor_id = ${m[1]}
+          ORDER BY created_at DESC
+        `;
+        return send(res, 200, { success: true, data: sbList });
+      }
+    }
+
+    // ── PATCH /api/v1/admin/contractors/:id/special-bonuses/:bid ──────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/special-bonuses\/([^/]+)$/);
+      if (m && method === 'PATCH') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const sbpData = req.body || {};
+        const sbpUpdated = await sql`
+          UPDATE "ContractorSpecialBonus"
+          SET status     = COALESCE(${sbpData.status || null}, status),
+              label      = COALESCE(${sbpData.label || null}, label),
+              reason     = COALESCE(${sbpData.reason != null ? sbpData.reason : null}, reason),
+              updated_at = NOW()
+          WHERE id = ${m[2]} AND contractor_id = ${m[1]} AND status = 'pending'
+          RETURNING *
+        `;
+        if (!sbpUpdated[0]) return send(res, 404, { success: false, error: 'Bonus not found or already processed.' });
+        return send(res, 200, { success: true, data: sbpUpdated[0] });
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/run-payouts ────────────────────
+    // Manual payout calculation trigger (same algorithm as the monthly cron).
+    if (method === 'POST' && url.endsWith('/admin/contractors/run-payouts')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const rpInput = req.body || {};
+      let rpStart, rpEnd;
+      if (rpInput.period_start && rpInput.period_end) {
+        rpStart = new Date(rpInput.period_start);
+        rpEnd   = new Date(rpInput.period_end);
+      } else {
+        const rpNow = new Date();
+        rpStart = new Date(rpNow.getFullYear(), rpNow.getMonth() - 1, 1);
+        rpEnd   = new Date(rpNow.getFullYear(), rpNow.getMonth(), 0);
+      }
+      const rpPs = rpStart.toISOString().slice(0, 10);
+      const rpPe = rpEnd.toISOString().slice(0, 10);
+      const rpContractors = await sql`
+        SELECT c.id, c.full_name, c.w9_status,
+               r.commission_rate, r.commission_duration_months, r.retainer_cents
+        FROM "Contractor" c
+        JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
+        WHERE c.status = 'active'
+      `;
+      const rpResults = [];
+      for (const rc of rpContractors) {
+        const rpAttrs = await sql`
+          SELECT a.id, a.merchant_id, a.commission_start_date, a.commission_end_date, a.retention_bonuses_paid
+          FROM "ContractorMerchantAttribution" a
+          JOIN "Merchant" m ON m.id = a.merchant_id
+          WHERE a.contractor_id = ${rc.id}
+            AND a.commission_start_date IS NOT NULL
+            AND a.commission_start_date::date <= ${rpPe}
+            AND (a.commission_end_date IS NULL OR a.commission_end_date::date >= ${rpPs})
+            AND m.subscription_tier NOT IN ('free_for_life', 'trial', 'free')
+        `;
+        let rpComm = 0; let rpRet = 0; const rpMb = [];
+        for (const ra of rpAttrs) {
+          const rpInvs = await sql`
+            SELECT amount_cents FROM "Invoice"
+            WHERE merchant_id = ${ra.merchant_id}
+              AND paid_at >= ${rpStart} AND paid_at <= ${rpEnd}
+              AND amount_cents > 0 AND status = 'paid'
+          `;
+          const rpInvTotal = rpInvs.reduce((s, i) => s + i.amount_cents, 0);
+          const rpMerchComm = Math.round(rpInvTotal * parseFloat(rc.commission_rate));
+          rpComm += rpMerchComm;
+          const raStart = new Date(ra.commission_start_date);
+          const raMos = Math.floor((rpEnd - raStart) / (30 * 24 * 60 * 60 * 1000));
+          let raMerchRet = 0; let raNewRet = ra.retention_bonuses_paid;
+          if (rpInvTotal > 0) {
+            if (raMos >= 3 && raNewRet < 1) { raMerchRet += rpMerchComm; raNewRet = 1; }
+            if (raMos >= 6 && raNewRet < 2) { raMerchRet += rpMerchComm; raNewRet = 2; }
+          }
+          rpRet += raMerchRet;
+          if (raNewRet > ra.retention_bonuses_paid) {
+            await sql`UPDATE "ContractorMerchantAttribution" SET retention_bonuses_paid = ${raNewRet}, updated_at = NOW() WHERE id = ${ra.id}`;
+          }
+          if (rpMerchComm > 0 || raMerchRet > 0) rpMb.push({ merchant_id: ra.merchant_id, invoice_total: rpInvTotal, commission: rpMerchComm, retention_bonus: raMerchRet, months_elapsed: raMos });
+        }
+        const [rpSubRow] = await sql`
+          SELECT COUNT(DISTINCT a2.merchant_id)::int AS cnt
+          FROM "ContractorMerchantAttribution" a2
+          JOIN "Merchant" m2 ON m2.id = a2.merchant_id
+          WHERE a2.contractor_id = ${rc.id}
+            AND a2.commission_start_date IS NOT NULL
+            AND m2.subscription_tier NOT IN ('free_for_life', 'trial', 'free')
+            AND m2.billing_status NOT IN ('cancelled', 'deleted')
+        `;
+        const rpSubCount = rpSubRow?.cnt || 0;
+        const rpMilestones = await sql`
+          SELECT mc.id, mc.bonus_cents, mc.label
+          FROM "SystemMilestoneConfig" mc
+          WHERE mc.is_active = true AND mc.threshold <= ${rpSubCount}
+            AND NOT EXISTS (SELECT 1 FROM "ContractorMilestoneRecord" mr WHERE mr.contractor_id = ${rc.id} AND mr.milestone_id = mc.id)
+          ORDER BY mc.threshold ASC
+        `;
+        const rpMilCents = rpMilestones.reduce((s, mm) => s + mm.bonus_cents, 0);
+        const rpSpecBonuses = await sql`
+          SELECT id, amount_cents, label FROM "ContractorSpecialBonus"
+          WHERE contractor_id = ${rc.id} AND status = 'pending'
+        `;
+        const rpSpecCents = rpSpecBonuses.reduce((s, b) => s + b.amount_cents, 0);
+        const rpRetainer = parseInt(rc.retainer_cents) || 0;
+        const rpTotal = rpComm + rpRetainer + rpMilCents + rpRet + rpSpecCents;
+        if (rpTotal > 0 && rc.w9_status === 'verified') {
+          const [rpPayout] = await sql`
+            INSERT INTO "ContractorPayout" (
+              id, contractor_id, period_start, period_end,
+              commission_cents, retainer_cents, milestone_bonus_cents,
+              retention_bonus_cents, special_bonus_cents, total_cents,
+              breakdown, status, created_at, updated_at
+            ) VALUES (
+              gen_random_uuid()::text, ${rc.id}, ${rpPs}, ${rpPe},
+              ${rpComm}, ${rpRetainer}, ${rpMilCents},
+              ${rpRet}, ${rpSpecCents}, ${rpTotal},
+              ${JSON.stringify({ active_subscribers: rpSubCount, merchant_breakdown: rpMb, milestones: rpMilestones.map(mm => mm.label), special_bonuses: rpSpecBonuses.map(b => b.label) })},
+              'pending', NOW(), NOW()
+            ) RETURNING id
+          `;
+          for (const rpMs of rpMilestones) {
+            await sql`
+              INSERT INTO "ContractorMilestoneRecord" (id, contractor_id, milestone_id, payout_id, earned_at)
+              VALUES (gen_random_uuid()::text, ${rc.id}, ${rpMs.id}, ${rpPayout.id}, NOW())
+              ON CONFLICT (contractor_id, milestone_id) DO NOTHING
+            `;
+          }
+          if (rpSpecBonuses.length > 0) {
+            const rpSpecIds = rpSpecBonuses.map(b => b.id);
+            await sql`UPDATE "ContractorSpecialBonus" SET status = 'paid', payout_id = ${rpPayout.id}, updated_at = NOW() WHERE id = ANY(${rpSpecIds})`;
+          }
+          rpResults.push({ contractor_id: rc.id, name: rc.full_name, payout_id: rpPayout.id, total_cents: rpTotal });
+        }
+      }
+      return send(res, 200, { success: true, data: { payouts_created: rpResults.length, period: `${rpPs} to ${rpPe}`, results: rpResults } });
+    }
+
+    // ── POST /api/v1/admin/contractors/:id/send-w9-request ────────────────
+    // Sends a TaxBandits SmartCollect W-9 request email to the contractor.
+    // Stores the returned SubmissionId on the Contractor row for webhook correlation.
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/send-w9-request$/);
+      if (method === 'POST' && m) {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const contractorId = m[1];
+
+        // Fetch contractor
+        const [ctr] = await sql`
+          SELECT id, full_name, legal_name, email, w9_status
+          FROM "Contractor"
+          WHERE id = ${contractorId}
+          LIMIT 1
+        `;
+        if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
+
+        // Guard: already verified — no need to send
+        if (ctr.w9_status === 'verified') {
+          return send(res, 400, { success: false, error: 'W-9 is already verified for this contractor.' });
+        }
+
+        // Call TaxBandits API
+        const taxbandits = require('./lib/taxbandits');
+        let submissionId;
+        try {
+          const tbResult = await taxbandits.sendW9Request(
+            ctr.email,
+            ctr.legal_name || ctr.full_name,
+            ctr.id
+          );
+          submissionId = tbResult.submissionId;
+          console.log(`[send-w9-request] TaxBandits W-9 request sent for contractor ${ctr.id} (${ctr.email}). SubmissionId=${submissionId}`);
+        } catch (tbErr) {
+          console.error(`[send-w9-request] TaxBandits API error for contractor ${ctr.id}:`, tbErr.message);
+          return send(res, 502, { success: false, error: `TaxBandits API error: ${tbErr.message}` });
+        }
+
+        // Store SubmissionId so the webhook can map the event back to this contractor
+        await sql`
+          UPDATE "Contractor"
+          SET
+            taxbandits_submission_id = ${submissionId || null},
+            updated_at               = NOW()
+          WHERE id = ${contractorId}
+        `;
+
+        return send(res, 200, { success: true, message: `W-9 request sent to ${ctr.email}.`, submission_id: submissionId || null });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // TERRITORY ENDPOINTS
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── GET /api/v1/admin/contractors/:id/territory ───────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/territory$/);
+      if (m && method === 'GET') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const [terr] = await sql`SELECT * FROM "ContractorTerritory" WHERE contractor_id = ${m[1]} AND status = 'active' LIMIT 1`;
+        return send(res, 200, { success: true, data: terr || null });
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/:id/territory ──────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/territory$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const { label, zip_codes } = req.body || {};
+        if (!label || !Array.isArray(zip_codes) || zip_codes.length === 0)
+          return send(res, 400, { success: false, error: 'label and zip_codes (non-empty array) are required.' });
+        const cleanZips = zip_codes.map(z => String(z).trim()).filter(Boolean);
+        // Check for overlaps with other active reps
+        const terrOverlaps = await sql`
+          SELECT t.label AS territory_label, t.zip_codes, c.full_name AS contractor_name
+          FROM "ContractorTerritory" t
+          JOIN "Contractor" c ON c.id = t.contractor_id
+          WHERE t.status = 'active' AND t.contractor_id != ${m[1]} AND t.zip_codes && ${cleanZips}
+        `;
+        // Revoke existing active territory for this rep
+        await sql`UPDATE "ContractorTerritory" SET status = 'revoked', updated_at = NOW() WHERE contractor_id = ${m[1]} AND status = 'active'`;
+        // Insert new territory
+        const [newTerr] = await sql`
+          INSERT INTO "ContractorTerritory" (id, contractor_id, label, zip_codes, status, assigned_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${m[1]}, ${label}, ${cleanZips}, 'active', NOW(), NOW())
+          RETURNING *
+        `;
+        return send(res, 201, { success: true, data: newTerr, overlap_warning: terrOverlaps.length > 0 ? terrOverlaps : null });
+      }
+    }
+
+    // ── DELETE /api/v1/admin/contractors/:id/territory ────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/territory$/);
+      if (m && method === 'DELETE') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        await sql`UPDATE "ContractorTerritory" SET status = 'revoked', updated_at = NOW() WHERE contractor_id = ${m[1]} AND status = 'active'`;
+        return send(res, 200, { success: true, message: 'Territory revoked.' });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // QUOTA ENDPOINTS — ORDER MATTERS: more specific paths first
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── POST /api/v1/admin/contractors/:id/quota/evaluate ─────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/quota\/evaluate$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const [qEval] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
+        if (!qEval) return send(res, 404, { success: false, error: 'No quota period found for this rep.' });
+        if (qEval.status !== 'active') return send(res, 400, { success: false, error: `Quota is already ${qEval.status}.` });
+        const [qEvalCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+        const qCount = qEvalCount?.cnt || 0;
+        const qNow = new Date(); const qEnd = new Date(qEval.period_end);
+        if (qCount >= qEval.quota_target) {
+          await sql`UPDATE "ContractorQuotaPeriod" SET status = 'met', locked_at = NOW(), updated_at = NOW() WHERE id = ${qEval.id}`;
+          return send(res, 200, { success: true, result: 'met', current_count: qCount, quota_target: qEval.quota_target });
+        } else if (qNow > qEnd) {
+          await sql`UPDATE "ContractorQuotaPeriod" SET status = 'missed', alert_sent = true, updated_at = NOW() WHERE id = ${qEval.id}`;
+          return send(res, 200, { success: true, result: 'missed', current_count: qCount, quota_target: qEval.quota_target });
+        } else {
+          return send(res, 200, { success: true, result: 'active', current_count: qCount, quota_target: qEval.quota_target, days_remaining: Math.ceil((qEnd - qNow) / 86400000) });
+        }
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/:id/quota/extend ───────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/quota\/extend$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const daysToAdd = Math.min(Math.max(parseInt((req.body || {}).days) || 30, 1), 180);
+        const [qExt] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
+        if (!qExt) return send(res, 404, { success: false, error: 'No quota period found.' });
+        const [qExtUpdated] = await sql`
+          UPDATE "ContractorQuotaPeriod"
+          SET period_end = period_end + (${daysToAdd} || ' days')::INTERVAL,
+              status = 'active', updated_at = NOW()
+          WHERE id = ${qExt.id}
+          RETURNING *
+        `;
+        return send(res, 200, { success: true, data: qExtUpdated });
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/:id/quota/send-reminder ────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/quota\/send-reminder$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const [qRemRep] = await sql`SELECT full_name, email FROM "Contractor" WHERE id = ${m[1]} LIMIT 1`;
+        if (!qRemRep) return send(res, 404, { success: false, error: 'Contractor not found.' });
+        const [qRemQuota] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
+        const [qRemCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+        const qRCount = qRemCount?.cnt || 0; const qTarget = qRemQuota?.quota_target || 30;
+        const qEnd = qRemQuota ? new Date(qRemQuota.period_end) : null;
+        const qDaysLeft = qEnd ? Math.max(0, Math.ceil((qEnd - new Date()) / 86400000)) : null;
+        console.log(`[quota-reminder] Reminder for ${qRemRep.full_name} (${qRemRep.email}): ${qRCount}/${qTarget} merchants, ${qDaysLeft} days left`);
+        // Mark alert_sent so we don't double-remind automatically
+        if (qRemQuota) await sql`UPDATE "ContractorQuotaPeriod" SET alert_sent = true, updated_at = NOW() WHERE id = ${qRemQuota.id}`;
+        // TODO: Wire to email API (Brevo/SendGrid) — same pattern as W-9 request
+        return send(res, 200, { success: true, message: `Reminder logged for ${qRemRep.email}. Email integration: coming soon.`, rep: { full_name: qRemRep.full_name, email: qRemRep.email, current_count: qRCount, quota_target: qTarget, days_remaining: qDaysLeft } });
+      }
+    }
+
+    // ── GET /api/v1/admin/contractors/:id/quota ───────────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/quota$/);
+      if (m && method === 'GET') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const [qGet] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
+        if (!qGet) return send(res, 200, { success: true, data: null });
+        const [qGetCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+        const qGCount = qGetCount?.cnt || 0;
+        const qGNow = new Date(); const qGEnd = new Date(qGet.period_end);
+        // Auto-evaluate if period elapsed and still active
+        let qGStatus = qGet.status;
+        if (qGStatus === 'active' && qGNow > qGEnd) {
+          if (qGCount >= qGet.quota_target) {
+            await sql`UPDATE "ContractorQuotaPeriod" SET status = 'met', locked_at = NOW(), updated_at = NOW() WHERE id = ${qGet.id}`;
+            qGStatus = 'met';
+          } else {
+            await sql`UPDATE "ContractorQuotaPeriod" SET status = 'missed', alert_sent = true, updated_at = NOW() WHERE id = ${qGet.id}`;
+            qGStatus = 'missed';
+          }
+        }
+        return send(res, 200, { success: true, data: { ...qGet, status: qGStatus, current_count: qGCount, percent: Math.min(Math.round((qGCount / (qGet.quota_target || 30)) * 100), 100), days_remaining: Math.max(0, Math.ceil((qGEnd - qGNow) / 86400000)) } });
+      }
+    }
+
+    // ── POST /api/v1/admin/contractors/:id/quota ──────────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/quota$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const [qExisting] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
+        if (qExisting) return send(res, 409, { success: false, error: 'A quota period already exists. Use /extend or /evaluate to manage it.' });
+        const [qRepCheck] = await sql`SELECT id FROM "Contractor" WHERE id = ${m[1]} LIMIT 1`;
+        if (!qRepCheck) return send(res, 404, { success: false, error: 'Contractor not found.' });
+        const qTarget = Math.max(1, parseInt((req.body || {}).quota_target) || 30);
+        const [qNew] = await sql`
+          INSERT INTO "ContractorQuotaPeriod" (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${m[1]}, CURRENT_DATE, CURRENT_DATE + INTERVAL '3 months', ${qTarget}, 'active', NOW(), NOW())
+          RETURNING *
+        `;
+        return send(res, 201, { success: true, data: qNew });
+      }
     }
 
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
