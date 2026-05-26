@@ -12,11 +12,16 @@
     {
       "path": "/api/cron/enforce-cancellations",
       "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/cron/generate-contractor-payouts",
+      "schedule": "0 9 1 * *"
     }
   ],
   "rewrites": [
     { "source": "/api/cron/(.*)", "destination": "/api/cron/$1" },
     { "source": "/api/webhooks/stripe", "destination": "/api/webhooks/stripe" },
+    { "source": "/api/webhooks/taxbandits", "destination": "/api/webhooks/taxbandits" },
     { "source": "/(.*)", "destination": "/api/index.js" }
   ]
 }

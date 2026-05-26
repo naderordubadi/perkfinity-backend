@@ -5910,6 +5910,8 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS password_hash TEXT`;
       // Idempotent: entity type for 1099-NEC eligibility
       await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS entity_type TEXT`;
+      // Idempotent: Dropbox Sign request ID for ICA webhook correlation
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS dropbox_sign_request_id TEXT`;
       // Territory table — one active territory per rep
       await sql`CREATE TABLE IF NOT EXISTS "ContractorTerritory" (
         id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -6597,6 +6599,61 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ── POST /api/v1/admin/contractors/:id/send-ica ────────────────────
+    // Generates a personalised ICA PDF and sends it via Dropbox Sign for e-signature.
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/send-ica$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const contractorId = m[1];
+        const [ctr] = await sql`
+          SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents
+          FROM "Contractor" c
+          LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
+          WHERE c.id = ${contractorId}
+          LIMIT 1
+        `;
+        if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
+        if (ctr.ica_status === 'signed') {
+          return send(res, 400, { success: false, error: 'ICA already fully signed — cannot resend.' });
+        }
+        const [terr] = await sql`
+          SELECT label, zip_codes
+          FROM "ContractorTerritory"
+          WHERE contractor_id = ${contractorId} AND status = 'active'
+          LIMIT 1
+        `;
+        const dropboxSign = require('./lib/dropbox-sign');
+        let signatureRequestId;
+        try {
+          const dsResult = await dropboxSign.sendICA({
+            contractorName:  ctr.full_name,
+            contractorEmail: ctr.email,
+            legalName:       ctr.legal_name || ctr.full_name,
+            commissionRate:  parseFloat(ctr.commission_rate) || 0.25,
+            durationMonths:  parseInt(ctr.commission_duration_months) || 12,
+            retainerCents:   parseInt(ctr.retainer_cents) || 0,
+            territoryLabel:  terr?.label || 'To be assigned',
+            territoryZips:   terr?.zip_codes || [],
+            startDate:       new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+          });
+          signatureRequestId = dsResult.signatureRequestId;
+          console.log(`[send-ica] Dropbox Sign request created for contractor ${contractorId}: ${signatureRequestId}`);
+        } catch (dsErr) {
+          console.error(`[send-ica] Dropbox Sign API error for contractor ${contractorId}:`, dsErr.message);
+          return send(res, 502, { success: false, error: `Dropbox Sign API error: ${dsErr.message}` });
+        }
+        await sql`
+          UPDATE "Contractor"
+          SET ica_status               = 'sent',
+              dropbox_sign_request_id  = ${signatureRequestId},
+              updated_at               = NOW()
+          WHERE id = ${contractorId}
+        `;
+        return send(res, 200, { success: true, message: `ICA sent to ${ctr.email} via Dropbox Sign.`, signature_request_id: signatureRequestId });
+      }
+    }
+
     // ══════════════════════════════════════════════════════════════════
     // TERRITORY ENDPOINTS
     // ══════════════════════════════════════════════════════════════════
@@ -6757,6 +6814,81 @@ module.exports = async function handler(req, res) {
         `;
         return send(res, 201, { success: true, data: qNew });
       }
+    }
+
+    // ── POST /api/v1/webhooks/dropbox-sign ───────────────────────────
+    // Dropbox Sign calls this when a signing event occurs.
+    // MUST respond 200 with body 'Hello API Event Received' to acknowledge.
+    if (method === 'POST' && url === '/api/v1/webhooks/dropbox-sign') {
+      const dsBody   = req.body || {};
+      const eventType = dsBody?.event?.event_type || dsBody?.event_type || null;
+      const sigReqId  = dsBody?.signature_request?.signature_request_id ||
+                        dsBody?.payload?.signature_request?.signature_request_id || null;
+      console.log(`[dropbox-sign webhook] event_type=${eventType} sig_req_id=${sigReqId}`);
+
+      if (eventType === 'signature_request_all_signed' && sigReqId) {
+        // Process async — must return 200 immediately
+        (async () => {
+          try {
+            const [ctr] = await sql`
+              SELECT id, full_name, email, ica_status
+              FROM "Contractor"
+              WHERE dropbox_sign_request_id = ${sigReqId}
+              LIMIT 1
+            `;
+            if (!ctr) {
+              console.warn(`[dropbox-sign webhook] No contractor found for sig_req_id=${sigReqId}`);
+              return;
+            }
+            if (ctr.ica_status === 'signed') {
+              console.log(`[dropbox-sign webhook] ICA already marked signed for ${ctr.id} — skipping.`);
+              return;
+            }
+            // Mark ICA signed; auto-activate if still pending
+            await sql`
+              UPDATE "Contractor"
+              SET ica_status = 'signed',
+                  status     = CASE WHEN status = 'pending' THEN 'active' ELSE status END,
+                  updated_at = NOW()
+              WHERE id = ${ctr.id}
+            `;
+            // Auto-start quota period if not already running
+            const [qExisting] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${ctr.id} LIMIT 1`;
+            if (!qExisting) {
+              await sql`
+                INSERT INTO "ContractorQuotaPeriod"
+                  (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
+                VALUES
+                  (gen_random_uuid()::text, ${ctr.id}, CURRENT_DATE,
+                   CURRENT_DATE + INTERVAL '3 months', 30, 'active', NOW(), NOW())
+              `;
+              console.log(`[dropbox-sign webhook] Quota period auto-started for contractor ${ctr.id}`);
+            }
+            // Notify admin
+            try {
+              const SibApiV3Sdk = require('sib-api-v3-sdk');
+              const sibClient   = SibApiV3Sdk.ApiClient.instance;
+              sibClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
+              const transactional = new SibApiV3Sdk.TransactionalEmailsApi();
+              await transactional.sendTransacEmail({
+                sender:      { name: 'Perkfinity System', email: 'support@perkfinity.net' },
+                to:          [{ email: 'support@perkfinity.net', name: 'Admin' }],
+                subject:     `✅ ICA Fully Signed — ${ctr.full_name}`,
+                htmlContent: `<h2>ICA Fully Executed</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) has completed signing. Their quota period has been automatically started.</p><p>Signature Request ID: <code>${sigReqId}</code></p>`,
+              });
+            } catch (emailErr) {
+              console.error('[dropbox-sign webhook] Admin notification email failed:', emailErr.message);
+            }
+            console.log(`[dropbox-sign webhook] ICA signed + quota started for contractor ${ctr.id} (${ctr.email})`);
+          } catch (webhookErr) {
+            console.error('[dropbox-sign webhook] Processing error:', webhookErr.message);
+          }
+        })();
+      }
+
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('Hello API Event Received');
+      return;
     }
 
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
