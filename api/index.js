@@ -3450,7 +3450,7 @@ module.exports = async function handler(req, res) {
         LIMIT 1
       `;
       if (!repLoginRow) return send(res, 401, { success: false, error: 'Invalid email or password.' });
-      if (!repLoginRow.password_hash) return send(res, 401, { success: false, error: 'Portal access not yet activated. Check your email for a setup link, or ask your administrator to send one.' });
+      if (!repLoginRow.password_hash) return send(res, 401, { success: false, error: 'Portal access not yet set up. Please contact your administrator.' });
       const repMatch = await bcrypt.compare(password, repLoginRow.password_hash);
       if (!repMatch) return send(res, 401, { success: false, error: 'Invalid email or password.' });
       const repToken = jwt.sign({ role: 'rep', contractorId: repLoginRow.id }, process.env.JWT_SECRET, { expiresIn: '8h' });
@@ -3458,68 +3458,6 @@ module.exports = async function handler(req, res) {
         id: repLoginRow.id, full_name: repLoginRow.full_name, email: repLoginRow.email,
         referral_code: repLoginRow.referral_code, status: repLoginRow.status
       }});
-    }
-
-    // ── POST /api/v1/rep/forgot-password (PUBLIC) ──────────────────
-    // Rep initiates a password reset. Sends a 1h one-time link to their email.
-    if (method === 'POST' && url === '/api/v1/rep/forgot-password') {
-      const { email } = req.body || {};
-      // Always return success to prevent email enumeration
-      const genericOk = { success: true, message: 'If that email is registered, a reset link was sent.' };
-      if (!email) return send(res, 200, genericOk);
-      const [ctr] = await sql`SELECT id, full_name, email FROM "Contractor" WHERE email = ${email.toLowerCase().trim()} LIMIT 1`;
-      if (!ctr) return send(res, 200, genericOk);
-      const crypto  = require('crypto');
-      const token   = crypto.randomBytes(32).toString('hex');
-      const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-      await sql`UPDATE "Contractor" SET invite_token = ${token}, invite_expires_at = ${expires}, updated_at = NOW() WHERE id = ${ctr.id}`;
-      const setupUrl = `https://perkfinity.net/reps/setup?token=${token}`;
-      const BREVO_KEY = process.env.BREVO_API_KEY;
-      if (BREVO_KEY) {
-        try {
-          const brevoClient = SibApiV3Sdk.ApiClient.instance;
-          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
-          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-          const emailObj = new SibApiV3Sdk.SendSmtpEmail();
-          emailObj.sender  = { name: 'Perkfinity', email: 'support@perkfinity.net' };
-          emailObj.to      = [{ email: ctr.email, name: ctr.full_name }];
-          emailObj.subject = 'Reset Your Perkfinity Rep Portal Password';
-          emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;">
-            <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;border-radius:12px 12px 0 0;">
-              <div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div>
-              <div style="color:rgba(255,255,255,0.8);font-size:13px;margin-top:4px;">Rep Portal</div>
-            </div>
-            <div style="padding:32px 28px;background:#fff;border-radius:0 0 12px 12px;border:1px solid #e2e8f0;border-top:none;">
-              <div style="font-size:20px;font-weight:700;color:#1a1a2e;margin-bottom:12px;">Hi ${ctr.full_name},</div>
-              <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:20px;">We received a request to reset your rep portal password. Click the button below to choose a new one. This link expires in <strong>1 hour</strong> and can only be used once.</p>
-              <div style="text-align:center;margin:28px 0;">
-                <a href="${setupUrl}" style="display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#5b3fa5,#7c5cbf);color:#fff;font-weight:800;font-size:15px;border-radius:10px;text-decoration:none;">Reset My Password →</a>
-              </div>
-              <p style="font-size:12px;color:#94a3b8;text-align:center;">If you didn't request this, you can safely ignore this email.<br>Your password will not change until you click the link above.</p>
-            </div>
-          </div>`;
-          await emailApi.sendTransacEmail(emailObj);
-        } catch(e) { console.error('Brevo forgot-password error:', e); }
-      }
-      return send(res, 200, genericOk);
-    }
-
-    // ── POST /api/v1/rep/setup-password (PUBLIC) ──────────────────
-    // Validates one-time token and sets the rep's password.
-    if (method === 'POST' && url === '/api/v1/rep/setup-password') {
-      const { token, password } = req.body || {};
-      if (!token) return send(res, 400, { success: false, error: 'Token is required.' });
-      if (!password || password.length < 8) return send(res, 400, { success: false, error: 'Password must be at least 8 characters.' });
-      const [ctr] = await sql`
-        SELECT id, full_name, email FROM "Contractor"
-        WHERE invite_token = ${token}
-          AND invite_expires_at > NOW()
-        LIMIT 1
-      `;
-      if (!ctr) return send(res, 400, { success: false, error: 'This link has expired or already been used. Request a new one.' });
-      const pwHash = await bcrypt.hash(password, 10);
-      await sql`UPDATE "Contractor" SET password_hash = ${pwHash}, invite_token = NULL, invite_expires_at = NULL, updated_at = NOW() WHERE id = ${ctr.id}`;
-      return send(res, 200, { success: true, message: 'Password set successfully. You can now sign in.' });
     }
 
     // ── GET /api/v1/rep/profile ──────────────────────────────────
@@ -5997,12 +5935,7 @@ module.exports = async function handler(req, res) {
         created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
-      // Idempotent: one-time invite / password-reset token columns
-      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS invite_token TEXT`;
-      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS invite_expires_at TIMESTAMPTZ`;
-      // Idempotent: Dropbox Sign correlation column
-      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS dropbox_sign_request_id TEXT`;
-      return send(res, 200, { success: true, message: 'All contractor tables up to date.' });
+      return send(res, 200, { success: true, message: 'All 10 contractor tables up to date: password_hash, entity_type, ContractorTerritory, ContractorQuotaPeriod added.' });
     }
 
     // ── GET /api/v1/contractors/validate-code?code=REF-XXXXX ──────────
@@ -6198,18 +6131,6 @@ module.exports = async function handler(req, res) {
             RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, w9_status, ica_status, payment_method, notes, entity_type, created_at, updated_at
           `;
           if (!ucUpdated) return send(res, 404, { success: false, error: 'Contractor not found.' });
-
-          // Auto-start quota period when ICA is marked signed (if one doesn't already exist)
-          if (ucData.ica_status === 'signed') {
-            const [existingQ] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
-            if (!existingQ) {
-              await sql`
-                INSERT INTO "ContractorQuotaPeriod" (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
-                VALUES (gen_random_uuid()::text, ${m[1]}, CURRENT_DATE, CURRENT_DATE + INTERVAL '3 months', 30, 'active', NOW(), NOW())
-              `;
-            }
-          }
-
           return send(res, 200, { success: true, data: ucUpdated });
         }
       }
@@ -6676,72 +6597,6 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ── POST /api/v1/admin/contractors/:id/send-ica ────────────────────
-    // Generates a personalised ICA PDF and sends it via Dropbox Sign API.
-    // Stores the returned signature_request_id for webhook correlation.
-    {
-      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/send-ica$/);
-      if (method === 'POST' && m) {
-        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
-        const contractorId = m[1];
-
-        // Fetch contractor + commission rule
-        const [ctr] = await sql`
-          SELECT c.id, c.full_name, c.legal_name, c.email, c.ica_status,
-                 cr.commission_rate, cr.commission_duration_months, cr.retainer_amount
-          FROM "Contractor" c
-          LEFT JOIN "ContractorCompensationRule" cr ON cr.contractor_id = c.id
-          WHERE c.id = ${contractorId}
-          LIMIT 1
-        `;
-        if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
-        if (ctr.ica_status === 'signed') {
-          return send(res, 400, { success: false, error: 'ICA is already signed for this contractor.' });
-        }
-
-        // Fetch active territory ZIPs (if assigned)
-        const [terr] = await sql`
-          SELECT zip_codes FROM "ContractorTerritory"
-          WHERE contractor_id = ${contractorId} AND status = 'active'
-          LIMIT 1
-        `;
-
-        const dropboxSign = require('./lib/dropbox-sign');
-        let signatureRequestId;
-        try {
-          const result = await dropboxSign.sendICA({
-            contractorName:           ctr.legal_name || ctr.full_name,
-            contractorEmail:          ctr.email,
-            agreementDate:            new Date(),
-            territoryZips:            terr?.zip_codes || [],
-            commissionRate:           ctr.commission_rate           ?? 25,
-            commissionDurationMonths: ctr.commission_duration_months ?? 12,
-            retainerAmount:           ctr.retainer_amount            ?? 0,
-          });
-          signatureRequestId = result.signatureRequestId;
-          console.log(`[send-ica] Dropbox Sign request sent for contractor ${ctr.id} (${ctr.email}). requestId=${signatureRequestId}`);
-        } catch (dsErr) {
-          console.error(`[send-ica] Dropbox Sign error for contractor ${ctr.id}:`, dsErr.message);
-          return send(res, 502, { success: false, error: `Dropbox Sign API error: ${dsErr.message}` });
-        }
-
-        // Persist the request ID and update ica_status to 'sent'
-        await sql`
-          UPDATE "Contractor"
-          SET dropbox_sign_request_id = ${signatureRequestId},
-              ica_status              = 'sent',
-              updated_at              = NOW()
-          WHERE id = ${contractorId}
-        `;
-
-        return send(res, 200, {
-          success: true,
-          message: `ICA sent to ${ctr.email} via Dropbox Sign.`,
-          signature_request_id: signatureRequestId,
-        });
-      }
-    }
-
     // ══════════════════════════════════════════════════════════════════
     // TERRITORY ENDPOINTS
     // ══════════════════════════════════════════════════════════════════
@@ -6791,57 +6646,6 @@ module.exports = async function handler(req, res) {
         if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
         await sql`UPDATE "ContractorTerritory" SET status = 'revoked', updated_at = NOW() WHERE contractor_id = ${m[1]} AND status = 'active'`;
         return send(res, 200, { success: true, message: 'Territory revoked.' });
-      }
-    }
-
-    }
-
-    // ── POST /api/v1/admin/contractors/:id/send-invite ────────────────
-    // Generates a one-time invite/reset token and emails the rep.
-    {
-      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/send-invite$/);
-      if (m && method === 'POST') {
-        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
-        const [ctr] = await sql`SELECT id, full_name, email, password_hash FROM "Contractor" WHERE id = ${m[1]}`;
-        if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
-        const crypto = require('crypto');
-        const token  = crypto.randomBytes(32).toString('hex');
-        const expires = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48 h
-        await sql`UPDATE "Contractor" SET invite_token = ${token}, invite_expires_at = ${expires}, updated_at = NOW() WHERE id = ${m[1]}`;
-        const isReset  = !!ctr.password_hash;
-        const setupUrl = `https://perkfinity.net/reps/setup?token=${token}`;
-        const BREVO_KEY = process.env.BREVO_API_KEY;
-        if (BREVO_KEY) {
-          try {
-            const brevoClient = SibApiV3Sdk.ApiClient.instance;
-            brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
-            const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-            const emailObj = new SibApiV3Sdk.SendSmtpEmail();
-            emailObj.sender  = { name: 'Perkfinity', email: 'support@perkfinity.net' };
-            emailObj.to      = [{ email: ctr.email, name: ctr.full_name }];
-            emailObj.subject = isReset
-              ? 'Your Perkfinity Rep Portal Password Was Reset'
-              : 'Your Perkfinity Rep Portal is Ready';
-            const actionText = isReset ? 'reset your password' : 'set up your password';
-            const headline   = isReset ? 'Your portal password was reset' : 'Welcome to the Rep Portal!';
-            emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;">
-              <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;border-radius:12px 12px 0 0;">
-                <div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div>
-                <div style="color:rgba(255,255,255,0.8);font-size:13px;margin-top:4px;">Rep Portal</div>
-              </div>
-              <div style="padding:32px 28px;background:#fff;border-radius:0 0 12px 12px;border:1px solid #e2e8f0;border-top:none;">
-                <div style="font-size:20px;font-weight:700;color:#1a1a2e;margin-bottom:12px;">Hi ${ctr.full_name},</div>
-                <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:20px;">${headline}. Click the button below to ${actionText}. This link expires in <strong>48 hours</strong> and can only be used once.</p>
-                <div style="text-align:center;margin:28px 0;">
-                  <a href="${setupUrl}" style="display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#5b3fa5,#7c5cbf);color:#fff;font-weight:800;font-size:15px;border-radius:10px;text-decoration:none;">${isReset ? 'Reset My Password' : 'Set Up My Password'} →</a>
-                </div>
-                <p style="font-size:12px;color:#94a3b8;text-align:center;">If you didn't expect this email, you can safely ignore it.<br>This link will expire automatically.</p>
-              </div>
-            </div>`;
-            await emailApi.sendTransacEmail(emailObj);
-          } catch(emailErr) { console.error('Brevo invite email error:', emailErr); }
-        }
-        return send(res, 200, { success: true, message: `${isReset ? 'Reset link' : 'Invite'} sent to ${ctr.email}.` });
       }
     }
 
@@ -6936,31 +6740,6 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ── PATCH /api/v1/admin/contractors/:id/quota/adjust-dates ────────
-    // Lets admin change the quota period start date; end auto-recalculates (+3 months).
-    {
-      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/quota\/adjust-dates$/);
-      if (m && method === 'PATCH') {
-        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
-        const { period_start } = req.body || {};
-        if (!period_start || !/^\d{4}-\d{2}-\d{2}$/.test(period_start))
-          return send(res, 400, { success: false, error: 'period_start must be a date in YYYY-MM-DD format.' });
-        const [qAdj] = await sql`SELECT id, status FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
-        if (!qAdj) return send(res, 404, { success: false, error: 'No quota period found for this rep.' });
-        if (qAdj.status !== 'active')
-          return send(res, 409, { success: false, error: 'Can only adjust dates on an active quota period.' });
-        const [qAdjUpdated] = await sql`
-          UPDATE "ContractorQuotaPeriod"
-          SET period_start = ${period_start}::date,
-              period_end   = ${period_start}::date + INTERVAL '3 months',
-              updated_at   = NOW()
-          WHERE id = ${qAdj.id}
-          RETURNING *
-        `;
-        return send(res, 200, { success: true, data: qAdjUpdated });
-      }
-    }
-
     // ── POST /api/v1/admin/contractors/:id/quota ──────────────────────
     {
       const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/quota$/);
@@ -6978,116 +6757,6 @@ module.exports = async function handler(req, res) {
         `;
         return send(res, 201, { success: true, data: qNew });
       }
-    }
-
-    // ── POST /api/v1/webhooks/dropbox-sign ───────────────────────────
-    // Dropbox Sign calls this URL when a signing event occurs.
-    // Events we care about:
-    //   signature_request_signed      — one party signed (may not be complete yet)
-    //   signature_request_all_signed  — all parties signed → mark ICA complete
-    if (method === 'POST' && url === '/api/v1/webhooks/dropbox-sign') {
-      // Dropbox Sign requires a 200 response with body 'Hello API Event Received'
-      // to acknowledge receipt. Do this first, then process async.
-      let dsBody;
-      try {
-        // The payload arrives as form-encoded: event_type, event_time,
-        // event_hash, and a nested json_data field.
-        // req.body is already parsed as an object by our body-parser.
-        dsBody = req.body || {};
-      } catch (_) {
-        dsBody = {};
-      }
-
-      const eventType = dsBody?.event?.event_type ||
-                        dsBody?.event_type         ||
-                        dsBody?.payload?.event?.event_type ||
-                        null;
-
-      // Extract signature_request_id from various possible locations
-      const sigReqId  = dsBody?.signature_request?.signature_request_id ||
-                        dsBody?.payload?.signature_request?.signature_request_id ||
-                        null;
-
-      console.log(`[dropbox-sign webhook] event_type=${eventType} sig_req_id=${sigReqId}`);
-
-      // Process the event asynchronously — we must return 200 quickly
-      if (eventType === 'signature_request_all_signed' && sigReqId) {
-        (async () => {
-          try {
-            // Find contractor by signature request ID
-            const [ctr] = await sql`
-              SELECT id, full_name, email, ica_status
-              FROM "Contractor"
-              WHERE dropbox_sign_request_id = ${sigReqId}
-              LIMIT 1
-            `;
-            if (!ctr) {
-              console.warn(`[dropbox-sign webhook] No contractor found for signature_request_id=${sigReqId}`);
-              return;
-            }
-            if (ctr.ica_status === 'signed') {
-              console.log(`[dropbox-sign webhook] ICA already marked signed for contractor ${ctr.id} — skipping.`);
-              return;
-            }
-
-            // Mark ICA as signed
-            await sql`
-              UPDATE "Contractor"
-              SET ica_status  = 'signed',
-                  status      = CASE WHEN status = 'pending' THEN 'active' ELSE status END,
-                  updated_at  = NOW()
-              WHERE id = ${ctr.id}
-            `;
-
-            // Auto-start quota period if not already running
-            const [qExisting] = await sql`
-              SELECT id FROM "ContractorQuotaPeriod"
-              WHERE contractor_id = ${ctr.id}
-              LIMIT 1
-            `;
-            if (!qExisting) {
-              await sql`
-                INSERT INTO "ContractorQuotaPeriod"
-                  (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
-                VALUES
-                  (gen_random_uuid()::text, ${ctr.id}, CURRENT_DATE,
-                   CURRENT_DATE + INTERVAL '3 months', 30, 'active', NOW(), NOW())
-              `;
-              console.log(`[dropbox-sign webhook] Quota period auto-started for contractor ${ctr.id}`);
-            }
-
-            // Notify admin
-            try {
-              const SibApiV3Sdk = require('sib-api-v3-sdk');
-              const sibClient   = SibApiV3Sdk.ApiClient.instance;
-              sibClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
-              const transactional = new SibApiV3Sdk.TransactionalEmailsApi();
-              await transactional.sendTransacEmail({
-                sender:  { name: 'Perkfinity System', email: 'support@perkfinity.net' },
-                to:      [{ email: 'support@perkfinity.net', name: 'Admin' }],
-                subject: `✅ ICA Fully Signed — ${ctr.full_name}`,
-                htmlContent: `
-                  <h2>ICA Fully Executed</h2>
-                  <p><strong>${ctr.full_name}</strong> (${ctr.email}) has signed the ICA and you have countersigned.</p>
-                  <p>The ICA is now fully executed. Their quota period has been automatically started.</p>
-                  <p>Signature Request ID: <code>${sigReqId}</code></p>
-                `,
-              });
-            } catch (emailErr) {
-              console.error('[dropbox-sign webhook] Admin notification email failed:', emailErr.message);
-            }
-
-            console.log(`[dropbox-sign webhook] ICA marked signed + quota started for contractor ${ctr.id} (${ctr.email})`);
-          } catch (webhookErr) {
-            console.error('[dropbox-sign webhook] Processing error:', webhookErr.message);
-          }
-        })();
-      }
-
-      // Dropbox Sign requires this exact response body to acknowledge the event
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Hello API Event Received');
-      return;
     }
 
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
