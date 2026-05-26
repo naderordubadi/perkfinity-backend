@@ -6892,13 +6892,14 @@ module.exports = async function handler(req, res) {
     }
 
     // ── POST /api/v1/webhooks/taxbandits ─────────────────────────────
-    // TaxBandits calls this when a W-9 form status changes (WhCertificate Status Change).
+    // TaxBandits event: "Form W-9 Status Change"
+    // Triggered when a recipient submits Form W-9 — includes TIN Matching status.
     // MUST respond HTTP 200 within 5 seconds or TaxBandits marks the webhook inactive.
     // Key fields:
     //   SubmissionId  — maps to contractor.taxbandits_submission_id (primary lookup)
     //   PayeeRef      — our contractorId passed at request time (fallback lookup)
     //   W9Status      — "COMPLETED" | "COMPLETED_AND_TIN_MATCH_INPROGRESS"
-    //   TINMatching   — "SUCCESS" | "ORDER_CREATED" | etc.
+    //   TINMatching   — "SUCCESS" | "ORDER_CREATED" | "FAILED"
     if (method === 'POST' && url === '/api/v1/webhooks/taxbandits') {
       const tbBody        = req.body || {};
       const submissionId  = tbBody?.SubmissionId || tbBody?.submissionId || null;
@@ -6918,9 +6919,13 @@ module.exports = async function handler(req, res) {
           // W-9 is considered fully verified only when BOTH checks pass:
           //   W9Status === 'COMPLETED'   (form signed)
           //   TINMatching === 'SUCCESS'  (IRS name+TIN match confirmed)
-          // If TIN match is still in progress, we wait for the follow-up webhook.
+          // Two-shot flow: first webhook has W9Status=COMPLETED_AND_TIN_MATCH_INPROGRESS,
+          //   TINMatching=ORDER_CREATED → set to 'pending'.
+          //   Second webhook fires with W9Status=COMPLETED, TINMatching=SUCCESS → set to 'verified'.
+          // TINMatching=FAILED → set to 'rejected', alert admin immediately.
           const w9Complete  = (w9Status === 'COMPLETED' || w9Status === 'COMPLETED_AND_TIN_MATCH_INPROGRESS');
           const tinVerified = (tinStatus === 'SUCCESS');
+          const tinFailed   = (tinStatus === 'FAILED');
 
           if (!w9Complete) {
             console.log(`[taxbandits webhook] W9Status not COMPLETED (${w9Status}) — skipping.`);
@@ -6954,14 +6959,18 @@ module.exports = async function handler(req, res) {
           }
 
           if (ctr.w9_status === 'verified') {
-            console.log(`[taxbandits webhook] W-9 already verified for contractor ${ctr.id} — skipping.`);
+            console.log(`[taxbandits webhook] W-9 already verified for contractor ${ctr.id} — idempotent skip.`);
             return;
           }
 
-          // Determine new status
-          // If TIN match succeeded → fully verified
-          // If TIN match still in progress → set to 'pending' (webhook will fire again with SUCCESS)
-          const newStatus = tinVerified ? 'verified' : 'pending';
+          // Map TIN result to DB status:
+          //   TINMatching=SUCCESS           → 'verified'
+          //   TINMatching=FAILED            → 'rejected'  (admin must be notified)
+          //   TINMatching=ORDER_CREATED|etc → 'pending'   (wait for follow-up webhook)
+          let newStatus;
+          if (tinVerified)    newStatus = 'verified';
+          else if (tinFailed) newStatus = 'rejected';
+          else                newStatus = 'pending';
 
           await sql`
             UPDATE "Contractor"
@@ -6971,6 +6980,25 @@ module.exports = async function handler(req, res) {
           `;
 
           console.log(`[taxbandits webhook] contractor ${ctr.id} (${ctr.email}) w9_status → ${newStatus}`);
+
+          // TIN match FAILED — alert admin immediately so they can follow up with contractor
+          if (tinFailed) {
+            try {
+              const SibApiV3Sdk = require('sib-api-v3-sdk');
+              const sibClient   = SibApiV3Sdk.ApiClient.instance;
+              sibClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
+              const transactional = new SibApiV3Sdk.TransactionalEmailsApi();
+              await transactional.sendTransacEmail({
+                sender:      { name: 'Perkfinity System', email: 'support@perkfinity.net' },
+                to:          [{ email: 'support@perkfinity.net', name: 'Admin' }],
+                subject:     `❌ W-9 TIN Match FAILED — ${ctr.full_name}`,
+                htmlContent: `<h2>W-9 TIN Match Failed</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) completed their W-9 form, but the <strong>IRS TIN match failed</strong> — their name and tax ID do not match IRS records.</p><p>Their status has been set to <code>rejected</code>. Please contact them to resubmit with the correct legal name and TIN.</p><p>TaxBandits Submission ID: <code>${submissionId || 'N/A'}</code></p>`,
+              });
+            } catch (emailErr) {
+              console.error('[taxbandits webhook] TIN FAILED admin email error:', emailErr.message);
+            }
+            return;
+          }
 
           if (newStatus === 'verified') {
             // Notify admin
