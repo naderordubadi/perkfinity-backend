@@ -15,6 +15,7 @@ const CLIENT_ID     = process.env.TAXBANDITS_CLIENT_ID;
 const CLIENT_SECRET = process.env.TAXBANDITS_CLIENT_SECRET;
 const USER_TOKEN    = process.env.TAXBANDITS_USER_TOKEN;
 const BUSINESS_ID   = process.env.TAXBANDITS_BUSINESS_ID || null; // optional — defaults to first business
+const WEBHOOK_REF   = process.env.TAXBANDITS_WEBHOOK_REF || null; // GUID from TaxBandits Webhook Notifications console
 const TB_ENV        = process.env.TAXBANDITS_ENV || 'sandbox';
 
 const isSandbox = TB_ENV !== 'production';
@@ -129,6 +130,11 @@ async function sendW9Request(email, name, contractorId) {
   // Only include BusinessId if explicitly configured (optional — defaults to first business)
   if (BUSINESS_ID) {
     payload.BusinessId = BUSINESS_ID;
+  }
+
+  // WebhookRef routes the callback to our registered URL explicitly (future-proofs if multiple URLs added)
+  if (WEBHOOK_REF) {
+    payload.WebhookRef = WEBHOOK_REF;
   }
 
   const res = await fetch(`${API_BASE}/WhCertificate/RequestByEmail`, {
