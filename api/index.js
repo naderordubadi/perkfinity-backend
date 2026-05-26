@@ -6627,15 +6627,15 @@ module.exports = async function handler(req, res) {
         let signatureRequestId;
         try {
           const dsResult = await dropboxSign.sendICA({
-            contractorName:  ctr.full_name,
-            contractorEmail: ctr.email,
-            legalName:       ctr.legal_name || ctr.full_name,
-            commissionRate:  parseFloat(ctr.commission_rate) || 0.25,
-            durationMonths:  parseInt(ctr.commission_duration_months) || 12,
-            retainerCents:   parseInt(ctr.retainer_cents) || 0,
-            territoryLabel:  terr?.label || 'To be assigned',
-            territoryZips:   terr?.zip_codes || [],
-            startDate:       new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+            contractorName:           ctr.full_name,
+            contractorEmail:          ctr.email,
+            legalName:                ctr.legal_name || ctr.full_name,
+            commissionRate:           Math.round((parseFloat(ctr.commission_rate) || 0.25) * 100), // DB stores 0.25; PDF expects 25 (%)
+            commissionDurationMonths: parseInt(ctr.commission_duration_months) || 12,              // PDF reads p.commissionDurationMonths
+            retainerAmount:           ((parseInt(ctr.retainer_cents) || 0) / 100),                 // DB stores cents; PDF expects dollars
+            agreementDate:            new Date(),                                                   // PDF lib reads p.agreementDate
+            territoryLabel:           terr?.label || 'To be assigned',
+            territoryZips:            terr?.zip_codes || [],
           });
           signatureRequestId = dsResult.signatureRequestId;
           console.log(`[send-ica] Dropbox Sign request created for contractor ${contractorId}: ${signatureRequestId}`);
