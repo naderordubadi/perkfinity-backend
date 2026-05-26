@@ -14,8 +14,9 @@
  *   payment_method.detached        — Card removed from Stripe → clears PM in DB → triggers dashboard gate
  */
 
-const Stripe = require('stripe');
-const { neon } = require('@neondatabase/serverless');
+const Stripe       = require('stripe');
+const { neon }     = require('@neondatabase/serverless');
+const SibApiV3Sdk  = require('sib-api-v3-sdk');
 
 module.exports = async (req, res) => {
   // Only accept POST
@@ -154,7 +155,7 @@ module.exports = async (req, res) => {
 
         // Find the merchant by stripe_customer_id
         const [merchant] = await sql`
-          SELECT id, business_name, account_blocked, stripe_subscription_id FROM "Merchant"
+          SELECT id, business_name, account_blocked, stripe_subscription_id, billing_cycle FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
@@ -169,16 +170,27 @@ module.exports = async (req, res) => {
         if (merchant.account_blocked && !merchant.stripe_subscription_id) {
           console.log(`[Stripe] Late invoice cleared for permanently cancelled merchant ${merchant.id}. Keeping blocked status.`);
         } else {
-          // Update billing status for active/past_due subscriptions
+          // Use Stripe's period_end as the next billing date — accurate for both monthly and annual.
+          // invoice.period_end is the end of the billing period just charged, i.e. when the next charge fires.
+          const webhookNextBillingDate = invoice.period_end
+            ? new Date(invoice.period_end * 1000)
+            : null;
+
           await sql`
             UPDATE "Merchant"
             SET billing_status = 'active',
                 account_blocked = false,
                 cancelled_at = NULL,
-                next_billing_date = NOW() + INTERVAL '30 days',
+                next_billing_date = ${webhookNextBillingDate},
                 updated_at = NOW()
             WHERE id = ${merchant.id}
           `;
+
+          // Annual renewal detection — hook for Task 3 retention bonus
+          // 'subscription_cycle' means this is a recurring charge (not the first payment)
+          if (invoice.billing_reason === 'subscription_cycle' && merchant.billing_cycle === 'annual') {
+            console.log(`[Annual Renewal] Merchant ${merchant.id} (${merchant.business_name}) renewed annual plan. Task 3: trigger retention bonus check.`);
+          }
         }
 
         // Record in Invoice table
@@ -198,6 +210,83 @@ module.exports = async (req, res) => {
           )
           ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW()
         `;
+
+        // ── Task 3: Set commission_start_date and commission_end_date on first successful payment ──
+        // Runs only when commission_start_date IS NULL (i.e., first real charge for this merchant).
+        // We JOIN ContractorCompensationRule to get the agreed commission_duration_months so we can
+        // stamp commission_end_date = today + duration right here, rather than leaving it NULL.
+        try {
+          const [attrRow] = await sql`
+            SELECT a.id, ccr.commission_duration_months
+            FROM "ContractorMerchantAttribution" a
+            JOIN "ContractorCompensationRule" ccr ON ccr.contractor_id = a.contractor_id
+            WHERE a.merchant_id = ${merchant.id}
+              AND a.commission_start_date IS NULL
+            LIMIT 1
+          `;
+          if (attrRow) {
+            const durationMonths = parseInt(attrRow.commission_duration_months) || 12;
+            // Calculate end date in JS to avoid SQL interval injection issues.
+            const startDate = new Date();
+            const endDate   = new Date(startDate);
+            endDate.setMonth(endDate.getMonth() + durationMonths);
+            const endDateStr = endDate.toISOString().slice(0, 10);
+            await sql`
+              UPDATE "ContractorMerchantAttribution"
+              SET commission_start_date = CURRENT_DATE,
+                  commission_end_date   = ${endDateStr}::date,
+                  updated_at            = NOW()
+              WHERE id = ${attrRow.id}
+            `;
+            console.log(`[Task3] Attribution ${attrRow.id} for merchant ${merchant.id}: commission window set ${new Date().toISOString().slice(0,10)} → ${endDateStr} (${durationMonths} months)`);
+          }
+        } catch (attrErr) {
+          // Attribution update failure: non-fatal so the webhook returns 200 to Stripe,
+          // but this is logged as an ERROR (not a warning) because if commission_start_date
+          // is never set, the rep earns $0 commission on this merchant permanently.
+          // An admin alert is also sent so the failure is visible and can be corrected manually.
+          console.error('[Task3] CRITICAL — ContractorMerchantAttribution update FAILED for merchant', merchant.id, ':', attrErr.message);
+          try {
+            const BREVO_KEY = process.env.BREVO_API_KEY;
+            if (BREVO_KEY) {
+              const brevoClient = SibApiV3Sdk.ApiClient.instance;
+              brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+              const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+              const alertEmail = new SibApiV3Sdk.SendSmtpEmail();
+              alertEmail.sender      = { name: 'Perkfinity System', email: 'support@perkfinity.net' };
+              alertEmail.to          = [{ email: process.env.ADMIN_EMAIL || 'admin@perkfinity.net' }];
+              alertEmail.subject     = `🚨 Perkfinity: Commission attribution update FAILED — merchant ${merchant.id}`;
+              alertEmail.htmlContent = `
+                <div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:560px;margin:0 auto;">
+                  <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:24px;text-align:center;">
+                    <div style="color:#fff;font-size:22px;font-weight:800;">Perkfinity System Alert</div>
+                  </div>
+                  <div style="padding:24px;">
+                    <div style="font-size:18px;font-weight:700;color:#dc2626;margin-bottom:12px;">🚨 Commission Attribution Update Failed</div>
+                    <p style="font-size:14px;color:#555;line-height:1.6;">
+                      A <code>invoice.payment_succeeded</code> webhook fired for merchant
+                      <strong>${merchant.id}</strong> (${merchant.business_name || 'unknown'}),
+                      but the attempt to set <code>commission_start_date</code> and
+                      <code>commission_end_date</code> on their ContractorMerchantAttribution record
+                      <strong>failed</strong>.
+                    </p>
+                    <p style="font-size:14px;color:#555;line-height:1.6;">
+                      <strong>Error:</strong> ${attrErr.message}
+                    </p>
+                    <p style="font-size:13px;color:#888;margin-top:16px;">
+                      Action required: Manually set <code>commission_start_date</code> and
+                      <code>commission_end_date</code> on the ContractorMerchantAttribution row
+                      for merchant <strong>${merchant.id}</strong> in the Neon dashboard,
+                      then verify in Admin → Contractors that the rep's attributed merchant shows dates.
+                    </p>
+                  </div>
+                </div>`;
+              await emailApi.sendTransacEmail(alertEmail);
+            }
+          } catch (alertErr) {
+            console.error('[Task3] Admin alert email also failed:', alertErr.message);
+          }
+        }
 
         console.log(`[Stripe] Payment succeeded for merchant ${merchant.id} (${merchant.business_name})`);
         break;
