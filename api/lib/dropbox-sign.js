@@ -313,7 +313,7 @@ function generateICAPdf(p) {
     doc.font('Helvetica').fontSize(BODY_SIZE).text(`Name: ${p.contractorName}`, 72 + W / 2 + 10);
     doc.font('Helvetica').fontSize(BODY_SIZE).text(`Date: ${fmtDate(aggDate)}`, 72 + W / 2 + 10);
     // Embed Contractor date tag (white / invisible)
-    doc.fillColor('white').fontSize(8).text('[date|req|signer1|label:Contractor Date]', 72 + W / 2 + 10, { lineBreak: false });
+    doc.fillColor('white').fontSize(8).text('[date|req|signer1|label:Contractor Date]', 72 + W / 2 + 10, doc.y, { lineBreak: false });
     doc.fillColor('black');
 
     doc.moveDown(3);
