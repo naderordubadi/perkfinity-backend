@@ -400,7 +400,8 @@ async function sendICA(p) {
   form.append('hide_text_tags', '1');
   form.append('subject',  `Independent Contractor Agreement — Perkfinity`);
   form.append('message',  `Hi ${p.contractorName},\n\nPlease review and sign your Independent Contractor Agreement with Perkfinity. Once you sign, we will countersign promptly and you will receive a fully executed copy for your records.\n\nKey terms:\n• Commission: ${p.commissionRate}% for ${p.commissionDurationMonths} months\n• Monthly Retainer: $${Number(p.retainerAmount || 0).toFixed(2)}\n• Quota: 30 merchants in 3 months\n\nIf you have any questions, reply to this email.\n\n— Perkfinity Team`);
-  form.append('requester_email_address', 'support@perkfinity.net');
+  const companyEmail = testMode ? p.contractorEmail : 'support@perkfinity.net';
+  form.append('requester_email_address', companyEmail);
 
   // Signer 1 = Contractor (signs first)
   form.append('signers[0][name]',          p.contractorName);
@@ -409,7 +410,7 @@ async function sendICA(p) {
 
   // Signer 2 = Company / Nader (countersigns after contractor)
   form.append('signers[1][name]',          'Nader Ordubadi');
-  form.append('signers[1][email_address]', 'support@perkfinity.net');
+  form.append('signers[1][email_address]', companyEmail);
   form.append('signers[1][order]',         '1');
 
   form.append('files[0]', pdfBuffer, {
