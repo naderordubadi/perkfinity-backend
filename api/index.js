@@ -5904,8 +5904,7 @@ module.exports = async function handler(req, res) {
           (gen_random_uuid()::text, 500, 100000, '500 Paying Subscribers')
         ON CONFLICT (threshold) DO NOTHING
       `;
-      // Idempotent: add taxbandits_submission_id column for W-9 webhook correlation
-      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS taxbandits_submission_id TEXT`;
+
       // Idempotent: rep portal password hash
       await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS password_hash TEXT`;
       // Idempotent: entity type for 1099-NEC eligibility
@@ -6547,57 +6546,6 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { payouts_created: rpResults.length, period: `${rpPs} to ${rpPe}`, results: rpResults } });
     }
 
-    // ── POST /api/v1/admin/contractors/:id/send-w9-request ────────────────
-    // Sends a TaxBandits SmartCollect W-9 request email to the contractor.
-    // Stores the returned SubmissionId on the Contractor row for webhook correlation.
-    {
-      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/send-w9-request$/);
-      if (method === 'POST' && m) {
-        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
-        const contractorId = m[1];
-
-        // Fetch contractor
-        const [ctr] = await sql`
-          SELECT id, full_name, legal_name, email, w9_status
-          FROM "Contractor"
-          WHERE id = ${contractorId}
-          LIMIT 1
-        `;
-        if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
-
-        // Guard: already verified — no need to send
-        if (ctr.w9_status === 'verified') {
-          return send(res, 400, { success: false, error: 'W-9 is already verified for this contractor.' });
-        }
-
-        // Call TaxBandits API
-        const taxbandits = require('./lib/taxbandits');
-        let submissionId;
-        try {
-          const tbResult = await taxbandits.sendW9Request(
-            ctr.email,
-            ctr.legal_name || ctr.full_name,
-            ctr.id
-          );
-          submissionId = tbResult.submissionId;
-          console.log(`[send-w9-request] TaxBandits W-9 request sent for contractor ${ctr.id} (${ctr.email}). SubmissionId=${submissionId}`);
-        } catch (tbErr) {
-          console.error(`[send-w9-request] TaxBandits API error for contractor ${ctr.id}:`, tbErr.message);
-          return send(res, 502, { success: false, error: `TaxBandits API error: ${tbErr.message}` });
-        }
-
-        // Store SubmissionId so the webhook can map the event back to this contractor
-        await sql`
-          UPDATE "Contractor"
-          SET
-            taxbandits_submission_id = ${submissionId || null},
-            updated_at               = NOW()
-          WHERE id = ${contractorId}
-        `;
-
-        return send(res, 200, { success: true, message: `W-9 request sent to ${ctr.email}.`, submission_id: submissionId || null });
-      }
-    }
 
     // ── POST /api/v1/admin/contractors/:id/send-ica ────────────────────
     // Generates a personalised ICA PDF and sends it via Dropbox Sign for e-signature.
@@ -6891,139 +6839,7 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    // ── POST /api/v1/webhooks/taxbandits ─────────────────────────────
-    // TaxBandits event: "Form W-9 Status Change"
-    // Triggered when a recipient submits Form W-9 — includes TIN Matching status.
-    // MUST respond HTTP 200 within 5 seconds or TaxBandits marks the webhook inactive.
-    // Key fields:
-    //   SubmissionId  — maps to contractor.taxbandits_submission_id (primary lookup)
-    //   PayeeRef      — our contractorId passed at request time (fallback lookup)
-    //   W9Status      — "COMPLETED" | "COMPLETED_AND_TIN_MATCH_INPROGRESS"
-    //   TINMatching   — "SUCCESS" | "ORDER_CREATED" | "FAILED"
-    if (method === 'POST' && url === '/api/v1/webhooks/taxbandits') {
-      const tbBody        = req.body || {};
-      const submissionId  = tbBody?.SubmissionId || tbBody?.submissionId || null;
-      const payeeRef      = tbBody?.PayeeRef     || tbBody?.payeeRef     || null;
-      const w9Status      = tbBody?.W9Status     || tbBody?.w9Status     || null;
-      const tinStatus     = tbBody?.TINMatching  || tbBody?.tinMatching  || null;
 
-      console.log(`[taxbandits webhook] submissionId=${submissionId} payeeRef=${payeeRef} W9Status=${w9Status} TINMatching=${tinStatus}`);
-
-      // Ack immediately — TaxBandits requires 200 within 5 seconds
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ received: true }));
-
-      // Process asynchronously after responding
-      (async () => {
-        try {
-          // W-9 is considered fully verified only when BOTH checks pass:
-          //   W9Status === 'COMPLETED'   (form signed)
-          //   TINMatching === 'SUCCESS'  (IRS name+TIN match confirmed)
-          // Two-shot flow: first webhook has W9Status=COMPLETED_AND_TIN_MATCH_INPROGRESS,
-          //   TINMatching=ORDER_CREATED → set to 'pending'.
-          //   Second webhook fires with W9Status=COMPLETED, TINMatching=SUCCESS → set to 'verified'.
-          // TINMatching=FAILED → set to 'rejected', alert admin immediately.
-          const w9Complete  = (w9Status === 'COMPLETED' || w9Status === 'COMPLETED_AND_TIN_MATCH_INPROGRESS');
-          const tinVerified = (tinStatus === 'SUCCESS');
-          const tinFailed   = (tinStatus === 'FAILED');
-
-          if (!w9Complete) {
-            console.log(`[taxbandits webhook] W9Status not COMPLETED (${w9Status}) — skipping.`);
-            return;
-          }
-
-          // Look up contractor: prefer SubmissionId match, fall back to PayeeRef
-          let ctr = null;
-          if (submissionId) {
-            const [row] = await sql`
-              SELECT id, full_name, email, w9_status
-              FROM "Contractor"
-              WHERE taxbandits_submission_id = ${submissionId}
-              LIMIT 1
-            `;
-            ctr = row || null;
-          }
-          if (!ctr && payeeRef) {
-            const [row] = await sql`
-              SELECT id, full_name, email, w9_status
-              FROM "Contractor"
-              WHERE id = ${payeeRef}
-              LIMIT 1
-            `;
-            ctr = row || null;
-          }
-
-          if (!ctr) {
-            console.warn(`[taxbandits webhook] No contractor found for submissionId=${submissionId} payeeRef=${payeeRef}`);
-            return;
-          }
-
-          if (ctr.w9_status === 'verified') {
-            console.log(`[taxbandits webhook] W-9 already verified for contractor ${ctr.id} — idempotent skip.`);
-            return;
-          }
-
-          // Map TIN result to DB status:
-          //   TINMatching=SUCCESS           → 'verified'
-          //   TINMatching=FAILED            → 'rejected'  (admin must be notified)
-          //   TINMatching=ORDER_CREATED|etc → 'pending'   (wait for follow-up webhook)
-          let newStatus;
-          if (tinVerified)    newStatus = 'verified';
-          else if (tinFailed) newStatus = 'rejected';
-          else                newStatus = 'pending';
-
-          await sql`
-            UPDATE "Contractor"
-            SET w9_status  = ${newStatus},
-                updated_at = NOW()
-            WHERE id = ${ctr.id}
-          `;
-
-          console.log(`[taxbandits webhook] contractor ${ctr.id} (${ctr.email}) w9_status → ${newStatus}`);
-
-          // TIN match FAILED — alert admin immediately so they can follow up with contractor
-          if (tinFailed) {
-            try {
-              const SibApiV3Sdk = require('sib-api-v3-sdk');
-              const sibClient   = SibApiV3Sdk.ApiClient.instance;
-              sibClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
-              const transactional = new SibApiV3Sdk.TransactionalEmailsApi();
-              await transactional.sendTransacEmail({
-                sender:      { name: 'Perkfinity System', email: 'support@perkfinity.net' },
-                to:          [{ email: 'support@perkfinity.net', name: 'Admin' }],
-                subject:     `❌ W-9 TIN Match FAILED — ${ctr.full_name}`,
-                htmlContent: `<h2>W-9 TIN Match Failed</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) completed their W-9 form, but the <strong>IRS TIN match failed</strong> — their name and tax ID do not match IRS records.</p><p>Their status has been set to <code>rejected</code>. Please contact them to resubmit with the correct legal name and TIN.</p><p>TaxBandits Submission ID: <code>${submissionId || 'N/A'}</code></p>`,
-              });
-            } catch (emailErr) {
-              console.error('[taxbandits webhook] TIN FAILED admin email error:', emailErr.message);
-            }
-            return;
-          }
-
-          if (newStatus === 'verified') {
-            // Notify admin
-            try {
-              const SibApiV3Sdk = require('sib-api-v3-sdk');
-              const sibClient   = SibApiV3Sdk.ApiClient.instance;
-              sibClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
-              const transactional = new SibApiV3Sdk.TransactionalEmailsApi();
-              await transactional.sendTransacEmail({
-                sender:      { name: 'Perkfinity System', email: 'support@perkfinity.net' },
-                to:          [{ email: 'support@perkfinity.net', name: 'Admin' }],
-                subject:     `✅ W-9 Verified — ${ctr.full_name}`,
-                htmlContent: `<h2>W-9 Fully Verified</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) has completed their W-9 and the TIN match with the IRS was successful.</p><p>They are now eligible to receive commission payouts.</p><p>TaxBandits Submission ID: <code>${submissionId}</code></p>`,
-              });
-            } catch (emailErr) {
-              console.error('[taxbandits webhook] Admin notification email failed:', emailErr.message);
-            }
-          }
-        } catch (tbWebhookErr) {
-          console.error('[taxbandits webhook] Processing error:', tbWebhookErr.message);
-        }
-      })();
-
-      return;
-    }
 
     return send(res, 404, { success: false, error: `No route: ${method} ${url}` });
 
