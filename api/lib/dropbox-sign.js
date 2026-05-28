@@ -409,7 +409,7 @@ async function sendICA(p) {
   form.append('signers[0][order]',         '0');
 
   // Signer 2 = Company / Nader (countersigns after contractor)
-  form.append('signers[1][name]',          'Nader Ordubadi (Perkfinity)');
+  form.append('signers[1][name]',          'Nader Ordubadi');
   form.append('signers[1][email_address]', companyEmail);
   form.append('signers[1][order]',         '1');
 
