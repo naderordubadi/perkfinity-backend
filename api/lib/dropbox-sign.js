@@ -389,9 +389,8 @@ function dsRequest(path, form) {
  * @returns {Promise<{ signatureRequestId: string }>}
  */
 async function sendICA(p) {
-  // The Dropbox Sign API account is on a free tier, so we MUST force testMode to true
-  // until the account is upgraded to a paid API plan.
-  const testMode = true;
+  const isProd  = process.env.NODE_ENV === 'production';
+  const testMode = p.testMode !== undefined ? p.testMode : !isProd;
 
   const pdfBuffer = await generateICAPdf(p);
 
