@@ -88,6 +88,7 @@ module.exports = async (req, res) => {
         const customerId = session.customer;
 
         if (subscriptionId) {
+          const subscription = await stripe.subscriptions.retrieve(subscriptionId);
           // Update merchant to active tier1
           await sql`
             UPDATE "Merchant"
@@ -97,7 +98,7 @@ module.exports = async (req, res) => {
                 billing_status = 'active',
                 account_blocked = false,
                 subscription_started_at = NOW(),
-                next_billing_date = NOW() + INTERVAL '30 days',
+                next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
                 updated_at = NOW()
             WHERE id = ${merchantId}
           `;
@@ -169,13 +170,25 @@ module.exports = async (req, res) => {
         if (merchant.account_blocked && !merchant.stripe_subscription_id) {
           console.log(`[Stripe] Late invoice cleared for permanently cancelled merchant ${merchant.id}. Keeping blocked status.`);
         } else {
+          let currentPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+          if (subscriptionId) {
+            try {
+              const sub = await stripe.subscriptions.retrieve(subscriptionId);
+              const cpe = sub.current_period_end || sub.items?.data?.[0]?.current_period_end;
+              if (cpe) {
+                currentPeriodEnd = new Date(cpe * 1000);
+              }
+            } catch (e) {
+              console.error('Failed to fetch subscription for webhook:', e);
+            }
+          }
           // Update billing status for active/past_due subscriptions
           await sql`
             UPDATE "Merchant"
             SET billing_status = 'active',
                 account_blocked = false,
                 cancelled_at = NULL,
-                next_billing_date = NOW() + INTERVAL '30 days',
+                next_billing_date = ${currentPeriodEnd},
                 updated_at = NOW()
             WHERE id = ${merchant.id}
           `;

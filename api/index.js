@@ -4382,6 +4382,7 @@ module.exports = async function handler(req, res) {
 
       const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
       let stripeSubscriptionId = null;
+      let stripeCurrentPeriodEnd = null;
       let billingWarning = null;
 
       // Only create subscription immediately if no promo billing delay
@@ -4407,6 +4408,7 @@ module.exports = async function handler(req, res) {
                 metadata: { merchant_id: merchantId, trigger: 'admin_approval', billing_cycle: merchant.billing_cycle || 'monthly' }
               });
               stripeSubscriptionId = subscription.id;
+              stripeCurrentPeriodEnd = subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end;
             }
           } catch (stripeErr) {
             console.error(`Stripe subscription creation on approval failed for ${merchantId}:`, stripeErr.message);
@@ -4422,7 +4424,7 @@ module.exports = async function handler(req, res) {
             billing_status = ${stripeSubscriptionId ? 'active' : 'trial'},
             stripe_subscription_id = ${stripeSubscriptionId},
             subscription_started_at = ${stripeSubscriptionId ? new Date() : null},
-            next_billing_date = ${stripeSubscriptionId ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) : null},
+            next_billing_date = ${stripeCurrentPeriodEnd ? new Date(stripeCurrentPeriodEnd * 1000) : (stripeSubscriptionId ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) : null)},
             updated_at = NOW()
         WHERE id = ${merchantId}
       `;
@@ -4819,7 +4821,7 @@ module.exports = async function handler(req, res) {
               billing_status             = 'active',
               subscription_tier          = 'tier1',
               subscription_started_at    = NOW(),
-              next_billing_date          = NOW() + INTERVAL '30 days',
+              next_billing_date          = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
               updated_at                 = NOW()
           WHERE id = ${merchant_id}
         `;
@@ -5275,7 +5277,7 @@ module.exports = async function handler(req, res) {
               payment_failed_at     = NULL,
               payment_failure_reminder_count = NULL,
               subscription_started_at = NOW(),
-              next_billing_date     = NOW() + INTERVAL '30 days',
+              next_billing_date     = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
               updated_at            = NOW()
           WHERE id = ${merchantId}
         `;
@@ -5361,9 +5363,6 @@ module.exports = async function handler(req, res) {
             metadata: { merchant_id: merchantId, trigger: 'manual_upgrade', from_tier: currentTier, to_tier: target_tier },
           });
 
-          const nextBilling = new Date();
-          nextBilling.setDate(nextBilling.getDate() + 30);
-
           await sql`
             UPDATE "Merchant"
             SET subscription_tier              = ${target_tier},
@@ -5375,7 +5374,7 @@ module.exports = async function handler(req, res) {
                 billing_starts_at_member_count = NULL,
                 account_blocked                = false,
                 subscription_started_at        = NOW(),
-                next_billing_date              = ${nextBilling.toISOString()},
+                next_billing_date              = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
                 updated_at                     = NOW()
             WHERE id = ${merchantId}
           `;
