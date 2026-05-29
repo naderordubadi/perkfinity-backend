@@ -6023,7 +6023,7 @@ module.exports = async function handler(req, res) {
     // ── GET /api/v1/contractors/validate-code?code=REF-XXXXX ──────────
     // PUBLIC — validates a contractor referral code before signup
     if (method === 'GET' && url.startsWith('/api/v1/contractors/validate-code')) {
-      const vcCode = ((new URL('http://x' + url)).searchParams.get('code') || '').toUpperCase().trim();
+      const vcCode = ((new URL('http://x' + req.url)).searchParams.get('code') || '').toUpperCase().trim();
       if (!vcCode) return send(res, 400, { success: false, error: 'code is required.' });
       const [vcContractor] = await sql`
         SELECT id, full_name, referral_code
@@ -6082,8 +6082,8 @@ module.exports = async function handler(req, res) {
       const ncLastInit = ncParts.length > 1 ? (ncParts[ncParts.length - 1][0] || '').toUpperCase().replace(/[^A-Z]/, '') : '';
       let ncRefCode; let ncAttempts = 0;
       do {
-        const ncDigits = Math.floor(1000 + Math.random() * 9000);
-        ncRefCode = `REF-${ncFirst}${ncLastInit}${ncDigits}`;
+        const ncDigits = Math.floor(10000 + Math.random() * 90000);
+        ncRefCode = `REF-${ncFirst}${ncDigits}`;
         const [ncClash] = await sql`SELECT id FROM "Contractor" WHERE referral_code = ${ncRefCode} LIMIT 1`;
         if (!ncClash) break;
         ncAttempts++;
