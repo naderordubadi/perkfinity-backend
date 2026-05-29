@@ -3472,6 +3472,87 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: repProfile });
     }
 
+    // ── POST /api/v1/rep/sign-ica ────────────────────────────────
+    if (method === 'POST' && url === '/api/v1/rep/sign-ica') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const data = req.body || {};
+      if (!data.signatureName) return send(res, 400, { success: false, error: 'Signature name is required' });
+      
+      const [ctr] = await sql`SELECT id, full_name, email, ica_status FROM "Contractor" WHERE id = ${repId} LIMIT 1`;
+      if (!ctr) return send(res, 404, { success: false, error: 'Not found.' });
+      if (ctr.ica_status === 'signed') return send(res, 400, { success: false, error: 'ICA already signed.' });
+
+      // Mark ICA signed; auto-activate if still pending or inactive
+      await sql`
+        UPDATE "Contractor"
+        SET ica_status = 'signed',
+            status     = CASE WHEN status IN ('pending', 'inactive') THEN 'active' ELSE status END,
+            updated_at = NOW()
+        WHERE id = ${ctr.id}
+      `;
+      // Auto-start quota period if not already running
+      const [qExisting] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${ctr.id} LIMIT 1`;
+      if (!qExisting) {
+        await sql`
+          INSERT INTO "ContractorQuotaPeriod"
+            (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
+          VALUES
+            (gen_random_uuid()::text, ${ctr.id}, CURRENT_DATE,
+             CURRENT_DATE + INTERVAL '3 months', 30, 'active', NOW(), NOW())
+        `;
+        console.log(`[sign-ica] Quota period auto-started for contractor ${ctr.id}`);
+      }
+      // Notify admin
+      try {
+        const SibApiV3Sdk = require('sib-api-v3-sdk');
+        const sibClient   = SibApiV3Sdk.ApiClient.instance;
+        sibClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
+        const transactional = new SibApiV3Sdk.TransactionalEmailsApi();
+        await transactional.sendTransacEmail({
+          sender:      { name: 'Perkfinity System', email: 'support@perkfinity.net' },
+          to:          [{ email: 'support@perkfinity.net', name: 'Admin' }],
+          subject:     `✅ ICA Fully Signed — ${ctr.full_name}`,
+          htmlContent: `<h2>ICA Fully Executed</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) has electronically signed their ICA via the Rep Portal. Their quota period has been automatically started.</p>`,
+        });
+      } catch (emailErr) {
+        console.error('[sign-ica] Admin notification email failed:', emailErr.message);
+      }
+      
+      return send(res, 200, { success: true, message: 'ICA signed successfully' });
+    }
+
+    // ── GET /api/v1/rep/ica-pdf ────────────────────────────────
+    if (method === 'GET' && url === '/api/v1/rep/ica-pdf') {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const [ctr] = await sql`
+        SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents
+        FROM "Contractor" c
+        LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
+        WHERE c.id = ${repId} LIMIT 1
+      `;
+      if (!ctr) return send(res, 404, { success: false, error: 'Not found.' });
+      
+      const { generateICAPdf } = require('./lib/generate-ica.js');
+      const pdfBuffer = await generateICAPdf({
+        contractorName: ctr.legal_name || ctr.full_name,
+        contractorEmail: ctr.email,
+        agreementDate: ctr.created_at,
+        territoryZips: [], 
+        commissionRate: ctr.commission_rate || 15,
+        commissionDurationMonths: ctr.commission_duration_months || 18,
+        retainerAmount: (ctr.retainer_cents || 0) / 100,
+        isSigned: ctr.ica_status === 'signed',
+        signatureName: ctr.full_name,
+        signedDate: ctr.updated_at
+      });
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'inline; filename="Independent_Contractor_Agreement.pdf"');
+      return res.end(pdfBuffer);
+    }
+
     // ── GET /api/v1/rep/merchants ────────────────────────────────
     if (method === 'GET' && url === '/api/v1/rep/merchants') {
       const repId = verifyRepAuth(req);
@@ -6565,46 +6646,81 @@ module.exports = async function handler(req, res) {
         if (ctr.ica_status === 'signed') {
           return send(res, 400, { success: false, error: 'ICA already fully signed — cannot resend.' });
         }
-        const [terr] = await sql`
-          SELECT label, zip_codes
-          FROM "ContractorTerritory"
-          WHERE contractor_id = ${contractorId} AND status = 'active'
-          LIMIT 1
-        `;
-        const dropboxSign = require('./lib/dropbox-sign');
-        let signatureRequestId;
-        try {
-          const dsResult = await dropboxSign.sendICA({
-            contractorName:           ctr.full_name,
-            contractorEmail:          ctr.email,
-            legalName:                ctr.legal_name || ctr.full_name,
-            commissionRate:           Math.round((parseFloat(ctr.commission_rate) || 0.25) * 100), // DB stores 0.25; PDF expects 25 (%)
-            commissionDurationMonths: parseInt(ctr.commission_duration_months) || 12,              // PDF reads p.commissionDurationMonths
-            retainerAmount:           ((parseInt(ctr.retainer_cents) || 0) / 100),                 // DB stores cents; PDF expects dollars
-            agreementDate:            new Date(),                                                   // PDF lib reads p.agreementDate
-            territoryLabel:           terr?.label || 'To be assigned',
-            territoryZips:            terr?.zip_codes || [],
-          });
-          signatureRequestId = dsResult.signatureRequestId;
-          console.log(`[send-ica] Dropbox Sign request created for contractor ${contractorId}: ${signatureRequestId}`);
-        } catch (dsErr) {
-          console.error(`[send-ica] Dropbox Sign API error for contractor ${contractorId}:`, dsErr.message);
-          return send(res, 502, { success: false, error: `Dropbox Sign API error: ${dsErr.message}` });
-        }
         await sql`
           UPDATE "Contractor"
-          SET ica_status               = 'sent',
-              dropbox_sign_request_id  = ${signatureRequestId},
-              updated_at               = NOW()
+          SET ica_status = 'sent', updated_at = NOW()
           WHERE id = ${contractorId}
         `;
-        return send(res, 200, { success: true, message: `ICA sent to ${ctr.email} via Dropbox Sign.`, signature_request_id: signatureRequestId });
+
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY) {
+          try {
+            const SibApiV3Sdk = require('sib-api-v3-sdk');
+            const brevoClient = SibApiV3Sdk.ApiClient.instance;
+            brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+            const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+            const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+            sendSmtpEmail.sender = { name: 'Perkfinity', email: 'noreply@perkfinity.net' };
+            sendSmtpEmail.to = [{ email: ctr.email }];
+            sendSmtpEmail.subject = 'Action Required: Sign Your Independent Contractor Agreement';
+            sendSmtpEmail.htmlContent = `
+              <div style="font-family:sans-serif;color:#1e2035;max-width:600px;margin:0 auto;">
+                <h2>Hello ${ctr.full_name},</h2>
+                <p>Your Independent Contractor Agreement (ICA) has been generated and is ready for your signature.</p>
+                <p>Please log in to your Perkfinity Rep Portal to review the terms and electronically sign the agreement.</p>
+                <p>Your portal link: <a href="https://perkfinity.net/reps/" style="color:#5b3fa5;">https://perkfinity.net/reps/</a></p>
+                <br>
+                <p>Thank you,<br>The Perkfinity Team</p>
+              </div>
+            `;
+            await emailApi.sendTransacEmail(sendSmtpEmail);
+            console.log(`[send-ica] Notification email sent to ${ctr.email}`);
+          } catch(e) {
+            console.error('[send-ica] Brevo email error:', e);
+          }
+        }
+        
+        return send(res, 200, { success: true, message: `ICA sent. Contractor notified via email.` });
       }
     }
 
     // ══════════════════════════════════════════════════════════════════
     // TERRITORY ENDPOINTS
     // ══════════════════════════════════════════════════════════════════
+
+    // ── GET /api/v1/admin/contractors/:id/ica-pdf ─────────────────────
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/ica-pdf$/);
+      if (m && method === 'GET') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const contractorId = m[1];
+        const [ctr] = await sql`
+          SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents
+          FROM "Contractor" c
+          LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
+          WHERE c.id = ${contractorId} LIMIT 1
+        `;
+        if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
+        
+        const { generateICAPdf } = require('./lib/generate-ica.js');
+        const pdfBuffer = await generateICAPdf({
+          contractorName: ctr.legal_name || ctr.full_name,
+          contractorEmail: ctr.email,
+          agreementDate: ctr.created_at,
+          territoryZips: [], 
+          commissionRate: ctr.commission_rate || 15,
+          commissionDurationMonths: ctr.commission_duration_months || 18,
+          retainerAmount: (ctr.retainer_cents || 0) / 100,
+          isSigned: ctr.ica_status === 'signed',
+          signatureName: ctr.full_name,
+          signedDate: ctr.updated_at
+        });
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="ICA_${ctr.full_name.replace(/\s+/g, '_')}.pdf"`);
+        return res.end(pdfBuffer);
+      }
+    }
 
     // ── GET /api/v1/admin/contractors/:id/territory ───────────────────
     {
@@ -6764,80 +6880,7 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ── POST /api/v1/webhooks/dropbox-sign ───────────────────────────
-    // Dropbox Sign calls this when a signing event occurs.
-    // MUST respond 200 with body 'Hello API Event Received' to acknowledge.
-    if (method === 'POST' && url === '/api/v1/webhooks/dropbox-sign') {
-      const dsBody   = req.body || {};
-      const eventType = dsBody?.event?.event_type || dsBody?.event_type || null;
-      const sigReqId  = dsBody?.signature_request?.signature_request_id ||
-                        dsBody?.payload?.signature_request?.signature_request_id || null;
-      console.log(`[dropbox-sign webhook] event_type=${eventType} sig_req_id=${sigReqId}`);
 
-      if (eventType === 'signature_request_all_signed' && sigReqId) {
-        // Process async — must return 200 immediately
-        (async () => {
-          try {
-            const [ctr] = await sql`
-              SELECT id, full_name, email, ica_status
-              FROM "Contractor"
-              WHERE dropbox_sign_request_id = ${sigReqId}
-              LIMIT 1
-            `;
-            if (!ctr) {
-              console.warn(`[dropbox-sign webhook] No contractor found for sig_req_id=${sigReqId}`);
-              return;
-            }
-            if (ctr.ica_status === 'signed') {
-              console.log(`[dropbox-sign webhook] ICA already marked signed for ${ctr.id} — skipping.`);
-              return;
-            }
-            // Mark ICA signed; auto-activate if still pending
-            await sql`
-              UPDATE "Contractor"
-              SET ica_status = 'signed',
-                  status     = CASE WHEN status = 'pending' THEN 'active' ELSE status END,
-                  updated_at = NOW()
-              WHERE id = ${ctr.id}
-            `;
-            // Auto-start quota period if not already running
-            const [qExisting] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${ctr.id} LIMIT 1`;
-            if (!qExisting) {
-              await sql`
-                INSERT INTO "ContractorQuotaPeriod"
-                  (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
-                VALUES
-                  (gen_random_uuid()::text, ${ctr.id}, CURRENT_DATE,
-                   CURRENT_DATE + INTERVAL '3 months', 30, 'active', NOW(), NOW())
-              `;
-              console.log(`[dropbox-sign webhook] Quota period auto-started for contractor ${ctr.id}`);
-            }
-            // Notify admin
-            try {
-              const SibApiV3Sdk = require('sib-api-v3-sdk');
-              const sibClient   = SibApiV3Sdk.ApiClient.instance;
-              sibClient.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
-              const transactional = new SibApiV3Sdk.TransactionalEmailsApi();
-              await transactional.sendTransacEmail({
-                sender:      { name: 'Perkfinity System', email: 'support@perkfinity.net' },
-                to:          [{ email: 'support@perkfinity.net', name: 'Admin' }],
-                subject:     `✅ ICA Fully Signed — ${ctr.full_name}`,
-                htmlContent: `<h2>ICA Fully Executed</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) has completed signing. Their quota period has been automatically started.</p><p>Signature Request ID: <code>${sigReqId}</code></p>`,
-              });
-            } catch (emailErr) {
-              console.error('[dropbox-sign webhook] Admin notification email failed:', emailErr.message);
-            }
-            console.log(`[dropbox-sign webhook] ICA signed + quota started for contractor ${ctr.id} (${ctr.email})`);
-          } catch (webhookErr) {
-            console.error('[dropbox-sign webhook] Processing error:', webhookErr.message);
-          }
-        })();
-      }
-
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Hello API Event Received');
-      return;
-    }
 
 
 

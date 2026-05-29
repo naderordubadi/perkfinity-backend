@@ -21,9 +21,11 @@
     "stripe": "^21.0.1"
   },
   "devDependencies": {
+    "@prisma/client": "^7.8.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/jsonwebtoken": "^9.0.0",
     "@types/node": "^20.5.9",
+    "prisma": "^7.8.0",
     "tsx": "^3.12.7",
     "typescript": "^5.2.2"
   }

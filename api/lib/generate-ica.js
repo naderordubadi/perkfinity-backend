@@ -268,12 +268,6 @@ function generateICAPdf(p) {
     divider();
 
     // ── SIGNATURES ──────────────────────────────────────────────────────────
-    // Dropbox Sign text tags are embedded in white text so they are invisible
-    // to readers but detectable by Dropbox Sign's parser.
-    // Format: [type|req|signerN|label:Label Text]
-    //   type    = sig | date | initials | text
-    //   req     = required (omit if optional)
-    //   signerN = signer1 (Contractor) or signer2 (Company)
 
     doc.addPage();
     h1('SIGNATURES');
@@ -285,145 +279,45 @@ function generateICAPdf(p) {
     doc.font('Helvetica-Bold').fontSize(BODY_SIZE).text('Safe Box Financial Technologies and Education LLC\n(d/b/a Perkfinity)', 72, sigY, { width: W / 2 - 20 });
     doc.moveDown(2.5);
     doc.moveTo(72, doc.y).lineTo(72 + W / 2 - 30, doc.y).stroke('#333333');
-    // Embed Company text tags (white / invisible)
+    
+    // Company Signature
     const companyTagY = doc.y - 14;
-    doc.fillColor('white').fontSize(8)
-       .text('[sig|req|signer2|label:Company Signature]', 72, companyTagY, { lineBreak: false });
-    doc.fillColor('black');
+    if (p.isSigned) {
+      doc.font('Helvetica-Oblique').fontSize(14).text('Nader Ordubadi', 72, companyTagY);
+    }
+    
     doc.moveDown(0.4);
     doc.font('Helvetica').fontSize(BODY_SIZE).text('Signature', { indent: 0 });
     doc.moveDown(0.6);
     doc.font('Helvetica').fontSize(BODY_SIZE).text('Name: Nader Ordubadi');
     doc.font('Helvetica').fontSize(BODY_SIZE).text('Title: Founder & CEO');
-    doc.font('Helvetica').fontSize(BODY_SIZE).text(`Date: ${fmtDate(aggDate)}`);
-    // Embed Company date tag (white / invisible)
-    doc.fillColor('white').fontSize(8).text('[date|req|signer2|label:Company Date]', { lineBreak: false });
-    doc.fillColor('black');
+    doc.font('Helvetica').fontSize(BODY_SIZE).text(`Date: ${fmtDate(p.signedDate || aggDate)}`);
 
     // Right column — Contractor (signer 1)
     doc.font('Helvetica-Bold').fontSize(BODY_SIZE).text('Contractor', 72 + W / 2 + 10, sigY, { width: W / 2 - 10 });
     const contractorSigY = sigY + doc.currentLineHeight() * 4;
     doc.moveTo(72 + W / 2 + 10, contractorSigY).lineTo(72 + W, contractorSigY).stroke('#333333');
-    // Embed Contractor text tags (white / invisible)
-    doc.fillColor('white').fontSize(8)
-       .text('[sig|req|signer1|label:Contractor Signature]', 72 + W / 2 + 10, contractorSigY - 14, { lineBreak: false });
-    doc.fillColor('black');
+    
+    // Contractor Signature
+    if (p.isSigned && p.signatureName) {
+      doc.font('Helvetica-Oblique').fontSize(14).text(p.signatureName, 72 + W / 2 + 10, contractorSigY - 14);
+    }
+
     doc.font('Helvetica').fontSize(BODY_SIZE).text('Signature', 72 + W / 2 + 10, contractorSigY + 6);
     doc.moveDown(0.6);
     doc.font('Helvetica').fontSize(BODY_SIZE).text(`Name: ${p.contractorName}`, 72 + W / 2 + 10);
-    doc.font('Helvetica').fontSize(BODY_SIZE).text(`Date: ${fmtDate(aggDate)}`, 72 + W / 2 + 10);
-    // Embed Contractor date tag (white / invisible)
-    doc.fillColor('white').fontSize(8).text('[date|req|signer1|label:Contractor Date]', 72 + W / 2 + 10, doc.y, { lineBreak: false });
-    doc.fillColor('black');
+    doc.font('Helvetica').fontSize(BODY_SIZE).text(`Date: ${fmtDate(p.signedDate || aggDate)}`, 72 + W / 2 + 10);
 
     doc.moveDown(3);
     divider();
-    doc.font('Helvetica-Oblique').fontSize(8.5).fillColor('#666666')
-       .text('This Agreement is executed electronically via Dropbox Sign. Electronic signatures have the same legal effect as handwritten signatures under the Electronic Signatures in Global and National Commerce Act (E-SIGN) and California Civil Code § 1633.1 et seq.', { align: 'center' });
+    
+    if (p.isSigned) {
+      doc.font('Helvetica-Oblique').fontSize(8.5).fillColor('#666666')
+         .text(`This Agreement was electronically signed by ${p.signatureName} on ${fmtDate(p.signedDate || aggDate)} via the Perkfinity Rep Portal. Electronic signatures have the same legal effect as handwritten signatures under the Electronic Signatures in Global and National Commerce Act (E-SIGN) and California Civil Code § 1633.1 et seq.`, { align: 'center' });
+    }
 
     doc.end();
   });
 }
 
-// ─── Dropbox Sign API helper ─────────────────────────────────────────────────
-
-/**
- * Post a multipart/form-data request to the Dropbox Sign REST API.
- * Authentication: HTTP Basic with apiKey as username, empty password.
- */
-function dsRequest(path, form) {
-  const apiKey = process.env.DROPBOX_SIGN_API_KEY;
-  if (!apiKey) throw new Error('DROPBOX_SIGN_API_KEY not set in environment');
-
-  return new Promise((resolve, reject) => {
-    const auth    = Buffer.from(`${apiKey}:`).toString('base64');
-    const headers = {
-      ...form.getHeaders(),
-      'Authorization': `Basic ${auth}`,
-    };
-
-    const options = {
-      hostname: 'api.hellosign.com',
-      path,
-      method:  'POST',
-      headers,
-    };
-
-    const req = https.request(options, (res) => {
-      let raw = '';
-      res.on('data', chunk => { raw += chunk; });
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(raw);
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(parsed);
-          } else {
-            reject(new Error(`Dropbox Sign API error ${res.statusCode}: ${JSON.stringify(parsed)}`));
-          }
-        } catch (e) {
-          reject(new Error(`Dropbox Sign parse error: ${raw}`));
-        }
-      });
-    });
-
-    req.on('error', reject);
-    form.pipe(req);
-  });
-}
-
-// ─── Public API ──────────────────────────────────────────────────────────────
-
-/**
- * sendICA
- * Generates a personalised ICA PDF and sends a Dropbox Sign signing request.
- *
- * @param {object} p
- * @param {string} p.contractorName
- * @param {string} p.contractorEmail
- * @param {string|Date} p.agreementDate      Defaults to today
- * @param {string[]} p.territoryZips         ZIP codes for the territory
- * @param {number} p.commissionRate          e.g. 25
- * @param {number} p.commissionDurationMonths e.g. 12
- * @param {number} p.retainerAmount          e.g. 0
- * @param {boolean} [p.testMode]             true in non-production (default: !prod)
- * @returns {Promise<{ signatureRequestId: string }>}
- */
-async function sendICA(p) {
-  const isProd  = process.env.NODE_ENV === 'production';
-  const testMode = p.testMode !== undefined ? p.testMode : !isProd;
-
-  const pdfBuffer = await generateICAPdf(p);
-
-  const form = new FormData();
-  form.append('test_mode',  testMode ? '1' : '0');
-  form.append('use_text_tags', '1');
-  form.append('hide_text_tags', '1');
-  form.append('subject',  `Independent Contractor Agreement — Perkfinity`);
-  form.append('message',  `Hi ${p.contractorName},\n\nPlease review and sign your Independent Contractor Agreement with Perkfinity. Once you sign, we will countersign promptly and you will receive a fully executed copy for your records.\n\nKey terms:\n• Commission: ${p.commissionRate}% for ${p.commissionDurationMonths} months\n• Monthly Retainer: $${Number(p.retainerAmount || 0).toFixed(2)}\n• Quota: 30 merchants in 3 months\n\nIf you have any questions, reply to this email.\n\n— Perkfinity Team`);
-  form.append('requester_email_address', 'support@perkfinity.net');
-
-  // Signer 1 = Contractor (signs first)
-  form.append('signers[0][name]',          p.contractorName);
-  form.append('signers[0][email_address]', p.contractorEmail);
-  form.append('signers[0][order]',         '0');
-
-  // Signer 2 = Company / Nader (countersigns after contractor)
-  form.append('signers[1][name]',          'Nader Ordubadi');
-  form.append('signers[1][email_address]', 'support@perkfinity.net');
-  form.append('signers[1][order]',         '1');
-
-  form.append('files[0]', pdfBuffer, {
-    filename:    'perkfinity-ica.pdf',
-    contentType: 'application/pdf',
-  });
-
-  const result = await dsRequest('/v3/signature_request/send', form);
-  const signatureRequestId = result?.signature_request?.signature_request_id;
-  if (!signatureRequestId) {
-    throw new Error(`Dropbox Sign returned no signature_request_id. Response: ${JSON.stringify(result)}`);
-  }
-
-  return { signatureRequestId };
-}
-
-module.exports = { sendICA, generateICAPdf };
+module.exports = { generateICAPdf };
