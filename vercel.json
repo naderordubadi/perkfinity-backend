@@ -16,6 +16,10 @@
     {
       "path": "/api/cron/generate-contractor-payouts",
       "schedule": "0 9 1 * *"
+    },
+    {
+      "path": "/api/cron/cleanup-ghost-users",
+      "schedule": "0 10 * * *"
     }
   ],
   "rewrites": [
