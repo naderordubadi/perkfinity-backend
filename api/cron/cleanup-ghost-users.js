@@ -26,22 +26,18 @@ module.exports = async (req, res) => {
     // In production, we will add: AND created_at < NOW() - INTERVAL '48 hours'
     
     // First, find the ghost users created more than 48 hours ago
+    // A true ghost has NO city/zip, but DOES have an email or social login
     const ghosts = await sql`
       SELECT id FROM "User"
       WHERE city IS NULL
         AND zip_code IS NULL
+        AND (email IS NOT NULL OR apple_sub IS NOT NULL OR google_sub IS NOT NULL)
         AND created_at < NOW() - INTERVAL '48 hours'
     `;
 
     let deletedGhosts = { length: 0 };
     if (ghosts.length > 0) {
       const ghostIds = ghosts.map(u => u.id);
-
-      // Cascade delete dependent records
-      await sql`DELETE FROM "Redemption" WHERE user_id = ANY(${ghostIds})`;
-      await sql`DELETE FROM "Activation" WHERE user_id = ANY(${ghostIds})`;
-      await sql`DELETE FROM "Event" WHERE user_id = ANY(${ghostIds})`;
-      await sql`DELETE FROM "MerchantMember" WHERE user_id = ANY(${ghostIds})`;
 
       // Delete the users
       deletedGhosts = await sql`
