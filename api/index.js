@@ -3439,12 +3439,39 @@ module.exports = async function handler(req, res) {
       } catch (e) { return null; }
     }
 
+    // ── POST /api/v1/rep/reset-password ──────────────────────────
+    if (method === 'POST' && url.endsWith('/rep/reset-password')) {
+      const { token, password } = req.body || {};
+      if (!token || !password) return send(res, 400, { success: false, error: 'Token and password are required.' });
+      if (password.length < 8) return send(res, 400, { success: false, error: 'Password must be at least 8 characters long.' });
+
+      const [rep] = await sql`
+        SELECT id FROM "Contractor"
+        WHERE invite_token = ${token}
+          AND invite_expires_at > NOW()
+        LIMIT 1
+      `;
+      if (!rep) return send(res, 400, { success: false, error: 'Invalid or expired invite token. Please request a new one from the Admin.' });
+
+      const hash = await bcrypt.hash(password, 10);
+      await sql`
+        UPDATE "Contractor"
+        SET password_hash = ${hash},
+            invite_token = NULL,
+            invite_expires_at = NULL,
+            updated_at = NOW()
+        WHERE id = ${rep.id}
+      `;
+
+      return send(res, 200, { success: true, message: 'Password has been set successfully. You can now log in.' });
+    }
+
     // ── POST /api/v1/rep/login ───────────────────────────────────
     if (method === 'POST' && url.endsWith('/rep/login')) {
       const { email, password } = req.body || {};
       if (!email || !password) return send(res, 400, { success: false, error: 'Email and password are required.' });
       const [repLoginRow] = await sql`
-        SELECT id, full_name, email, referral_code, status, w9_status, ica_status, password_hash
+        SELECT id, full_name, email, referral_code, status, ica_status, stripe_onboarding_status, stripe_account_id, password_hash
         FROM "Contractor"
         WHERE email = ${email.toLowerCase().trim()}
         LIMIT 1
@@ -3465,7 +3492,7 @@ module.exports = async function handler(req, res) {
       const repId = verifyRepAuth(req);
       if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
       const [repProfile] = await sql`
-        SELECT id, full_name, legal_name, email, phone, referral_code, status, w9_status, ica_status, entity_type, created_at
+        SELECT id, full_name, legal_name, email, phone, referral_code, status, ica_status, stripe_onboarding_status, stripe_account_id, entity_type, created_at
         FROM "Contractor" WHERE id = ${repId} LIMIT 1
       `;
       if (!repProfile) return send(res, 404, { success: false, error: 'Not found.' });
@@ -3534,17 +3561,20 @@ module.exports = async function handler(req, res) {
       `;
       if (!ctr) return send(res, 404, { success: false, error: 'Not found.' });
       
+      const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${repId} AND status = 'active' LIMIT 1`;
+
       const { generateICAPdf } = require('./lib/generate-ica.js');
       const pdfBuffer = await generateICAPdf({
         contractorName: ctr.legal_name || ctr.full_name,
         contractorEmail: ctr.email,
-        agreementDate: ctr.created_at,
-        territoryZips: [], 
+        agreementDate: ctr.ica_status === 'signed' ? ctr.updated_at : new Date(),
+        territoryZips: terr && terr.zip_codes ? terr.zip_codes : [], 
         commissionRate: ctr.commission_rate || 15,
-        commissionDurationMonths: ctr.commission_duration_months || 18,
+        commissionDurationMonths: ctr.commission_duration_months || 12,
         retainerAmount: (ctr.retainer_cents || 0) / 100,
         isSigned: ctr.ica_status === 'signed',
         signatureName: ctr.full_name,
+        companySignatory: ctr.ica_company_signatory,
         signedDate: ctr.updated_at
       });
 
@@ -3574,10 +3604,10 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url === '/api/v1/rep/earnings') {
       const repId = verifyRepAuth(req);
       if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
-      const [repW9] = await sql`SELECT w9_status FROM "Contractor" WHERE id = ${repId} LIMIT 1`;
+      const [repW9] = await sql`SELECT stripe_onboarding_status FROM "Contractor" WHERE id = ${repId} LIMIT 1`;
       if (!repW9) return send(res, 404, { success: false, error: 'Not found.' });
-      if (repW9.w9_status !== 'verified')
-        return send(res, 200, { success: true, gated: true, message: 'Complete your W-9 to view earnings.' });
+      if (repW9.stripe_onboarding_status !== 'complete')
+        return send(res, 200, { success: true, gated: true, message: 'Complete Stripe onboarding to view earnings.' });
       const repPayoutsAll = await sql`SELECT status, total_cents, commission_cents, retainer_cents FROM "ContractorPayout" WHERE contractor_id = ${repId}`;
       const total_earned_cents = repPayoutsAll.reduce((s, p) => s + (p.total_cents || 0), 0);
       const pending_cents = repPayoutsAll.filter(p => p.status === 'pending' || p.status === 'approved').reduce((s, p) => s + (p.total_cents || 0), 0);
@@ -3590,14 +3620,14 @@ module.exports = async function handler(req, res) {
     if (method === 'GET' && url === '/api/v1/rep/payouts') {
       const repId = verifyRepAuth(req);
       if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
-      const [repPayW9] = await sql`SELECT w9_status FROM "Contractor" WHERE id = ${repId} LIMIT 1`;
+      const [repPayW9] = await sql`SELECT stripe_onboarding_status FROM "Contractor" WHERE id = ${repId} LIMIT 1`;
       if (!repPayW9) return send(res, 404, { success: false, error: 'Not found.' });
-      if (repPayW9.w9_status !== 'verified')
-        return send(res, 200, { success: true, gated: true, message: 'Complete your W-9 to view payouts.' });
+      if (repPayW9.stripe_onboarding_status !== 'complete')
+        return send(res, 200, { success: true, gated: true, message: 'Complete Stripe onboarding to view payouts.' });
       const repPayoutsList = await sql`
         SELECT id, period_start, period_end, commission_cents, retainer_cents,
                milestone_bonus_cents, retention_bonus_cents, special_bonus_cents,
-               total_cents, status, payment_method, paid_at, created_at
+               total_cents, status, payment_method, paid_at, created_at, breakdown
         FROM "ContractorPayout"
         WHERE contractor_id = ${repId}
         ORDER BY created_at DESC
@@ -5889,8 +5919,9 @@ module.exports = async function handler(req, res) {
         address        TEXT,
         referral_code  TEXT UNIQUE NOT NULL,
         status         TEXT NOT NULL DEFAULT 'inactive',
-        w9_status      TEXT NOT NULL DEFAULT 'not_submitted',
         ica_status     TEXT NOT NULL DEFAULT 'not_sent',
+        stripe_account_id TEXT,
+        stripe_onboarding_status TEXT NOT NULL DEFAULT 'pending',
         payment_method TEXT NOT NULL DEFAULT 'check',
         notes          TEXT,
         created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -5991,6 +6022,11 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS entity_type TEXT`;
       // Idempotent: Dropbox Sign request ID for ICA webhook correlation
       await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS dropbox_sign_request_id TEXT`;
+      // Idempotent: Stripe Connect fields
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS stripe_account_id TEXT`;
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS stripe_onboarding_status TEXT NOT NULL DEFAULT 'pending'`;
+      // Idempotent: ICA Company Signatory
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS ica_company_signatory TEXT`;
       // Territory table — one active territory per rep
       await sql`CREATE TABLE IF NOT EXISTS "ContractorTerritory" (
         id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -6032,6 +6068,72 @@ module.exports = async function handler(req, res) {
       `;
       if (!vcContractor) return send(res, 200, { valid: false });
       return send(res, 200, { valid: true, contractor_id: vcContractor.id, contractor_name: vcContractor.full_name, referral_code: vcContractor.referral_code });
+    }
+
+    // ── POST /api/v1/contractors/stripe/create-account ──────────────────
+    if (method === 'POST' && url.endsWith('/contractors/stripe/create-account')) {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      try {
+        const [rep] = await sql`SELECT id, email, full_name, stripe_account_id FROM "Contractor" WHERE id = ${repId}`;
+        if (!rep) return send(res, 404, { success: false, error: 'Contractor not found' });
+        
+        if (rep.stripe_account_id) {
+          return send(res, 200, { success: true, stripe_account_id: rep.stripe_account_id, message: 'Account already exists' });
+        }
+
+        const stripeClient = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
+        if (!stripeClient) return send(res, 500, { success: false, error: 'Stripe not configured' });
+
+        const account = await stripeClient.accounts.create({
+          type: 'express',
+          country: 'US',
+          email: rep.email,
+          capabilities: { 
+            transfers: { requested: true },
+            tax_reporting_us_1099_misc: { requested: true }
+          },
+          business_type: 'individual',
+          business_profile: {
+            name: rep.full_name,
+            product_description: 'Independent Sales Contractor for Perkfinity'
+          }
+        });
+
+        await sql`UPDATE "Contractor" SET stripe_account_id = ${account.id} WHERE id = ${repId}`;
+        return send(res, 200, { success: true, stripe_account_id: account.id });
+      } catch (e) {
+        console.error('[Stripe] Create Account Error:', e.message);
+        return send(res, 500, { success: false, error: e.message });
+      }
+    }
+
+    // ── POST /api/v1/contractors/stripe/onboarding-link ───────────────
+    if (method === 'POST' && url.endsWith('/contractors/stripe/onboarding-link')) {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      try {
+        const [rep] = await sql`SELECT stripe_account_id FROM "Contractor" WHERE id = ${repId}`;
+        if (!rep || !rep.stripe_account_id) return send(res, 400, { success: false, error: 'Stripe account not created' });
+        
+        const stripeClient = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
+        if (!stripeClient) return send(res, 500, { success: false, error: 'Stripe not configured' });
+
+        const origin = req.headers.origin || 'http://localhost:3000'; // fallback
+        const accountLink = await stripeClient.accountLinks.create({
+          account: rep.stripe_account_id,
+          refresh_url: `${origin}/reps/index.html?onboarding=refresh`,
+          return_url: `${origin}/reps/index.html?onboarding=return`,
+          type: 'account_onboarding',
+        });
+
+        return send(res, 200, { success: true, url: accountLink.url });
+      } catch (e) {
+        console.error('[Stripe] Onboarding Link Error:', e.message);
+        return send(res, 500, { success: false, error: e.message });
+      }
     }
 
     // ── PATCH /api/v1/merchants/referral-code ─────────────────────────
@@ -6093,7 +6195,7 @@ module.exports = async function handler(req, res) {
       const validEntityTypes = ['individual', 'sole_proprietor', 'llc_single', 'llc_partnership', 's_corporation', 'c_corporation', 'other'];
       const ncEntityType = validEntityTypes.includes(ncData.entity_type) ? ncData.entity_type : null;
       const [ncContractor] = await sql`
-        INSERT INTO "Contractor" (id, full_name, legal_name, email, phone, address, referral_code, status, w9_status, ica_status, payment_method, notes, password_hash, entity_type, created_at, updated_at)
+        INSERT INTO "Contractor" (id, full_name, legal_name, email, phone, address, referral_code, status, ica_status, stripe_onboarding_status, payment_method, notes, password_hash, entity_type, created_at, updated_at)
         VALUES (
           gen_random_uuid()::text,
           ${ncData.full_name.trim()},
@@ -6103,14 +6205,14 @@ module.exports = async function handler(req, res) {
           ${ncData.address || null},
           ${ncRefCode},
           ${ncData.status || 'inactive'},
-          ${ncData.w9_status || 'not_submitted'},
           ${ncData.ica_status || 'not_sent'},
+          ${ncData.stripe_onboarding_status || 'pending'},
           ${ncData.payment_method || 'check'},
           ${ncData.notes || null},
           ${ncPasswordHash},
           ${ncEntityType},
           NOW(), NOW()
-        ) RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, w9_status, ica_status, payment_method, notes, entity_type, created_at, updated_at
+        ) RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, ica_status, stripe_onboarding_status, payment_method, notes, entity_type, created_at, updated_at
       `;
       if (ncData.commission_rate !== undefined || ncData.commission_duration_months !== undefined || ncData.retainer_cents !== undefined) {
         const ncRate = Math.min(Math.max(parseFloat(ncData.commission_rate) || 0.25, 0), 0.50);
@@ -6202,14 +6304,14 @@ module.exports = async function handler(req, res) {
                 phone          = COALESCE(${ucData.phone != null ? ucData.phone : null}, phone),
                 address        = COALESCE(${ucData.address != null ? ucData.address : null}, address),
                 status         = COALESCE(${ucData.status || null}, status),
-                w9_status      = COALESCE(${ucData.w9_status || null}, w9_status),
                 ica_status     = COALESCE(${ucData.ica_status || null}, ica_status),
+                stripe_onboarding_status = COALESCE(${ucData.stripe_onboarding_status || null}, stripe_onboarding_status),
                 payment_method = COALESCE(${ucData.payment_method || null}, payment_method),
                 notes          = COALESCE(${ucData.notes != null ? ucData.notes : null}, notes),
                 entity_type    = COALESCE(${ucEntityType !== undefined ? ucEntityType : null}, entity_type),
                 updated_at     = NOW()
             WHERE id = ${m[1]}
-            RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, w9_status, ica_status, payment_method, notes, entity_type, created_at, updated_at
+            RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, ica_status, stripe_onboarding_status, stripe_account_id, payment_method, notes, entity_type, created_at, updated_at
           `;
           if (!ucUpdated) return send(res, 404, { success: false, error: 'Contractor not found.' });
           return send(res, 200, { success: true, data: ucUpdated });
@@ -6241,7 +6343,7 @@ module.exports = async function handler(req, res) {
       const cpContId = cpQp.get('contractor_id') || null;
       const cpStatus = cpQp.get('status') || null;
       const cpList = await sql`
-        SELECT p.*, c.full_name AS contractor_name
+        SELECT p.*, c.full_name AS contractor_name, c.stripe_onboarding_status
         FROM "ContractorPayout" p
         JOIN "Contractor" c ON c.id = p.contractor_id
         WHERE (${cpContId}::text IS NULL OR p.contractor_id = ${cpContId})
@@ -6261,9 +6363,14 @@ module.exports = async function handler(req, res) {
           UPDATE "ContractorPayout"
           SET status = 'approved', approved_at = NOW(), updated_at = NOW()
           WHERE id = ${m[1]} AND status = 'pending'
+            AND EXISTS (
+              SELECT 1 FROM "Contractor" c
+              WHERE c.id = "ContractorPayout".contractor_id
+                AND c.stripe_onboarding_status = 'complete'
+            )
           RETURNING *
         `;
-        if (!appPayout[0]) return send(res, 404, { success: false, error: 'Payout not found or not in pending status.' });
+        if (!appPayout[0]) return send(res, 400, { success: false, error: 'Payout not pending or contractor Stripe KYC incomplete.' });
         return send(res, 200, { success: true, data: appPayout[0] });
       }
     }
@@ -6282,9 +6389,14 @@ module.exports = async function handler(req, res) {
               paid_at = NOW(),
               updated_at = NOW()
           WHERE id = ${m[1]} AND status = 'approved'
+            AND EXISTS (
+              SELECT 1 FROM "Contractor" c
+              WHERE c.id = "ContractorPayout".contractor_id
+                AND c.stripe_onboarding_status = 'complete'
+            )
           RETURNING *
         `;
-        if (!mpPayout[0]) return send(res, 404, { success: false, error: 'Payout not found or not in approved status.' });
+        if (!mpPayout[0]) return send(res, 400, { success: false, error: 'Payout not approved or contractor Stripe KYC incomplete.' });
         const mp = mpPayout[0];
         const mpYear = new Date().getFullYear();
         const mpBonusCents = mp.milestone_bonus_cents + mp.retention_bonus_cents + mp.special_bonus_cents;
@@ -6527,7 +6639,7 @@ module.exports = async function handler(req, res) {
       const rpPs = rpStart.toISOString().slice(0, 10);
       const rpPe = rpEnd.toISOString().slice(0, 10);
       const rpContractors = await sql`
-        SELECT c.id, c.full_name, c.w9_status,
+        SELECT c.id, c.full_name, c.stripe_onboarding_status,
                r.commission_rate, r.commission_duration_months, r.retainer_cents
         FROM "Contractor" c
         JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
@@ -6594,7 +6706,7 @@ module.exports = async function handler(req, res) {
         const rpSpecCents = rpSpecBonuses.reduce((s, b) => s + b.amount_cents, 0);
         const rpRetainer = parseInt(rc.retainer_cents) || 0;
         const rpTotal = rpComm + rpRetainer + rpMilCents + rpRet + rpSpecCents;
-        if (rpTotal > 0 && rc.w9_status === 'verified') {
+        if (rpTotal > 0 && rc.stripe_onboarding_status === 'complete') {
           const [rpPayout] = await sql`
             INSERT INTO "ContractorPayout" (
               id, contractor_id, period_start, period_end,
@@ -6625,7 +6737,95 @@ module.exports = async function handler(req, res) {
       }
       return send(res, 200, { success: true, data: { payouts_created: rpResults.length, period: `${rpPs} to ${rpPe}`, results: rpResults } });
     }
+    // ── PATCH /api/v1/admin/contractors/:id/manual-kyc ─────────────────
+    // Manually marks the Stripe KYC process as complete (fallback).
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/manual-kyc$/);
+      if (m && method === 'PATCH') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const contractorId = m[1];
+        try {
+          const [ctr] = await sql`UPDATE "Contractor" SET stripe_onboarding_status = 'complete', updated_at = NOW() WHERE id = ${contractorId} RETURNING *`;
+          if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
+          return send(res, 200, { success: true, data: ctr });
+        } catch (err) {
+          console.error(err);
+          return send(res, 500, { success: false, error: 'Failed to update KYC status.' });
+        }
+      }
+    }
 
+
+    // ── POST /api/v1/admin/contractors/:id/send-invite ─────────────────
+    // Generates a password reset / portal invite link and simulates sending an email
+    {
+      const m = url.match(/^\/api\/v1\/admin\/contractors\/([^/]+)\/send-invite$/);
+      if (m && method === 'POST') {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const contractorId = m[1];
+        
+        const inviteToken = require('crypto').randomBytes(32).toString('hex');
+        
+        await sql`
+          UPDATE "Contractor"
+          SET invite_token = ${inviteToken},
+              invite_expires_at = NOW() + INTERVAL '48 hours'
+          WHERE id = ${contractorId}
+        `;
+        
+        // Send email via Brevo
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY) {
+          try {
+            const brevoClient = SibApiV3Sdk.ApiClient.instance;
+            brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+            const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+
+            const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+            sendSmtpEmail.sender = { name: 'Perkfinity', email: 'noreply@perkfinity.net' };
+            
+            // Get rep email and name
+            const [repRecord] = await sql`SELECT email, full_name FROM "Contractor" WHERE id = ${contractorId}`;
+            if (repRecord && repRecord.email) {
+              sendSmtpEmail.to = [{ email: repRecord.email }];
+              sendSmtpEmail.subject = 'Your Perkfinity Rep Portal Access';
+              
+              // We'll point this to the rep portal login using the current environment's origin
+              const origin = req.headers.origin || 'https://perkfinity.net';
+              const inviteLink = `${origin}/reps/index.html?token=${inviteToken}`;
+              
+              sendSmtpEmail.htmlContent = `
+                <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
+                  <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
+                    <div style="color:#fff; font-size:24px; font-weight:800;">Perkfinity</div>
+                  </div>
+                  <div style="padding:28px 24px;">
+                    <div style="font-size:20px; font-weight:700; color:#1a1a2e; margin-bottom:16px;">Welcome to the Perkfinity Rep Portal</div>
+                    <p style="font-size:15px; color:#555; line-height:1.6; margin-bottom:24px;">
+                      Hi ${repRecord.full_name},<br><br>
+                      An invite or password reset link has been generated for your Sales Rep account. Click the button below to access your portal. This link expires in 48 hours.
+                    </p>
+                    <div style="text-align:center; margin-bottom:24px;">
+                      <a href="${inviteLink}" style="display:inline-block; background:#5b3fa5; color:#fff; font-weight:600; text-decoration:none; padding:14px 28px; border-radius:10px;">Access Portal</a>
+                    </div>
+                  </div>
+                </div>
+              `;
+              
+              await emailApi.sendTransacEmail(sendSmtpEmail);
+              console.log(`[Brevo] Portal invite sent to ${repRecord.email}`);
+            }
+          } catch (brevoErr) {
+            console.error('Brevo rep invite email failed:', brevoErr.message || brevoErr);
+          }
+        } else {
+          console.log(`[Email Simulator] Portal Invite Link for rep ${contractorId}:`);
+          console.log(`http://localhost:8080/reps/index.html?token=${inviteToken}`);
+        }
+        
+        return send(res, 200, { success: true, message: 'Portal invite sent successfully.' });
+      }
+    }
 
     // ── POST /api/v1/admin/contractors/:id/send-ica ────────────────────
     // Generates a personalised ICA PDF and sends it via Dropbox Sign for e-signature.
@@ -6645,9 +6845,11 @@ module.exports = async function handler(req, res) {
         if (ctr.ica_status === 'signed') {
           return send(res, 400, { success: false, error: 'ICA already fully signed — cannot resend.' });
         }
+        const data = req.body || {};
+        const companySignatory = data.company_signatory || null;
         await sql`
           UPDATE "Contractor"
-          SET ica_status = 'sent', updated_at = NOW()
+          SET ica_status = 'sent', updated_at = NOW(), ica_company_signatory = ${companySignatory}
           WHERE id = ${contractorId}
         `;
 
@@ -6701,17 +6903,20 @@ module.exports = async function handler(req, res) {
         `;
         if (!ctr) return send(res, 404, { success: false, error: 'Contractor not found.' });
         
+        const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${contractorId} AND status = 'active' LIMIT 1`;
+
         const { generateICAPdf } = require('./lib/generate-ica.js');
         const pdfBuffer = await generateICAPdf({
           contractorName: ctr.legal_name || ctr.full_name,
           contractorEmail: ctr.email,
-          agreementDate: ctr.created_at,
-          territoryZips: [], 
+          agreementDate: ctr.ica_status === 'signed' ? ctr.updated_at : new Date(),
+          territoryZips: terr && terr.zip_codes ? terr.zip_codes : [], 
           commissionRate: ctr.commission_rate || 15,
-          commissionDurationMonths: ctr.commission_duration_months || 18,
+          commissionDurationMonths: ctr.commission_duration_months || 12,
           retainerAmount: (ctr.retainer_cents || 0) / 100,
           isSigned: ctr.ica_status === 'signed',
           signatureName: ctr.full_name,
+          companySignatory: ctr.ica_company_signatory,
           signedDate: ctr.updated_at
         });
 
@@ -6785,10 +6990,21 @@ module.exports = async function handler(req, res) {
         const qCount = qEvalCount?.cnt || 0;
         const qNow = new Date(); const qEnd = new Date(qEval.period_end);
         if (qCount >= qEval.quota_target) {
-          await sql`UPDATE "ContractorQuotaPeriod" SET status = 'met', locked_at = NOW(), updated_at = NOW() WHERE id = ${qEval.id}`;
-          return send(res, 200, { success: true, result: 'met', current_count: qCount, quota_target: qEval.quota_target });
+          // Ongoing Quota Logic: Roll forward 3 months and add 10 to target
+          await sql`
+            UPDATE "ContractorQuotaPeriod" 
+            SET period_end = period_end + INTERVAL '3 months', 
+                quota_target = quota_target + 10,
+                status = 'active',
+                alert_sent = false,
+                updated_at = NOW() 
+            WHERE id = ${qEval.id}
+          `;
+          return send(res, 200, { success: true, result: 'rolled_forward', current_count: qCount, quota_target: qEval.quota_target + 10 });
         } else if (qNow > qEnd) {
+          // Missed Quota: Revoke territory
           await sql`UPDATE "ContractorQuotaPeriod" SET status = 'missed', alert_sent = true, updated_at = NOW() WHERE id = ${qEval.id}`;
+          await sql`DELETE FROM "ContractorTerritory" WHERE contractor_id = ${qEval.contractor_id}`;
           return send(res, 200, { success: true, result: 'missed', current_count: qCount, quota_target: qEval.quota_target });
         } else {
           return send(res, 200, { success: true, result: 'active', current_count: qCount, quota_target: qEval.quota_target, days_remaining: Math.ceil((qEnd - qNow) / 86400000) });

@@ -357,6 +357,39 @@ module.exports = async (req, res) => {
         break;
       }
 
+      // ═══════════════════════════════════════════════════════════
+      // ACCOUNT UPDATED — Stripe Connect Express KYC Status
+      // ═══════════════════════════════════════════════════════════
+      case 'account.updated': {
+        const account = event.data.object;
+        const [rep] = await sql`
+          SELECT id, full_name FROM "Contractor"
+          WHERE stripe_account_id = ${account.id}
+          LIMIT 1
+        `;
+
+        if (rep) {
+          if (account.charges_enabled && account.details_submitted) {
+            await sql`
+              UPDATE "Contractor"
+              SET stripe_onboarding_status = 'complete',
+                  updated_at = NOW()
+              WHERE id = ${rep.id}
+            `;
+            console.log(`[Stripe Connect] Rep ${rep.id} (${rep.full_name}) onboarding complete.`);
+          } else {
+            await sql`
+              UPDATE "Contractor"
+              SET stripe_onboarding_status = 'pending',
+                  updated_at = NOW()
+              WHERE id = ${rep.id}
+            `;
+            console.log(`[Stripe Connect] Rep ${rep.id} (${rep.full_name}) onboarding pending (KYC incomplete).`);
+          }
+        }
+        break;
+      }
+
       default:
         console.log(`[Stripe] Unhandled event type: ${event.type}`);
     }

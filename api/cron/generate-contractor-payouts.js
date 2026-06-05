@@ -7,7 +7,7 @@
  * and special bonuses for all active contractors whose W-9 is verified.
  * Creates ContractorPayout records in 'pending' status for admin review.
  *
- * Period: previous full calendar month (1st to last day).
+ * Period: month prior to last (Net-45 EOM structure).
  *
  * Commission rules:
  *   Monthly merchants:
@@ -37,8 +37,8 @@
  *   payment_failed merchants are excluded because their revenue is at risk and
  *   they should not count toward a rep's volume milestone until billing is restored.
  *
- * W-9 gate:
- *   If a contractor's W-9 is not verified, no payout record is created.
+ * Stripe KYC gate:
+ *   If a contractor's Stripe onboarding is not complete, no payout record is created.
  *   An admin notification email is sent listing all skipped contractors.
  *
  * Deployed at: /api/cron/generate-contractor-payouts
@@ -90,10 +90,10 @@ module.exports = async (req, res) => {
 
   const sql = neon(process.env.DATABASE_URL);
 
-  // Period = previous full calendar month
+  // Period = month prior to last (Net-45 EOM)
   const now         = new Date();
-  const periodStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const periodEnd   = new Date(now.getFullYear(), now.getMonth(), 0);     // last day of prior month
+  const periodStart = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+  const periodEnd   = new Date(now.getFullYear(), now.getMonth() - 1, 0);     // last day of month prior to last
   const psDate      = periodStart.toISOString().slice(0, 10);
   const peDate      = periodEnd.toISOString().slice(0, 10);
 
@@ -101,9 +101,9 @@ module.exports = async (req, res) => {
 
   try {
     // Fetch all active contractors with their compensation rules.
-    // W-9 status is checked later — we calculate first, then gate payout creation.
+    // Stripe onboarding status is checked later — we calculate first, then gate payout creation.
     const contractors = await sql`
-      SELECT c.id, c.full_name, c.w9_status,
+      SELECT c.id, c.full_name, c.stripe_onboarding_status,
              r.commission_rate, r.commission_duration_months, r.retainer_cents
       FROM "Contractor" c
       JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
@@ -111,7 +111,7 @@ module.exports = async (req, res) => {
     `;
 
     const results        = [];
-    const w9SkippedReps  = [];   // collect reps blocked by W-9 gate for admin notification
+    const stripeSkippedReps = [];   // collect reps blocked by KYC gate for admin notification
 
     for (const rc of contractors) {
       const durationMonths = parseInt(rc.commission_duration_months) || 12;
@@ -318,8 +318,8 @@ module.exports = async (req, res) => {
       const retainerCents = parseInt(rc.retainer_cents) || 0;
       const totalCents    = commCents + retainerCents + milCents + retBonusCents + specCents;
 
-      // ── Create payout record — only if something is owed AND W-9 is verified ─
-      if (totalCents > 0 && rc.w9_status === 'verified') {
+      // ── Create payout record — only if something is owed AND Stripe KYC is complete ─
+      if (totalCents > 0 && rc.stripe_onboarding_status === 'complete') {
         const [payout] = await sql`
           INSERT INTO "ContractorPayout" (
             id, contractor_id, period_start, period_end,
@@ -360,31 +360,31 @@ module.exports = async (req, res) => {
         results.push({ contractor_id: rc.id, name: rc.full_name, payout_id: payout.id, total_cents: totalCents });
         console.log(`[Cron:ContractorPayouts] Created payout for ${rc.full_name}: $${(totalCents / 100).toFixed(2)}`);
 
-      } else if (totalCents > 0 && rc.w9_status !== 'verified') {
-        // W-9 gate: log the block and collect for admin email
-        console.error(`[Cron:ContractorPayouts] W-9 BLOCK — ${rc.full_name} (${rc.id}): W-9 not verified. Would have paid $${(totalCents / 100).toFixed(2)}. Admin notified.`);
-        w9SkippedReps.push({ name: rc.full_name, id: rc.id, amount: (totalCents / 100).toFixed(2) });
+      } else if (totalCents > 0 && rc.stripe_onboarding_status !== 'complete') {
+        // Stripe gate: log the block and collect for admin email
+        console.error(`[Cron:ContractorPayouts] KYC BLOCK — ${rc.full_name} (${rc.id}): Stripe KYC not complete. Would have paid $${(totalCents / 100).toFixed(2)}. Admin notified.`);
+        stripeSkippedReps.push({ name: rc.full_name, id: rc.id, amount: (totalCents / 100).toFixed(2) });
       }
     }
 
-    // ── Send admin notification if any reps were blocked by W-9 gate ────────
-    if (w9SkippedReps.length > 0) {
-      const repRows = w9SkippedReps
+    // ── Send admin notification if any reps were blocked by Stripe gate ────────
+    if (stripeSkippedReps.length > 0) {
+      const repRows = stripeSkippedReps
         .map(r => `<tr><td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;">${r.name}</td><td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px;">${r.id}</td><td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;color:#dc2626;font-weight:600;">$${r.amount}</td></tr>`)
         .join('');
 
       await sendAdminEmail(
-        `⚠️ Perkfinity: ${w9SkippedReps.length} Contractor Payout(s) Blocked — W-9 Not Verified`,
+        `⚠️ Perkfinity: ${stripeSkippedReps.length} Contractor Payout(s) Blocked — Stripe KYC Not Complete`,
         `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;">
           <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:24px;text-align:center;">
             <div style="color:#fff;font-size:22px;font-weight:800;">Perkfinity Admin Alert</div>
           </div>
           <div style="padding:24px;">
-            <div style="font-size:18px;font-weight:700;color:#dc2626;margin-bottom:12px;">⚠️ Contractor Payouts Blocked — W-9 Missing</div>
+            <div style="font-size:18px;font-weight:700;color:#dc2626;margin-bottom:12px;">⚠️ Contractor Payouts Blocked — Stripe KYC Missing</div>
             <p style="font-size:14px;color:#555;line-height:1.6;">
               The monthly payout cron ran for period <strong>${psDate} → ${peDate}</strong>.<br>
               The following contractor(s) had earnings calculated but <strong>no payout was created</strong>
-              because their W-9 is not yet verified. They will be skipped again next month until W-9 is verified.
+              because their Stripe Connect onboarding is not yet complete. They will be skipped again next month until complete.
             </p>
             <table style="width:100%;border-collapse:collapse;margin-top:16px;font-size:14px;">
               <thead>
@@ -397,8 +397,7 @@ module.exports = async (req, res) => {
               <tbody>${repRows}</tbody>
             </table>
             <p style="font-size:13px;color:#888;margin-top:20px;">
-              Action required: Complete W-9 verification in TaxBandits and mark the contractor as verified
-              in the Admin panel → Contractors tab before the next cron run.
+              Action required: Remind the rep to log into their dashboard and complete Stripe onboarding.
             </p>
           </div>
         </div>`
@@ -409,10 +408,10 @@ module.exports = async (req, res) => {
     return res.status(200).json({
       success: true,
       payouts_created: results.length,
-      w9_blocked: w9SkippedReps.length,
+      kyc_blocked: stripeSkippedReps.length,
       period: `${psDate} to ${peDate}`,
       results,
-      w9_skipped: w9SkippedReps,
+      kyc_skipped: stripeSkippedReps,
     });
 
   } catch (err) {

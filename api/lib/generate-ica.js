@@ -122,7 +122,7 @@ function generateICAPdf(p) {
     h2('1. Independent Contractor Relationship');
     body('1.1 The Contractor is engaged as an independent contractor and not as an employee, partner, joint venturer, or agent of the Company. Nothing in this Agreement shall be construed to create an employment relationship.');
     body('1.2 The Contractor has full control over the manner and means by which the services are performed, subject to the results required by this Agreement. The Company shall not control the Contractor\'s work hours, schedule, methods, or tools.');
-    body('1.3 The Contractor is responsible for all federal, state, and local taxes on compensation received under this Agreement, including self-employment taxes. The Company will not withhold any taxes on behalf of the Contractor. The Company will issue a Form 1099-NEC to the Contractor for any compensation of $600 or more in a calendar year.');
+    body('1.3 The Contractor is responsible for all federal, state, and local taxes on compensation received under this Agreement, including self-employment taxes. The Company will not withhold any taxes on behalf of the Contractor. Tax reporting, including the issuance of Form 1099-NEC for compensation of $600 or more in a calendar year, is handled securely via a third-party payment processor (currently Stripe).');
     body('1.4 The Contractor is not entitled to any employee benefits, including but not limited to health insurance, retirement plans, paid time off, workers\' compensation, or unemployment insurance.');
     divider();
 
@@ -148,32 +148,41 @@ function generateICAPdf(p) {
     h2('4. Territory');
     body(`4.1 Assignment. Subject to this Section, the Company assigns to the Contractor the exclusive sales territory consisting of the following ZIP codes ("Territory"): ${zips}.`);
     body('4.2 Initial Exclusivity. From the Effective Date through the end of the Quota Period (Section 5), the Territory is assigned exclusively to the Contractor. No other contractor will be assigned to the same ZIP codes during this period, provided the Contractor is actively performing Services.');
-    body('4.3 Permanent Lock-In Upon Quota Met. If the Contractor meets the Quota (Section 5.1) by the end of the Quota Period, the Territory becomes permanently exclusive to the Contractor for the remaining term of this Agreement. The Company will not assign another contractor to the same Territory unless this Agreement is terminated.');
-    body('4.4 Quota Failure — Company Rights. If the Contractor fails to meet the Quota by the end of the Quota Period, the Territory\'s exclusive status expires automatically. The Company may, at its sole discretion: (a) Add one or more additional contractors to the same Territory; (b) Revoke the Contractor\'s Territory assignment entirely and assign it to a new contractor; or (c) Extend the Quota Period by a defined grace period and notify the Contractor in writing. The Company will notify the Contractor of its election in writing. The Contractor\'s right to commission on merchants already attributed prior to the quota deadline is not affected by this election.');
+    body('4.3 Ongoing Exclusivity Upon Initial Quota Met. If the Contractor meets the Initial Quota (Section 5.1) by the end of the Initial Quota Period, the Territory remains exclusive to the Contractor subject to the Ongoing Maintenance Quota (Section 5.2). The Company will not assign another contractor to the same Territory as long as the Contractor meets all ongoing performance requirements.');
+    body('4.4 Quota Failure — Company Rights. If the Contractor fails to meet any Quota by the end of the respective Quota Period, the Territory\'s exclusive status expires automatically. The Company may, at its sole discretion: (a) Add one or more additional contractors to the same Territory; (b) Revoke the Contractor\'s Territory assignment entirely and assign it to a new contractor; or (c) Extend the Quota Period by a defined grace period and notify the Contractor in writing. The Company will notify the Contractor of its election in writing. The Contractor\'s right to commission on merchants already attributed prior to the quota deadline is not affected by this election.');
     body('4.5 No Property Right. The Territory is a business management designation only. The Contractor acknowledges that the Territory does not constitute property, and the Company\'s rights under Section 4.4 are absolute upon quota failure.');
     body('4.6 Attribution. Merchant attribution is determined by the referral code used during signup, not by Territory. If a Merchant in the Contractor\'s Territory signs up using another contractor\'s referral code, attribution follows the referral code.');
     divider();
 
     // ── 5. QUOTA ────────────────────────────────────────────────────────────
     h2('5. Quota');
-    body(`5.1 Quota Requirement. To earn permanent exclusive rights to the Territory, the Contractor must onboard a minimum of 30 active Merchants to the Perkfinity platform within the first 3 months following the Effective Date ("Quota Period").`);
-    body(`5.2 Quota Period. The Quota Period begins on the Effective Date (${fmtDate(aggDate)}) and ends 3 calendar months later (${fmtDate(quotaEnd)}). The Quota Period is a one-time qualification window — it does not recur. Once the Contractor meets the Quota, no further quota requirement applies for the duration of this Agreement.`);
-    body('5.3 "Active Merchant" means a Merchant that has completed signup on the Perkfinity platform, passed any applicable review, and holds an active, paying subscription as of the last day of the Quota Period.');
-    body('5.4 Quota Tracking. The Company will provide the Contractor with access to a dashboard showing their attributed Merchant count and days remaining in the Quota Period at any time.');
-    body('5.5 Success — Territory Lock-In. If the Contractor reaches 30 active attributed Merchants before or on the last day of the Quota Period, the Territory is permanently locked in as exclusively theirs under Section 4.3. The Company will confirm lock-in in writing.');
-    body('5.6 Failure — Company Options. If the Contractor does not reach 30 active attributed Merchants by the end of the Quota Period, the Company may exercise any of the options described in Section 4.4. The Contractor will be notified in writing of the Company\'s election within 14 days of the Quota Period end.');
-    body('5.7 Commissions Unaffected. Quota failure does not affect the Contractor\'s right to commission on Merchants attributed prior to the Quota Period end. Commission continues to be paid per Section 6 for all attributed Merchants during their respective Commission Periods.');
+    body(`5.1 Initial Quota Requirement. To earn ongoing exclusive rights to the Territory, the Contractor must onboard a minimum of 30 active Merchants to the Perkfinity platform within the first 3 months following the Effective Date ("Initial Quota Period"). The Initial Quota Period begins on the Effective Date (${fmtDate(aggDate)}) and ends 3 calendar months later (${fmtDate(quotaEnd)}).`);
+    body(`5.2 Ongoing Maintenance Quota. Following the successful completion of the Initial Quota Period, the Contractor must maintain territory exclusivity by achieving a net increase of 10 active Merchants in their portfolio every subsequent 3-month calendar period ("Ongoing Quota Period"). For example, if the Contractor finishes the Initial Quota Period with 30 active Merchants, they must reach 40 active Merchants by the end of month 6, 50 by month 9, and so forth.`);
+    body('5.3 "Active Merchant" means a Merchant that has completed signup on the Perkfinity platform, passed any applicable review, and holds an active, paying subscription as of the last day of the respective Quota Period.');
+    body('5.4 Quota Tracking. The Company will provide the Contractor with access to a dashboard showing their attributed Merchant count, the current target, and days remaining in the current Quota Period at any time.');
+    body('5.5 Success — Rolling Lock-In. If the Contractor reaches the active Merchant target before or on the last day of any Quota Period, the Territory remains exclusive to them, and the target automatically rolls forward to the next 3-month milestone (+10 Merchants).');
+    body('5.6 Failure — Revocation of Exclusivity. If the Contractor fails to meet either the Initial Quota or any subsequent Ongoing Maintenance Quota by the end of the respective Quota Period, the Territory\'s exclusive status expires automatically and immediately. The Company may, at its sole discretion, revoke the Territory assignment entirely or assign additional contractors to the Territory. The Contractor will be notified in writing of the failure.');
+    body('5.7 Commissions Unaffected. Quota failure does not affect the Contractor\'s right to commission on Merchants attributed prior to the deadline. Commission continues to be paid per Section 6 for all attributed Merchants during their respective Commission Periods, even if territory exclusivity is revoked.');
     divider();
 
     // ── 6. COMPENSATION ─────────────────────────────────────────────────────
     h2('6. Compensation');
-    body(`6.1 Commission. The Company will pay the Contractor a commission of ${p.commissionRate}% of the net subscription revenue collected from each attributed Merchant for a period of ${p.commissionDurationMonths} months from the date of the Merchant's first successful payment ("Commission Period").`);
-    body(`6.2 Monthly Retainer. The Company will pay the Contractor a monthly retainer of $${retainer} ("Retainer"), payable on or around the 1st of each calendar month, subject to the Contractor being in good standing under this Agreement.`);
-    body('6.3 Payment Schedule. Commissions are calculated and paid on or around the 1st of each calendar month for the prior month\'s collected revenue.');
-    body('6.4 W-9 Requirement. No commission or retainer payment will be issued until the Contractor has submitted a completed and verified IRS Form W-9 to the Company. The Company uses TaxBandits to collect and verify W-9 forms.');
-    body('6.5 Compliance Gate. If the Contractor\'s W-9 is not on file and verified, earned commissions will be held and released upon verification. Held commissions do not accrue interest.');
-    body('6.6 No Guarantee. The Contractor acknowledges that compensation is performance-based. The Company does not guarantee any minimum earnings beyond the Retainer (if applicable).');
-    body('6.7 Expense Reimbursement. The Company does not reimburse the Contractor for any expenses, including travel, marketing materials, or equipment, unless agreed to in writing in advance.');
+    
+    const rateVal = Number(p.commissionRate) || 0;
+    const displayRate = (rateVal <= 1 ? rateVal * 100 : rateVal).toFixed(2).replace(/\.00$/, '');
+    body(`6.1 Commission. The Company will pay the Contractor a commission of ${displayRate}% of the net subscription revenue collected from each attributed Merchant for a period of ${p.commissionDurationMonths} months from the date of the Merchant's first successful payment ("Commission Period").`);
+    
+    let sec6Num = 2;
+    if (Number(retainer) > 0) {
+      body(`6.${sec6Num++} Monthly Retainer. The Company will pay the Contractor a monthly retainer of $${retainer} ("Retainer"), payable on or around the 1st of each calendar month, subject to the Contractor being in good standing under this Agreement.`);
+    }
+    
+    body(`6.${sec6Num++} Payment Schedule. Commissions are paid on a Net-45 End of Month (EOM) schedule. For example, commissions earned on revenue collected in January will be processed and paid on or around March 15th.`);
+    body(`6.${sec6Num++} KYC and Tax Compliance. No commission or retainer payment will be issued until the Contractor has completed identity verification and submitted tax information (W-9 equivalent). All KYC compliance, W-9 collection, payouts, and 1099 tax reporting are handled exclusively by a secure 3rd-party payment processor (currently Stripe).`);
+    body(`6.${sec6Num++} Data Security. The Company does not collect, store, or handle the Contractor's sensitive financial information, such as Social Security Numbers (SSN), Individual Taxpayer Identification Numbers (ITIN), or bank account routing details. All such data is transmitted directly to and managed by the 3rd-party processor.`);
+    body(`6.${sec6Num++} Compliance Gate. If the Contractor's Stripe onboarding and tax verification are not fully complete, earned commissions will be held and released only upon verified completion. Held commissions do not accrue interest.`);
+    body(`6.${sec6Num++} No Guarantee. The Contractor acknowledges that compensation is performance-based. The Company does not guarantee any minimum earnings beyond the Retainer (if applicable).`);
+    body(`6.${sec6Num++} Expense Reimbursement. The Company does not reimburse the Contractor for any expenses, including travel, marketing materials, or equipment, unless agreed to in writing in advance.`);
     divider();
 
     // ── 7. CONFIDENTIALITY ──────────────────────────────────────────────────
@@ -282,15 +291,18 @@ function generateICAPdf(p) {
     
     // Company Signature
     const companyTagY = doc.y - 14;
-    if (p.isSigned) {
-      doc.font('Helvetica-Oblique').fontSize(14).text('Nader Ordubadi', 72, companyTagY);
+    const companyName = p.companySignatory || 'Nader Ordubadi';
+    const companyTitle = p.companySignatory ? 'Authorized Representative' : 'Founder & CEO';
+
+    if (p.isSigned || p.companySignatory) {
+      doc.font('Helvetica-Oblique').fontSize(14).text(companyName, 72, companyTagY);
     }
     
     doc.moveDown(0.4);
     doc.font('Helvetica').fontSize(BODY_SIZE).text('Signature', { indent: 0 });
     doc.moveDown(0.6);
-    doc.font('Helvetica').fontSize(BODY_SIZE).text('Name: Nader Ordubadi');
-    doc.font('Helvetica').fontSize(BODY_SIZE).text('Title: Founder & CEO');
+    doc.font('Helvetica').fontSize(BODY_SIZE).text(`Name: ${companyName}`);
+    doc.font('Helvetica').fontSize(BODY_SIZE).text(`Title: ${companyTitle}`);
     doc.font('Helvetica').fontSize(BODY_SIZE).text(`Date: ${fmtDate(p.signedDate || aggDate)}`);
 
     // Right column — Contractor (signer 1)
