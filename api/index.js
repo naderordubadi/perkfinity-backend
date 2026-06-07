@@ -6138,6 +6138,37 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ── POST /api/v1/rep/stripe-sync ───────────────
+    if (method === 'POST' && url.endsWith('/rep/stripe-sync')) {
+      const repId = verifyRepAuth(req);
+      if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
+      
+      try {
+        const [rep] = await sql`SELECT stripe_account_id, stripe_onboarding_status FROM "Contractor" WHERE id = ${repId}`;
+        if (!rep || !rep.stripe_account_id) return send(res, 400, { success: false, error: 'Stripe account not created' });
+        
+        if (rep.stripe_onboarding_status === 'complete') {
+          return send(res, 200, { success: true, status: 'complete' });
+        }
+        
+        const stripeClient = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
+        if (!stripeClient) return send(res, 500, { success: false, error: 'Stripe not configured' });
+
+        const account = await stripeClient.accounts.retrieve(rep.stripe_account_id);
+        const isComplete = account.charges_enabled && account.details_submitted;
+
+        if (isComplete) {
+          await sql`UPDATE "Contractor" SET stripe_onboarding_status = 'complete', updated_at = NOW() WHERE id = ${repId}`;
+          return send(res, 200, { success: true, status: 'complete' });
+        } else {
+          return send(res, 200, { success: true, status: 'pending' });
+        }
+      } catch (e) {
+        console.error('[Stripe] Sync Error:', e.message);
+        return send(res, 500, { success: false, error: e.message });
+      }
+    }
+
     // ── PATCH /api/v1/merchants/referral-code ─────────────────────────
     // Merchant-auth required. Sets referral code for resume flow.
     // Idempotent: returns success if attribution already exists.
