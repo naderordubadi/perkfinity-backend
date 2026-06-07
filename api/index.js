@@ -6018,6 +6018,8 @@ module.exports = async function handler(req, res) {
 
       // Idempotent: rep portal password hash
       await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS password_hash TEXT`;
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS invite_token TEXT`;
+      await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS invite_expires_at TIMESTAMP`;
       // Idempotent: entity type for 1099-NEC eligibility
       await sql`ALTER TABLE "Contractor" ADD COLUMN IF NOT EXISTS entity_type TEXT`;
       // Idempotent: Dropbox Sign request ID for ICA webhook correlation
