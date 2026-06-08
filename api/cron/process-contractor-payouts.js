@@ -39,8 +39,8 @@ module.exports = async (req, res) => {
           }
         });
 
-        // Mark as paid in DB
-        await markPaid(sql, p, transfer.id);
+        // Mark as processing in DB (webhook will mark as paid later)
+        await markProcessing(sql, p, transfer.id);
         results.successful++;
       } catch (err) {
         console.error(`Failed to process payout ${p.id}:`, err);
@@ -57,6 +57,17 @@ module.exports = async (req, res) => {
     if (res) return res.status(500).json({ success: false, error: globalErr.message });
   }
 };
+
+async function markProcessing(sql, p, reference) {
+  await sql`
+    UPDATE "ContractorPayout"
+    SET status = 'processing',
+        payment_method = 'stripe_connect',
+        payment_reference = ${reference},
+        updated_at = NOW()
+    WHERE id = ${p.id}
+  `;
+}
 
 async function markPaid(sql, p, reference) {
   const mpYear = new Date().getFullYear();

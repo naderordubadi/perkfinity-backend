@@ -412,6 +412,59 @@ module.exports = async (req, res) => {
         break;
       }
 
+      // ═══════════════════════════════════════════════════════════
+      // PAYOUT PAID / FAILED — Connect Account Payouts
+      // ═══════════════════════════════════════════════════════════
+      case 'payout.paid':
+      case 'payout.failed': {
+        const stripeAccountId = event.account;
+        if (!stripeAccountId) break;
+
+        const [rep] = await sql`
+          SELECT id FROM "Contractor"
+          WHERE stripe_account_id = ${stripeAccountId}
+          LIMIT 1
+        `;
+
+        if (!rep) break;
+
+        if (event.type === 'payout.paid') {
+          const processingPayouts = await sql`
+            UPDATE "ContractorPayout"
+            SET status = 'paid',
+                paid_at = NOW(),
+                updated_at = NOW()
+            WHERE contractor_id = ${rep.id} AND status = 'processing'
+            RETURNING *
+          `;
+          
+          const mpYear = new Date().getFullYear();
+          for (const p of processingPayouts) {
+            const mpBonusCents = p.milestone_bonus_cents + p.retention_bonus_cents + p.special_bonus_cents;
+            await sql`
+              INSERT INTO "ContractorEarningsSummary" (id, contractor_id, year, commission_ytd_cents, retainer_ytd_cents, bonus_ytd_cents, total_ytd_cents, updated_at)
+              VALUES (gen_random_uuid()::text, ${p.contractor_id}, ${mpYear}, ${p.commission_cents}, ${p.retainer_cents}, ${mpBonusCents}, ${p.total_cents}, NOW())
+              ON CONFLICT (contractor_id, year) DO UPDATE SET
+                commission_ytd_cents = "ContractorEarningsSummary".commission_ytd_cents + ${p.commission_cents},
+                retainer_ytd_cents   = "ContractorEarningsSummary".retainer_ytd_cents   + ${p.retainer_cents},
+                bonus_ytd_cents      = "ContractorEarningsSummary".bonus_ytd_cents      + ${mpBonusCents},
+                total_ytd_cents      = "ContractorEarningsSummary".total_ytd_cents      + ${p.total_cents},
+                updated_at           = NOW()
+            `;
+          }
+          console.log(`[Stripe Connect] Payouts paid for rep ${rep.id}`);
+        } else if (event.type === 'payout.failed') {
+          await sql`
+            UPDATE "ContractorPayout"
+            SET status = 'failed',
+                updated_at = NOW()
+            WHERE contractor_id = ${rep.id} AND status = 'processing'
+          `;
+          console.error(`[Stripe Connect] Payout FAILED for rep ${rep.id}`);
+        }
+        break;
+      }
+
       default:
         console.log(`[Stripe] Unhandled event type: ${event.type}`);
     }
