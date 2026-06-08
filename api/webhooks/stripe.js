@@ -32,6 +32,7 @@ module.exports = async (req, res) => {
 
   const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
   const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+  const STRIPE_CONNECT_WEBHOOK_SECRET = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
   const DATABASE_URL = process.env.DATABASE_URL;
 
   if (!STRIPE_SECRET_KEY || !DATABASE_URL) {
@@ -52,13 +53,34 @@ module.exports = async (req, res) => {
   const rawBody = Buffer.concat(chunks);
 
   // Verify webhook signature if secret is set
-  if (STRIPE_WEBHOOK_SECRET) {
+  if (STRIPE_WEBHOOK_SECRET || STRIPE_CONNECT_WEBHOOK_SECRET) {
     const sig = req.headers['stripe-signature'];
-    try {
-      event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
-    } catch (err) {
-      console.error('Webhook signature verification failed:', err.message);
-      return res.status(400).json({ error: `Webhook Error: ${err.message}` });
+    let verified = false;
+    let lastError = null;
+
+    // Try standard secret first
+    if (STRIPE_WEBHOOK_SECRET) {
+      try {
+        event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
+        verified = true;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    // Try connect secret if standard failed
+    if (!verified && STRIPE_CONNECT_WEBHOOK_SECRET) {
+      try {
+        event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_CONNECT_WEBHOOK_SECRET);
+        verified = true;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (!verified) {
+      console.error('Webhook signature verification failed:', lastError?.message);
+      return res.status(400).json({ error: `Webhook Error: ${lastError?.message}` });
     }
   } else {
     // In test mode without webhook secret, just parse the event
