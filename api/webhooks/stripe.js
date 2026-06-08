@@ -434,7 +434,7 @@ module.exports = async (req, res) => {
             SET status = 'paid',
                 paid_at = NOW(),
                 updated_at = NOW()
-            WHERE contractor_id = ${rep.id} AND status = 'processing'
+            WHERE contractor_id = ${rep.id} AND status IN ('processing', 'failed')
             RETURNING *
           `;
           
@@ -458,7 +458,7 @@ module.exports = async (req, res) => {
             UPDATE "ContractorPayout"
             SET status = 'failed',
                 updated_at = NOW()
-            WHERE contractor_id = ${rep.id} AND status = 'processing'
+            WHERE contractor_id = ${rep.id} AND status IN ('processing', 'failed')
           `;
           console.error(`[Stripe Connect] Payout FAILED for rep ${rep.id}`);
         }
