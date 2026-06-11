@@ -64,6 +64,10 @@ function generateICAPdf(p) {
                          ? p.territoryZips.join(', ')
                          : '[To be assigned by Company]';
     const retainer   = Number(p.retainerAmount || 0).toFixed(2);
+    
+    const numZips      = Array.isArray(p.territoryZips) && p.territoryZips.length > 0 ? p.territoryZips.length : 1;
+    const initialQuota = Math.max(20, numZips * 10);
+    const ongoingQuota = Math.max(10, numZips * 5);
 
     // ── typography helpers ──────────────────────────────────────────────────
     const W          = doc.page.width  - 144; // text width (both margins)
@@ -156,11 +160,11 @@ function generateICAPdf(p) {
 
     // ── 5. QUOTA ────────────────────────────────────────────────────────────
     h2('5. Quota');
-    body(`5.1 Initial Quota Requirement. To earn ongoing exclusive rights to the Territory, the Contractor must onboard a minimum of 30 active Merchants to the Perkfinity platform within the first 3 months following the Effective Date ("Initial Quota Period"). The Initial Quota Period begins on the Effective Date (${fmtDate(aggDate)}) and ends 3 calendar months later (${fmtDate(quotaEnd)}).`);
-    body(`5.2 Ongoing Maintenance Quota. Following the successful completion of the Initial Quota Period, the Contractor must maintain territory exclusivity by achieving a net increase of 10 active Merchants in their portfolio every subsequent 3-month calendar period ("Ongoing Quota Period"). For example, if the Contractor finishes the Initial Quota Period with 30 active Merchants, they must reach 40 active Merchants by the end of month 6, 50 by month 9, and so forth.`);
+    body(`5.1 Initial Quota Requirement. To earn ongoing exclusive rights to the Territory, the Contractor must onboard a minimum of ${initialQuota} active Merchants to the Perkfinity platform within the first 3 months following the Effective Date ("Initial Quota Period"). The Initial Quota Period begins on the Effective Date (${fmtDate(aggDate)}) and ends 3 calendar months later (${fmtDate(quotaEnd)}).`);
+    body(`5.2 Ongoing Maintenance Quota. Following the successful completion of the Initial Quota Period, the Contractor must maintain territory exclusivity by achieving a net increase of ${ongoingQuota} active Merchants in their portfolio every subsequent 3-month calendar period ("Ongoing Quota Period"). For example, if the Contractor finishes the Initial Quota Period with ${initialQuota} active Merchants, they must reach ${initialQuota + ongoingQuota} active Merchants by the end of month 6, ${initialQuota + ongoingQuota * 2} by month 9, and so forth.`);
     body('5.3 "Active Merchant" means a Merchant that has completed signup on the Perkfinity platform, passed any applicable review, and holds an active, paying subscription as of the last day of the respective Quota Period.');
     body('5.4 Quota Tracking. The Company will provide the Contractor with access to a dashboard showing their attributed Merchant count, the current target, and days remaining in the current Quota Period at any time.');
-    body('5.5 Success — Rolling Lock-In. If the Contractor reaches the active Merchant target before or on the last day of any Quota Period, the Territory remains exclusive to them, and the target automatically rolls forward to the next 3-month milestone (+10 Merchants).');
+    body(`5.5 Success — Rolling Lock-In. If the Contractor reaches the active Merchant target before or on the last day of any Quota Period, the Territory remains exclusive to them, and the target automatically rolls forward to the next 3-month milestone (+${ongoingQuota} Merchants).`);
     body('5.6 Failure — Revocation of Exclusivity. If the Contractor fails to meet either the Initial Quota or any subsequent Ongoing Maintenance Quota by the end of the respective Quota Period, the Territory\'s exclusive status expires automatically and immediately. The Company may, at its sole discretion, revoke the Territory assignment entirely or assign additional contractors to the Territory. The Contractor will be notified in writing of the failure.');
     body('5.7 Commissions Unaffected. Quota failure does not affect the Contractor\'s right to commission on Merchants attributed prior to the deadline. Commission continues to be paid per Section 6 for all attributed Merchants during their respective Commission Periods, even if territory exclusivity is revoked.');
     divider();

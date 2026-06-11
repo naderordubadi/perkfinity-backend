@@ -3521,14 +3521,18 @@ module.exports = async function handler(req, res) {
       // Auto-start quota period if not already running
       const [qExisting] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${ctr.id} LIMIT 1`;
       if (!qExisting) {
+        const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${ctr.id} AND status = 'active' LIMIT 1`;
+        const numZips = terr && Array.isArray(terr.zip_codes) && terr.zip_codes.length > 0 ? terr.zip_codes.length : 1;
+        const initialQuota = Math.max(20, numZips * 10);
+        
         await sql`
           INSERT INTO "ContractorQuotaPeriod"
             (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
           VALUES
             (gen_random_uuid()::text, ${ctr.id}, CURRENT_DATE,
-             CURRENT_DATE + INTERVAL '3 months', 30, 'active', NOW(), NOW())
+             CURRENT_DATE + INTERVAL '3 months', ${initialQuota}, 'active', NOW(), NOW())
         `;
-        console.log(`[sign-ica] Quota period auto-started for contractor ${ctr.id}`);
+        console.log(`[sign-ica] Quota period auto-started for contractor ${ctr.id} with target ${initialQuota}`);
       }
       // Notify admin
       try {
@@ -3613,7 +3617,8 @@ module.exports = async function handler(req, res) {
       const pending_cents = repPayoutsAll.filter(p => p.status === 'pending' || p.status === 'approved').reduce((s, p) => s + (p.total_cents || 0), 0);
       const paid_cents = repPayoutsAll.filter(p => p.status === 'paid').reduce((s, p) => s + (p.total_cents || 0), 0);
       const [repRule] = await sql`SELECT commission_rate, commission_duration_months, retainer_cents FROM "ContractorCompensationRule" WHERE contractor_id = ${repId} LIMIT 1`;
-      return send(res, 200, { success: true, gated: false, data: { total_earned_cents, pending_cents, paid_cents, rule: repRule || null } });
+      const defaultRule = { commission_rate: 0.25, commission_duration_months: 12, retainer_cents: 0 };
+      return send(res, 200, { success: true, gated: false, data: { total_earned_cents, pending_cents, paid_cents, rule: repRule || defaultRule } });
     }
 
     // ── GET /api/v1/rep/payouts ──────────────────────────────────
@@ -3644,7 +3649,7 @@ module.exports = async function handler(req, res) {
       const [repQCount] = await sql`
         SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a
         JOIN "Merchant" m ON m.id = a.merchant_id
-        WHERE a.contractor_id = ${repId} AND m.billing_status = 'active'
+        WHERE a.contractor_id = ${repId} AND m.billing_status NOT IN ('cancelled', 'deleted')
       `;
       const rqCount = repQCount?.cnt || 0;
       const rqPercent = Math.min(Math.round((rqCount / (repQuota.quota_target || 30)) * 100), 100);
@@ -6312,7 +6317,7 @@ module.exports = async function handler(req, res) {
           try {
             const [q] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
             if (q) {
-              const [qc] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+              const [qc] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status NOT IN ('cancelled', 'deleted')`;
               const qCount = qc?.cnt || 0;
               gcQuota = { ...q, current_count: qCount, percent: Math.min(Math.round((qCount / (q.quota_target || 30)) * 100), 100), days_remaining: Math.max(0, Math.ceil((new Date(q.period_end) - new Date()) / 86400000)) };
             }
@@ -7019,21 +7024,25 @@ module.exports = async function handler(req, res) {
         const [qEval] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
         if (!qEval) return send(res, 404, { success: false, error: 'No quota period found for this rep.' });
         if (qEval.status !== 'active') return send(res, 400, { success: false, error: `Quota is already ${qEval.status}.` });
-        const [qEvalCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+        const [qEvalCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status NOT IN ('cancelled', 'deleted')`;
         const qCount = qEvalCount?.cnt || 0;
         const qNow = new Date(); const qEnd = new Date(qEval.period_end);
         if (qCount >= qEval.quota_target) {
-          // Ongoing Quota Logic: Roll forward 3 months and add 10 to target
+          // Ongoing Quota Logic: Roll forward 3 months and add dynamic target
+          const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${m[1]} AND status = 'active' LIMIT 1`;
+          const numZips = terr && Array.isArray(terr.zip_codes) && terr.zip_codes.length > 0 ? terr.zip_codes.length : 1;
+          const ongoingQuota = Math.max(10, numZips * 5);
+          
           await sql`
             UPDATE "ContractorQuotaPeriod" 
             SET period_end = period_end + INTERVAL '3 months', 
-                quota_target = quota_target + 10,
+                quota_target = quota_target + ${ongoingQuota},
                 status = 'active',
                 alert_sent = false,
                 updated_at = NOW() 
             WHERE id = ${qEval.id}
           `;
-          return send(res, 200, { success: true, result: 'rolled_forward', current_count: qCount, quota_target: qEval.quota_target + 10 });
+          return send(res, 200, { success: true, result: 'rolled_forward', current_count: qCount, quota_target: qEval.quota_target + ongoingQuota });
         } else if (qNow > qEnd) {
           // Missed Quota: Revoke territory
           await sql`UPDATE "ContractorQuotaPeriod" SET status = 'missed', alert_sent = true, updated_at = NOW() WHERE id = ${qEval.id}`;
@@ -7072,7 +7081,7 @@ module.exports = async function handler(req, res) {
         const [qRemRep] = await sql`SELECT full_name, email FROM "Contractor" WHERE id = ${m[1]} LIMIT 1`;
         if (!qRemRep) return send(res, 404, { success: false, error: 'Contractor not found.' });
         const [qRemQuota] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
-        const [qRemCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+        const [qRemCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status NOT IN ('cancelled', 'deleted')`;
         const qRCount = qRemCount?.cnt || 0; const qTarget = qRemQuota?.quota_target || 30;
         const qEnd = qRemQuota ? new Date(qRemQuota.period_end) : null;
         const qDaysLeft = qEnd ? Math.max(0, Math.ceil((qEnd - new Date()) / 86400000)) : null;
@@ -7091,7 +7100,7 @@ module.exports = async function handler(req, res) {
         if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
         const [qGet] = await sql`SELECT * FROM "ContractorQuotaPeriod" WHERE contractor_id = ${m[1]} LIMIT 1`;
         if (!qGet) return send(res, 200, { success: true, data: null });
-        const [qGetCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status = 'active'`;
+        const [qGetCount] = await sql`SELECT COUNT(*)::int AS cnt FROM "ContractorMerchantAttribution" a JOIN "Merchant" me ON me.id = a.merchant_id WHERE a.contractor_id = ${m[1]} AND me.billing_status NOT IN ('cancelled', 'deleted')`;
         const qGCount = qGetCount?.cnt || 0;
         const qGNow = new Date(); const qGEnd = new Date(qGet.period_end);
         // Auto-evaluate if period elapsed and still active
@@ -7118,7 +7127,12 @@ module.exports = async function handler(req, res) {
         if (qExisting) return send(res, 409, { success: false, error: 'A quota period already exists. Use /extend or /evaluate to manage it.' });
         const [qRepCheck] = await sql`SELECT id FROM "Contractor" WHERE id = ${m[1]} LIMIT 1`;
         if (!qRepCheck) return send(res, 404, { success: false, error: 'Contractor not found.' });
-        const qTarget = Math.max(1, parseInt((req.body || {}).quota_target) || 30);
+        
+        const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${m[1]} AND status = 'active' LIMIT 1`;
+        const numZips = terr && Array.isArray(terr.zip_codes) && terr.zip_codes.length > 0 ? terr.zip_codes.length : 1;
+        const dynamicTarget = Math.max(20, numZips * 10);
+        
+        const qTarget = parseInt((req.body || {}).quota_target) || dynamicTarget;
         const [qNew] = await sql`
           INSERT INTO "ContractorQuotaPeriod" (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
           VALUES (gen_random_uuid()::text, ${m[1]}, CURRENT_DATE, CURRENT_DATE + INTERVAL '3 months', ${qTarget}, 'active', NOW(), NOW())
