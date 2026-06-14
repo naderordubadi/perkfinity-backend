@@ -12,7 +12,24 @@ async function fetchOpenGraphImage(targetUrl) {
     const html = await res.text();
     const $ = cheerio.load(html);
     const ogImage = $('meta[property="og:image"]').attr('content');
-    return ogImage || null;
+    if (!ogImage) return null;
+    
+    // Blacklist of known website builder default template images
+    const blacklist = [
+      'ui.nuxt.com', 
+      'webflow.com', 
+      'wix.com/placeholder', 
+      'squarespace-cdn.com/default'
+    ];
+    
+    for (const phrase of blacklist) {
+      if (ogImage.includes(phrase)) {
+        console.log(`Skipping blacklisted OG image: ${ogImage}`);
+        return null;
+      }
+    }
+    
+    return ogImage;
   } catch (e) {
     console.error('Error fetching OG image:', e.message);
     return null;
