@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const SibApiV3Sdk = require('sib-api-v3-sdk');
 const Stripe = require('stripe');
+const cheerio = require('cheerio');
 
 // ── Firebase Admin Init ──────────────────────────────────────────
 const admin = require('firebase-admin');
@@ -353,6 +354,24 @@ function send(res, status, data) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(data));
+}
+
+async function fetchOpenGraphImage(targetUrl) {
+  if (!targetUrl) return null;
+  try {
+    const urlStr = targetUrl.startsWith('http') ? targetUrl : 'https://' + targetUrl;
+    const res = await fetch(urlStr, {
+      headers: { 'User-Agent': 'PerkfinityBot/1.0 (+https://perkfinity.net)' }
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const ogImage = $('meta[property="og:image"]').attr('content');
+    return ogImage || null;
+  } catch (e) {
+    console.error('Error fetching OG image:', e.message);
+    return null;
+  }
 }
 
 module.exports = async function handler(req, res) {
@@ -734,6 +753,11 @@ module.exports = async function handler(req, res) {
       // Accept logo_url (base64 string) if provided
       const logoUrl = data.logo_url || null;
 
+      let coverPhotoUrl = null;
+      if (data.website && ['online', 'hybrid'].includes(applyPresence)) {
+        coverPhotoUrl = await fetchOpenGraphImage(data.website);
+      }
+
       // Create merchant row
       const billingCycleValue = data.billing_cycle === 'annual' ? 'annual' : 'monthly';
 
@@ -744,7 +768,7 @@ module.exports = async function handler(req, res) {
           promo_code, status, billing_status, application_status,
           business_category, billing_starts_at_member_count, is_multi_location,
           billing_cycle,
-          stripe_customer_id, stripe_payment_method_id, logo_url, created_at, updated_at
+          stripe_customer_id, stripe_payment_method_id, logo_url, cover_photo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
@@ -752,7 +776,7 @@ module.exports = async function handler(req, res) {
           'pending', ${data.category},
           ${billingStartsAt}, ${isMultiLocation},
           ${billingCycleValue},
-          ${customer.id}, ${data.stripe_payment_method_id}, ${logoUrl}, ${now}, ${now}
+          ${customer.id}, ${data.stripe_payment_method_id}, ${logoUrl}, ${coverPhotoUrl}, ${now}, ${now}
         )
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, application_status
       `;
@@ -891,6 +915,11 @@ module.exports = async function handler(req, res) {
 
       const billingCycleValue2 = data.billing_cycle === 'annual' ? 'annual' : 'monthly';
 
+      let coverPhotoUrl2 = null;
+      if (data.website && ['online', 'hybrid'].includes(applyPresence)) {
+        coverPhotoUrl2 = await fetchOpenGraphImage(data.website);
+      }
+
       const [merchant] = await sql`
         INSERT INTO "Merchant" (
           id, business_name, contact_name, phone, website, business_presence,
@@ -898,7 +927,7 @@ module.exports = async function handler(req, res) {
           promo_code, status, billing_status, application_status,
           business_category, billing_starts_at_member_count, is_multi_location,
           billing_cycle,
-          stripe_customer_id, logo_url, created_at, updated_at
+          stripe_customer_id, logo_url, cover_photo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
@@ -906,7 +935,7 @@ module.exports = async function handler(req, res) {
           'in_progress', ${data.category},
           ${billingStartsAt}, ${isMultiLocation},
           ${billingCycleValue2},
-          ${customer.id}, null, ${now}, ${now}
+          ${customer.id}, null, ${coverPhotoUrl2}, ${now}, ${now}
         )
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code, stripe_customer_id
       `;
@@ -1390,6 +1419,7 @@ module.exports = async function handler(req, res) {
 
       // ── Online Merchant Platform: New Merchant columns ────────────
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS business_category VARCHAR(50)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "cover_photo_url" TEXT`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS application_status VARCHAR(20) DEFAULT NULL`;
       await sql`ALTER TABLE "Merchant" DROP COLUMN IF EXISTS sales_volume_range`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS application_notes TEXT`;
@@ -1465,7 +1495,7 @@ module.exports = async function handler(req, res) {
          AND l.is_active = true
         WHERE TRIM(l.postal_code) = TRIM(${zip})
           AND m.account_blocked = false
-          AND (m.billing_status IS NULL OR m.billing_status != 'deleted')
+          AND m.business_name != '[Deleted]'
         ORDER BY m.business_name ASC
       `;
 
@@ -1481,7 +1511,7 @@ module.exports = async function handler(req, res) {
       let merchants;
       if (category && category !== 'all') {
         merchants = await sql`
-          SELECT m.id, m.business_name, m.logo_url, m.website, m.welcome_offer_text,
+          SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
@@ -1489,13 +1519,13 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('online', 'hybrid')
             AND m.application_status = 'approved'
             AND m.account_blocked = false
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND m.business_category = ${category}
           ORDER BY m.business_name ASC
         `;
       } else {
         merchants = await sql`
-          SELECT m.id, m.business_name, m.logo_url, m.website, m.welcome_offer_text,
+          SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
@@ -1503,7 +1533,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('online', 'hybrid')
             AND m.application_status = 'approved'
             AND m.account_blocked = false
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
           ORDER BY m.business_name ASC
         `;
       }
@@ -1525,99 +1555,99 @@ module.exports = async function handler(req, res) {
 
       if (q && cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND m.business_name ILIKE ${like} AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND m.business_name ILIKE ${like}
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND LOWER(l.city)=ANY(${cities})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
             AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else {
         // No filters — return all local/mobile merchants
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
-            AND (m.billing_status IS NULL OR m.billing_status NOT IN ('deleted','cancelled'))
+            AND m.business_name != '[Deleted]'
           ORDER BY m.business_name ASC LIMIT 100`;
       }
 
