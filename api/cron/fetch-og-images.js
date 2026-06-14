@@ -51,12 +51,20 @@ module.exports = async function handler(req, res) {
   const sql = neon(process.env.DATABASE_URL);
 
   try {
+    // 1. Cleanup: Wipes cover_photo_url if website was deleted by the merchant
+    await sql`
+      UPDATE "Merchant" 
+      SET cover_photo_url = NULL 
+      WHERE (website IS NULL OR TRIM(website) = '') 
+        AND cover_photo_url IS NOT NULL
+    `;
+
+    // 2. Fetch cover photos for ALL active merchants with a website
     const merchants = await sql`
       SELECT id, website, cover_photo_url 
       FROM "Merchant" 
-      WHERE business_presence IN ('online', 'hybrid') 
-        AND website IS NOT NULL 
-        AND website != ''
+      WHERE website IS NOT NULL 
+        AND TRIM(website) != ''
         AND account_blocked = false
         AND (billing_status IS NULL OR billing_status NOT IN ('deleted', 'cancelled'))
     `;
