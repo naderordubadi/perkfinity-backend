@@ -4288,15 +4288,31 @@ module.exports = async function handler(req, res) {
         code = `${prefix}-${seg(4)}-${seg(4)}`;
       }
 
-      // Ensure code is unique exactly if extended_trial to prevent dual-creation overwrites
-      const existing = await sql`SELECT id FROM "AdminAccessCode" WHERE code = ${code}`;
-      if (existing.length > 0) {
-        return send(res, 400, { success: false, error: 'This promo code already exists. Please choose a different code name.' });
-      }
-
       const days = parseInt(data.expires_in_days) || 30;
       const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
       const memberLimit = type === 'extended_trial' ? parseInt(data.member_limit) : null;
+
+      const existing = await sql`SELECT id, expires_at FROM "AdminAccessCode" WHERE code = ${code}`;
+      if (existing.length > 0) {
+        const isExpired = new Date() > new Date(existing[0].expires_at);
+        if (!isExpired) {
+          return send(res, 400, { success: false, error: 'This promo code already exists and is still active. Please choose a different code name.' });
+        }
+        
+        // Code is expired, so we can overwrite/regenerate it
+        await sql`
+          UPDATE "AdminAccessCode" 
+          SET label = ${label}, 
+              type = ${type}, 
+              member_limit = ${memberLimit}, 
+              expires_at = ${expiresAt},
+              use_count = 0,
+              used = false,
+              created_at = NOW()
+          WHERE id = ${existing[0].id}
+        `;
+        return send(res, 201, { success: true, data: { code, label, type, member_limit: memberLimit, expires_at: expiresAt } });
+      }
 
       await sql`
         INSERT INTO "AdminAccessCode" (code, label, type, member_limit, expires_at)
