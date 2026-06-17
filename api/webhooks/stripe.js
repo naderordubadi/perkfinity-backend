@@ -111,20 +111,83 @@ module.exports = async (req, res) => {
 
         if (subscriptionId) {
           const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-          // Update merchant to active tier1
+          const toTier = session.metadata?.to_tier || null;
+          const toCycle = session.metadata?.billing_cycle || null;
+
+          if (toCycle) {
+            // Update merchant to active and change billing cycle
+            await sql`
+              UPDATE "Merchant"
+              SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
+                  billing_cycle = ${toCycle},
+                  stripe_customer_id = ${customerId},
+                  stripe_subscription_id = ${subscriptionId},
+                  billing_status = 'active',
+                  account_blocked = false,
+                  subscription_started_at = COALESCE(subscription_started_at, NOW()),
+                  next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
+                  updated_at = NOW()
+              WHERE id = ${merchantId}
+            `;
+          } else {
+            // Update merchant to active without changing billing cycle
+            await sql`
+              UPDATE "Merchant"
+              SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
+                  stripe_customer_id = ${customerId},
+                  stripe_subscription_id = ${subscriptionId},
+                  billing_status = 'active',
+                  account_blocked = false,
+                  subscription_started_at = COALESCE(subscription_started_at, NOW()),
+                  next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
+                  updated_at = NOW()
+              WHERE id = ${merchantId}
+            `;
+          }
+          console.log(`[Stripe] Merchant ${merchantId} upgraded via checkout`);
+        } else if (session.mode === 'payment' && session.metadata?.billing_cycle === 'lifetime') {
+          const [merch] = await sql`SELECT promo_code, subscription_tier FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+          if (merch?.promo_code) {
+            await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchantId}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${merch.promo_code} AND type = 'pouf'`;
+          }
           await sql`
             UPDATE "Merchant"
-            SET subscription_tier = 'tier1',
+            SET billing_status = 'active',
+                subscription_tier = COALESCE(${merch?.subscription_tier}, 'tier1'),
+                billing_cycle = 'lifetime',
                 stripe_customer_id = ${customerId},
-                stripe_subscription_id = ${subscriptionId},
-                billing_status = 'active',
                 account_blocked = false,
-                subscription_started_at = NOW(),
-                next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
+                subscription_started_at = COALESCE(subscription_started_at, NOW()),
                 updated_at = NOW()
             WHERE id = ${merchantId}
           `;
-          console.log(`[Stripe] Merchant ${merchantId} upgraded to tier1 via checkout`);
+
+          // Record the one-time POUF payment in the Invoice table
+          await sql`
+            INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at)
+            VALUES (
+              gen_random_uuid()::text,
+              ${merchantId},
+              COALESCE(${session.invoice}, ${session.id}),
+              ${session.amount_total ?? 0},
+              ${session.currency || 'usd'},
+              'paid',
+              NOW(),
+              NOW(),
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW()
+          `;
+
+          // Start commission attribution
+          await sql`
+            UPDATE "ContractorMerchantAttribution"
+            SET commission_start_date = NOW(), updated_at = NOW()
+            WHERE merchant_id = ${merchantId} AND commission_start_date IS NULL
+          `;
+
+          console.log(`[Stripe] Merchant ${merchantId} upgraded to lifetime via checkout. Invoice and attribution created.`);
         }
         break;
       }
@@ -177,7 +240,7 @@ module.exports = async (req, res) => {
 
         // Find the merchant by stripe_customer_id
         const [merchant] = await sql`
-          SELECT id, business_name, account_blocked, stripe_subscription_id FROM "Merchant"
+          SELECT id, business_name, account_blocked, stripe_subscription_id, billing_cycle, subscription_tier FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
@@ -205,15 +268,17 @@ module.exports = async (req, res) => {
             }
           }
           // Update billing status for active/past_due subscriptions
-          await sql`
-            UPDATE "Merchant"
-            SET billing_status = 'active',
-                account_blocked = false,
-                cancelled_at = NULL,
-                next_billing_date = ${currentPeriodEnd},
-                updated_at = NOW()
-            WHERE id = ${merchant.id}
-          `;
+          if (merchant.billing_cycle !== 'lifetime') {
+            await sql`
+              UPDATE "Merchant"
+              SET billing_status = 'active',
+                  account_blocked = false,
+                  cancelled_at = NULL,
+                  next_billing_date = ${currentPeriodEnd},
+                  updated_at = NOW()
+              WHERE id = ${merchant.id}
+            `;
+          }
         }
 
         // Record in Invoice table
@@ -223,7 +288,7 @@ module.exports = async (req, res) => {
             gen_random_uuid()::text,
             ${merchant.id},
             ${invoice.id},
-            ${invoice.amount_paid || 2999},
+            ${invoice.amount_paid ?? 0},
             ${invoice.currency || 'usd'},
             'paid',
             ${invoice.period_start ? new Date(invoice.period_start * 1000) : null},
@@ -232,6 +297,13 @@ module.exports = async (req, res) => {
             NOW()
           )
           ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW()
+        `;
+
+        // Start commission if there's an active attribution waiting for the first payment
+        await sql`
+          UPDATE "ContractorMerchantAttribution"
+          SET commission_start_date = NOW(), updated_at = NOW()
+          WHERE merchant_id = ${merchant.id} AND commission_start_date IS NULL
         `;
 
         console.log(`[Stripe] Payment succeeded for merchant ${merchant.id} (${merchant.business_name})`);

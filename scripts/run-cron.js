@@ -1,10 +1,10 @@
 require('dotenv').config({ path: __dirname + '/../.env' });
 const handler = require('../api/cron/generate-contractor-payouts.js');
 
-// Mock Express Request and Response objects
 const req = {
   method: 'GET',
-  headers: {}
+  headers: {},
+  query: { year: 2026, month: 6 }
 };
 
 const res = {

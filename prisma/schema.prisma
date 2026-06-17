@@ -32,6 +32,7 @@ model Merchant {
   business_name     String
   legal_name        String?
   logo_url          String?
+  cover_photo_url   String?
   status            String             @default("active")
   subscription_tier String             @default("free")
   created_at        DateTime           @default(now())
