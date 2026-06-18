@@ -6493,12 +6493,13 @@ module.exports = async function handler(req, res) {
         if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
         const lcList = await sql`
           SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents,
-            COUNT(DISTINCT a.merchant_id)::int AS attributed_merchants,
-            COUNT(DISTINCT CASE WHEN a.commission_start_date IS NOT NULL THEN a.merchant_id END)::int AS active_attributed,
+            COUNT(DISTINCT me.id)::int AS attributed_merchants,
+            COUNT(DISTINCT CASE WHEN a.commission_start_date IS NOT NULL AND me.id IS NOT NULL THEN a.merchant_id END)::int AS active_attributed,
             COALESCE(SUM(CASE WHEN p.status='paid' THEN p.total_cents ELSE 0 END)::int, 0) AS total_paid_cents
           FROM "Contractor" c
           LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
           LEFT JOIN "ContractorMerchantAttribution" a ON a.contractor_id = c.id
+          LEFT JOIN "Merchant" me ON me.id = a.merchant_id AND me.deleted_at IS NULL
           LEFT JOIN "ContractorPayout" p ON p.contractor_id = c.id
           GROUP BY c.id, r.commission_rate, r.commission_duration_months, r.retainer_cents
           ORDER BY c.created_at DESC
