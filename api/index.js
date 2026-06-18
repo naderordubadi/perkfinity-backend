@@ -6499,7 +6499,7 @@ module.exports = async function handler(req, res) {
           FROM "Contractor" c
           LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
           LEFT JOIN "ContractorMerchantAttribution" a ON a.contractor_id = c.id
-          LEFT JOIN "Merchant" me ON me.id = a.merchant_id AND me.deleted_at IS NULL
+          LEFT JOIN "Merchant" me ON me.id = a.merchant_id AND me.business_name != '[Deleted]'
           LEFT JOIN "ContractorPayout" p ON p.contractor_id = c.id
           GROUP BY c.id, r.commission_rate, r.commission_duration_months, r.retainer_cents
           ORDER BY c.created_at DESC
