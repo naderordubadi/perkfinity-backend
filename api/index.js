@@ -1121,7 +1121,7 @@ module.exports = async function handler(req, res) {
 
       const [user] = await sql`
         SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status, m.logo_url,
-               m.stripe_payment_method_id, m.billing_status,
+               m.stripe_payment_method_id, m.stripe_subscription_id, m.billing_status, m.billing_cycle,
                m.business_presence, m.onboarding_complete, m.application_status
         FROM "MerchantUser" u
         JOIN "Merchant" m ON m.id = u.merchant_id
@@ -1198,12 +1198,21 @@ module.exports = async function handler(req, res) {
       // Excludes cancelled/deleted (have their own scenes in dashboard).
       // Excludes free_for_life: FFL merchants never go through Stripe setup,
       //   so the absence of a payment method is expected and correct for them.
+      const isDemoAccount = (
+        user.billing_status === 'active' && 
+        !user.stripe_subscription_id && 
+        !user.stripe_payment_method_id &&
+        ['online', 'hybrid'].includes(user.business_presence)
+      );
+
       const onlineNeedsPaymentUpdate = (
         ['online', 'hybrid'].includes(user.business_presence) &&
         user.application_status === 'approved' &&
         !user.stripe_payment_method_id &&
         user.subscription_tier !== 'free_for_life' &&
-        !['cancelled', 'deleted', 'pending_cancellation'].includes(user.billing_status)
+        user.billing_cycle !== 'lifetime' &&
+        !['cancelled', 'deleted', 'pending_cancellation'].includes(user.billing_status) &&
+        !isDemoAccount
       );
 
       const { password_hash: _pw, ...safeUser } = user;
@@ -3631,7 +3640,8 @@ module.exports = async function handler(req, res) {
         SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
                a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
                me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
-               me.billing_status, me.billing_cycle, me.contact_name, me.application_status
+               me.billing_status, me.billing_cycle, me.contact_name, me.application_status,
+               me.stripe_subscription_id, me.stripe_payment_method_id, me.billing_starts_at_member_count, me.member_limit
         FROM "ContractorMerchantAttribution" a
         JOIN "Merchant" me ON me.id = a.merchant_id
         WHERE a.contractor_id = ${repId}
@@ -4385,7 +4395,8 @@ module.exports = async function handler(req, res) {
         SELECT m.id, m.business_name, m.subscription_tier, m.billing_status, m.business_presence,
           m.created_at, mu.email as contact_email,
           ml.city as location_city, ml.postal_code as location_zip,
-          (SELECT COUNT(*) FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
+          (SELECT COUNT(*) FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
+          m.stripe_subscription_id, m.stripe_payment_method_id, m.member_limit, m.billing_cycle
         FROM "Merchant" m
         LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
         LEFT JOIN "MerchantLocation" ml ON ml.merchant_id = m.id AND ml.is_active = true
@@ -4427,6 +4438,7 @@ module.exports = async function handler(req, res) {
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
                  m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
+                 m.member_limit, m.billing_cycle,
                  mu.email as contact_email,
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
           FROM "Merchant" m
@@ -4441,6 +4453,7 @@ module.exports = async function handler(req, res) {
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
                  m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
+                 m.member_limit, m.billing_cycle,
                  mu.email as contact_email,
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
           FROM "Merchant" m
@@ -4613,6 +4626,64 @@ module.exports = async function handler(req, res) {
         billing_warning: billingWarning || null,
         stripe_customer_id: merchant.stripe_customer_id || null
       });
+    }
+
+    // ── PUT /api/v1/admin/online-applications/:id/approve-demo ────
+    const approveDemoMatch = url.match(/\/api\/v1\/admin\/online-applications\/([a-zA-Z0-9_-]+)\/approve-demo$/);
+    if (method === 'PUT' && approveDemoMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = approveDemoMatch[1];
+      
+      const [merchant] = await sql`
+        SELECT m.*, mu.email as contact_email
+        FROM "Merchant" m
+        LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+        WHERE m.id = ${merchantId} LIMIT 1
+      `;
+      if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+      if (merchant.application_status === 'approved') return send(res, 409, { success: false, error: 'Already approved' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (STRIPE_KEY && merchant.stripe_payment_method_id) {
+        try {
+          const stripeClient = Stripe(STRIPE_KEY);
+          await stripeClient.paymentMethods.detach(merchant.stripe_payment_method_id);
+          console.log(`[Demo Setup] Detached payment method ${merchant.stripe_payment_method_id} for demo account ${merchantId}`);
+        } catch (err) {
+          console.error(`[Demo Setup] Failed to detach payment method for demo account ${merchantId}:`, err.message);
+        }
+      }
+
+      await sql`
+        UPDATE "Merchant"
+        SET application_status = 'approved',
+            onboarding_complete = true,
+            billing_status = 'active',
+            stripe_subscription_id = null,
+            stripe_payment_method_id = null,
+            billing_starts_at_member_count = null,
+            member_limit = null,
+            billing_cycle = 'monthly',
+            updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
+
+      try {
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY && merchant.contact_email) {
+          const brevoClient = SibApiV3Sdk.ApiClient.instance;
+          brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+          const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+          const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+          emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+          emailObj.to = [{ email: merchant.contact_email }];
+          emailObj.subject = `🎉 Welcome to Perkfinity, ${merchant.business_name}! Your Demo Account is ready.`;
+          emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#5b3fa5;margin-bottom:16px;">🎉 Demo Account Activated, ${merchant.business_name}!</div><p style="font-size:15px;color:#555;line-height:1.6;">Your demo environment is now active. Your personal credit card has been detached and will never be charged.</p><p style="font-size:15px;color:#555;">Log in to your dashboard at <a href="https://perkfinity.net/login.html">perkfinity.net/login.html</a> to explore.</p></div></div>`;
+          await emailApi.sendTransacEmail(emailObj);
+        }
+      } catch (emailErr) { console.error('Demo approval email failed:', emailErr.message); }
+
+      return send(res, 200, { success: true, message: 'Demo account approved securely' });
     }
 
     // ── PUT /api/v1/admin/online-applications/:id/decline ─────────
@@ -6524,7 +6595,7 @@ module.exports = async function handler(req, res) {
             sql`SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
                        a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
                        me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
-                       me.billing_status, me.contact_name
+                       me.billing_status, me.contact_name, me.stripe_subscription_id, me.stripe_payment_method_id, me.member_limit, me.billing_cycle
                 FROM "ContractorMerchantAttribution" a
                 JOIN "Merchant" me ON me.id = a.merchant_id
                 WHERE a.contractor_id = ${m[1]}
