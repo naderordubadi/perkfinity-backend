@@ -3641,7 +3641,8 @@ module.exports = async function handler(req, res) {
                a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
                me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
                me.billing_status, me.billing_cycle, me.contact_name, me.application_status,
-               me.stripe_subscription_id, me.stripe_payment_method_id, me.billing_starts_at_member_count, me.member_limit
+               me.stripe_subscription_id, me.stripe_payment_method_id, me.billing_starts_at_member_count, me.member_limit,
+               (SELECT COUNT(*) FROM "MerchantMember" WHERE merchant_id = me.id) AS member_count
         FROM "ContractorMerchantAttribution" a
         JOIN "Merchant" me ON me.id = a.merchant_id
         WHERE a.contractor_id = ${repId}
@@ -6595,7 +6596,8 @@ module.exports = async function handler(req, res) {
             sql`SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
                        a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
                        me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
-                       me.billing_status, me.contact_name, me.stripe_subscription_id, me.stripe_payment_method_id, me.member_limit, me.billing_cycle
+                       me.billing_status, me.contact_name, me.stripe_subscription_id, me.stripe_payment_method_id, me.member_limit, me.billing_cycle,
+                       (SELECT COUNT(*) FROM "MerchantMember" WHERE merchant_id = me.id) AS member_count
                 FROM "ContractorMerchantAttribution" a
                 JOIN "Merchant" me ON me.id = a.merchant_id
                 WHERE a.contractor_id = ${m[1]}
@@ -6822,7 +6824,8 @@ module.exports = async function handler(req, res) {
           SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
                  a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
                  me.id AS merchant_id, me.business_name, me.subscription_tier,
-                 me.billing_status, me.contact_name, mu.email AS merchant_email
+                 me.billing_status, me.contact_name, mu.email AS merchant_email,
+                 (SELECT COUNT(*) FROM "MerchantMember" WHERE merchant_id = me.id) AS member_count
           FROM "ContractorMerchantAttribution" a
           JOIN "Merchant" me ON me.id = a.merchant_id
           LEFT JOIN "MerchantUser" mu ON mu.merchant_id = me.id AND mu.role = 'owner'
