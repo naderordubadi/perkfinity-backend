@@ -1938,26 +1938,35 @@ module.exports = async function handler(req, res) {
 
       if (data.audience === 'all') {
         qualifyingUsers = await sql`
-          SELECT DISTINCT mm.user_id FROM "MerchantMember" mm WHERE mm.merchant_id = ${targetMerchantId}
+          SELECT DISTINCT mm.user_id, u.email_unsubscribed, u.push_notifications_enabled, u.push_token 
+          FROM "MerchantMember" mm 
+          JOIN "User" u ON u.id = mm.user_id 
+          WHERE mm.merchant_id = ${targetMerchantId}
         `;
       } else if (data.audience === 'redeemed_30') {
         qualifyingUsers = await sql`
-          SELECT DISTINCT r.user_id FROM "Redemption" r
+          SELECT DISTINCT r.user_id, u.email_unsubscribed, u.push_notifications_enabled, u.push_token 
+          FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
+          JOIN "User" u ON u.id = r.user_id
           WHERE c.merchant_id = ${targetMerchantId}
             AND (r.status = 'redeemed' OR r.redeemed = true)
             AND r.redeemed_at >= ${thirtyDaysAgo}
         `;
       } else if (data.audience === 'expired_30') {
         qualifyingUsers = await sql`
-          SELECT DISTINCT r.user_id FROM "Redemption" r
+          SELECT DISTINCT r.user_id, u.email_unsubscribed, u.push_notifications_enabled, u.push_token 
+          FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
+          JOIN "User" u ON u.id = r.user_id
           WHERE c.merchant_id = ${targetMerchantId}
             AND (r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW() AND r.expires_at >= ${thirtyDaysAgo} AND COALESCE(r.status,'pending') != 'created'))
         `;
       } else if (data.audience === 'never_redeemed') {
         qualifyingUsers = await sql`
-          SELECT mm.user_id FROM "MerchantMember" mm
+          SELECT mm.user_id, u.email_unsubscribed, u.push_notifications_enabled, u.push_token 
+          FROM "MerchantMember" mm
+          JOIN "User" u ON u.id = mm.user_id
           WHERE mm.merchant_id = ${targetMerchantId}
             AND NOT EXISTS (
               SELECT 1 FROM "Redemption" r2 JOIN "Campaign" c2 ON c2.id = r2.campaign_id
@@ -1967,8 +1976,10 @@ module.exports = async function handler(req, res) {
         `;
       } else if (data.audience === 'redeemed_90') {
         qualifyingUsers = await sql`
-          SELECT DISTINCT r.user_id FROM "Redemption" r
+          SELECT DISTINCT r.user_id, u.email_unsubscribed, u.push_notifications_enabled, u.push_token 
+          FROM "Redemption" r
           JOIN "Campaign" c ON c.id = r.campaign_id
+          JOIN "User" u ON u.id = r.user_id
           WHERE c.merchant_id = ${targetMerchantId}
             AND (r.status = 'redeemed' OR r.redeemed = true)
             AND r.redeemed_at >= ${ninetyDaysAgo}
@@ -1978,7 +1989,8 @@ module.exports = async function handler(req, res) {
         const zips = Array.isArray(data.audience_zips) ? data.audience_zips.filter(z => z) : [];
         // Fetch all members with their city/zip, then filter in JS
         const allWithLocation = await sql`
-          SELECT DISTINCT mm.user_id, u.city, u.zip_code FROM "MerchantMember" mm
+          SELECT DISTINCT mm.user_id, u.city, u.zip_code, u.email_unsubscribed, u.push_notifications_enabled, u.push_token 
+          FROM "MerchantMember" mm
           JOIN "User" u ON u.id = mm.user_id
           WHERE mm.merchant_id = ${targetMerchantId}
         `;
@@ -2024,7 +2036,8 @@ module.exports = async function handler(req, res) {
       await sql`UPDATE "Campaign" SET delivery_channel = ${deliveryChannel} WHERE id = ${campaign.id}`;
 
       let queuedCount = 0;
-
+      let emailCount = 0;
+      let pushCount = 0;
       let queueErrors = [];
       if (qualifyingUsers.length > 0) {
         try {
@@ -2054,14 +2067,16 @@ module.exports = async function handler(req, res) {
           const bodyText = condLine || headline;
 
           // Insert into NotificationQueue for each qualifying user
-          const userIds = qualifyingUsers.map(u => u.user_id);
-          for (const userId of userIds) {
+          for (const u of qualifyingUsers) {
+            const userId = u.user_id;
             try {
               await sql`
                 INSERT INTO "NotificationQueue" (user_id, campaign_id, merchant_id, store_name, store_address, logo_url, title, body, channels, offer_expires_at, disclaimer, is_online_merchant, website, promo_code)
                 VALUES (${userId}, ${campaign.id}, ${targetMerchantId}, ${storeName}, ${storeAddress}, ${logoUrl}, ${headline}, ${bodyText}, ${deliveryChannel}, ${campaign.end_at}, ${data.disclaimer || null}, ${isOnline}, ${merchantWebsite}, ${campaignPromoCode})
               `;
               queuedCount++;
+              if (u.email_unsubscribed !== true) emailCount++;
+              if (u.push_notifications_enabled === true && u.push_token) pushCount++;
             } catch (queueErr) {
               console.error(`Queue insert failed for user ${userId}:`, queueErr.message);
               queueErrors.push(`insert: ${queueErr.message}`);
@@ -2073,7 +2088,7 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      const channelMsg = deliveryChannel === 'email' ? `${queuedCount} email(s)` : deliveryChannel === 'push' ? `${queuedCount} push notification(s)` : `${queuedCount} email(s) and ${queuedCount} push notification(s)`;
+      const channelMsg = deliveryChannel === 'email' ? `${emailCount} email(s)` : deliveryChannel === 'push' ? `${pushCount} push notification(s)` : `${emailCount} email(s) and ${pushCount} push notification(s)`;
       return send(res, 201, { success: true, data: { campaign, assigned_count: assignedCount, queued_count: queuedCount, delivery_channel: deliveryChannel, queue_errors: queueErrors, message: `Promotion created and assigned to ${assignedCount} member(s). ${channelMsg} queued for daily digest.` } });
     }
 
@@ -2110,18 +2125,20 @@ module.exports = async function handler(req, res) {
         }
       }
 
+      const ua = (req.headers['user-agent'] || '').toLowerCase();
+      const platform = ua.includes('android') ? 'android' : (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') ? 'ios' : 'web');
       if (!user) {
         // Create new user
         const email = appleEmail ? appleEmail.toLowerCase() : `apple_${appleSub}@perkfinity.internal`;
         const fullName = data.fullName || '';
         [user] = await sql`
-          INSERT INTO "User" (id, email, apple_sub, full_name, created_at, last_active)
-          VALUES (gen_random_uuid()::text, ${email}, ${appleSub}, ${fullName}, NOW(), NOW())
-          ON CONFLICT (email) DO UPDATE SET apple_sub = ${appleSub}, last_active = NOW()
+          INSERT INTO "User" (id, email, apple_sub, full_name, created_at, last_active, device_platform)
+          VALUES (gen_random_uuid()::text, ${email}, ${appleSub}, ${fullName}, NOW(), NOW(), ${platform})
+          ON CONFLICT (email) DO UPDATE SET apple_sub = ${appleSub}, last_active = NOW(), device_platform = ${platform}
           RETURNING *
         `;
       } else {
-        await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
+        await sql`UPDATE "User" SET last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${user.id}`;
       }
 
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
@@ -2161,16 +2178,18 @@ module.exports = async function handler(req, res) {
         }
       }
 
+      const ua = (req.headers['user-agent'] || '').toLowerCase();
+      const platform = ua.includes('android') ? 'android' : (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') ? 'ios' : 'web');
       if (!user) {
         const email = googleEmail ? googleEmail.toLowerCase() : `google_${googleSub}@perkfinity.internal`;
         [user] = await sql`
-          INSERT INTO "User" (id, email, google_sub, full_name, created_at, last_active)
-          VALUES (gen_random_uuid()::text, ${email}, ${googleSub}, ${googleName}, NOW(), NOW())
-          ON CONFLICT (email) DO UPDATE SET google_sub = ${googleSub}, last_active = NOW()
+          INSERT INTO "User" (id, email, google_sub, full_name, created_at, last_active, device_platform)
+          VALUES (gen_random_uuid()::text, ${email}, ${googleSub}, ${googleName}, NOW(), NOW(), ${platform})
+          ON CONFLICT (email) DO UPDATE SET google_sub = ${googleSub}, last_active = NOW(), device_platform = ${platform}
           RETURNING *
         `;
       } else {
-        await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
+        await sql`UPDATE "User" SET last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${user.id}`;
       }
 
       const gtoken = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
@@ -2200,18 +2219,22 @@ module.exports = async function handler(req, res) {
           return send(res, 400, { success: false, error: 'An account with this email already exists. Please use Log In instead.' });
         }
         // User was auto-created (via Apple/Google sign-in or auto-enrollment) — let them set a password
+        const ua = (req.headers['user-agent'] || '').toLowerCase();
+        const platform = ua.includes('android') ? 'android' : (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') ? 'ios' : 'web');
         const hash = await bcrypt.hash(data.password, 12);
-        await sql`UPDATE "User" SET password_hash = ${hash}, last_active = NOW() WHERE id = ${existing.id}`;
+        await sql`UPDATE "User" SET password_hash = ${hash}, last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${existing.id}`;
         const JWT_SECRET = process.env.JWT_SECRET;
         const token = jwt.sign({ userId: existing.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
         await autoEnrollUser(sql, existing.id, data.qrCode);
         return send(res, 200, { success: true, data: { user: { id: existing.id, email: data.email.toLowerCase() }, accessToken: token } });
       }
 
+      const ua = (req.headers['user-agent'] || '').toLowerCase();
+      const platform = ua.includes('android') ? 'android' : (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') ? 'ios' : 'web');
       const hash = await bcrypt.hash(data.password, 12);
       const [user] = await sql`
-        INSERT INTO "User" (id, email, password_hash, created_at, last_active)
-        VALUES (gen_random_uuid()::text, ${data.email.toLowerCase()}, ${hash}, NOW(), NOW())
+        INSERT INTO "User" (id, email, password_hash, created_at, last_active, device_platform)
+        VALUES (gen_random_uuid()::text, ${data.email.toLowerCase()}, ${hash}, NOW(), NOW(), ${platform})
         RETURNING id, email
       `;
 
@@ -2233,7 +2256,9 @@ module.exports = async function handler(req, res) {
         return send(res, 401, { success: false, error: 'Invalid credentials' });
       }
 
-      await sql`UPDATE "User" SET last_active = NOW() WHERE id = ${user.id}`;
+      const ua = (req.headers['user-agent'] || '').toLowerCase();
+      const platform = ua.includes('android') ? 'android' : (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') ? 'ios' : 'web');
+      await sql`UPDATE "User" SET last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${user.id}`;
       const JWT_SECRET = process.env.JWT_SECRET;
       const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
 
