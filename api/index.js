@@ -1511,6 +1511,7 @@ module.exports = async function handler(req, res) {
         WHERE TRIM(l.postal_code) = TRIM(${zip})
           AND m.account_blocked = false
           AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
         ORDER BY m.business_name ASC
       `;
 
@@ -1535,6 +1536,7 @@ module.exports = async function handler(req, res) {
             AND m.application_status = 'approved'
             AND m.account_blocked = false
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND m.business_category = ${category}
           ORDER BY m.business_name ASC
         `;
@@ -1549,6 +1551,7 @@ module.exports = async function handler(req, res) {
             AND m.application_status = 'approved'
             AND m.account_blocked = false
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
           ORDER BY m.business_name ASC
         `;
       }
@@ -1578,6 +1581,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && cities.length > 0) {
@@ -1590,6 +1594,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && zips.length > 0) {
@@ -1602,6 +1607,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0 && zips.length > 0) {
@@ -1614,6 +1620,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q) {
@@ -1626,6 +1633,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND m.business_name ILIKE ${like}
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0) {
@@ -1638,6 +1646,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (zips.length > 0) {
@@ -1650,6 +1659,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
             AND l.postal_code=ANY(${zips})
           ORDER BY m.business_name ASC LIMIT 100`;
       } else {
@@ -1663,6 +1673,7 @@ module.exports = async function handler(req, res) {
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
           ORDER BY m.business_name ASC LIMIT 100`;
       }
 
@@ -2438,8 +2449,8 @@ module.exports = async function handler(req, res) {
            c.title as discount,
            CASE
              WHEN m.business_presence = 'online' THEN 'Online Only'
-             WHEN m.business_presence = 'mobile' THEN CASE WHEN l.city IS NOT NULL AND l.state IS NOT NULL THEN l.city || ', ' || l.state WHEN l.city IS NOT NULL THEN l.city WHEN l.state IS NOT NULL THEN l.state ELSE '' END
-             ELSE COALESCE(l.address, '') || CASE WHEN l.city IS NOT NULL THEN ', ' || l.city ELSE '' END || CASE WHEN l.state IS NOT NULL THEN ', ' || l.state ELSE '' END
+             WHEN m.business_presence = 'mobile' THEN concat_ws(', ', NULLIF(l.city, ''), NULLIF(l.state, ''))
+             ELSE concat_ws(', ', NULLIF(l.address, ''), NULLIF(l.city, ''), NULLIF(l.state, ''))
            END as store_address,
            c.title as latest_offer_title,
            c.end_at as offer_expires_at,
@@ -2465,6 +2476,7 @@ module.exports = async function handler(req, res) {
          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
          LEFT JOIN "QrCode" q ON q.merchant_id = m.id AND q.status = 'active'
          WHERE c.status = 'active' AND m.status = 'active'
+           AND m.is_hidden = false
            AND (c.end_at IS NULL OR c.end_at > NOW())
          ORDER BY m.id, c.created_at ASC
        `;
@@ -3771,6 +3783,24 @@ module.exports = async function handler(req, res) {
           stats: { total: merchants.length, active }
         }
       });
+    }
+
+    // ── PATCH /api/v1/admin/merchants/:id/toggle-visibility ──────
+    const toggleVisMatch = url.match(/^\/api\/v1\/admin\/merchants\/([a-zA-Z0-9_-]+)\/toggle-visibility$/);
+    if (method === 'PATCH' && toggleVisMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = toggleVisMatch[1];
+      try {
+        const body = req.body || {};
+        if (typeof body.is_hidden !== 'boolean') {
+          return send(res, 400, { success: false, error: 'is_hidden must be a boolean' });
+        }
+        await sql`UPDATE "Merchant" SET is_hidden = ${body.is_hidden} WHERE id = ${merchantId}`;
+        return send(res, 200, { success: true, message: 'Visibility updated' });
+      } catch (err) {
+        console.error('Toggle visibility error:', err);
+        return send(res, 500, { success: false, error: 'Failed to update visibility' });
+      }
     }
 
     // ── GET /api/v1/admin/members ────────────────────────────────
