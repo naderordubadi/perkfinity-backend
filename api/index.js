@@ -5751,6 +5751,7 @@ module.exports = async function handler(req, res) {
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
+      const origin = req.headers.origin || 'https://www.perkfinity.net';
       const { tier } = req.body || {};
       let priceId;
       if (tier === 'web') priceId = process.env.STRIPE_SPONSOR_WEB_PRICE_ID;
@@ -5784,8 +5785,8 @@ module.exports = async function handler(req, res) {
           payment_method_types: ['card'],
           mode: 'subscription',
           line_items: [{ price: priceId, quantity: 1 }],
-          success_url: `${process.env.FRONTEND_URL || 'https://dashboard.perkfinity.com'}/dashboard/billing?sponsor_success=true`,
-          cancel_url: `${process.env.FRONTEND_URL || 'https://dashboard.perkfinity.com'}/dashboard/billing`,
+          success_url: `${origin}/dashboard.html?tab=billing&sponsor_success=true&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${origin}/dashboard.html?tab=billing`,
           metadata: {
             merchant_id: merchantId,
             sponsor_tier: tier,
