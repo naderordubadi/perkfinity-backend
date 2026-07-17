@@ -22,7 +22,7 @@ model User {
   redemptions Redemption[]
   activations Activation[]
   events      Event[]
-  memberships MerchantMember[]
+  // memberships MerchantMember[]
 
   @@schema("public")
 }
@@ -34,6 +34,7 @@ model Merchant {
   logo_url          String?
   cover_photo_url   String?
   status            String             @default("active")
+  is_hidden         Boolean            @default(false)
   subscription_tier String             @default("free")
   created_at        DateTime           @default(now())
   updated_at        DateTime           @updatedAt
@@ -44,8 +45,17 @@ model Merchant {
   subscriptions     Subscription[]
   events            Event[]
   audit_logs        AuditLog[]
-  merchant_logos    MerchantLogo?
-  members           MerchantMember[]
+  // merchant_logos    MerchantLogo?
+  // members           MerchantMember[]
+
+  is_app_sponsored    Boolean   @default(false)
+  app_sponsored_until DateTime?
+  is_web_sponsored    Boolean   @default(false)
+  web_sponsored_until DateTime?
+
+  stripe_web_sponsor_subscription_id    String?
+  stripe_app_sponsor_subscription_id    String?
+  stripe_bundle_sponsor_subscription_id String?
 
   @@schema("public")
 }

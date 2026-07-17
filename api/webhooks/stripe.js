@@ -114,37 +114,53 @@ module.exports = async (req, res) => {
           const toTier = session.metadata?.to_tier || null;
           const toCycle = session.metadata?.billing_cycle || null;
 
-          if (toCycle) {
-            // Update merchant to active and change billing cycle
-            await sql`
-              UPDATE "Merchant"
-              SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
-                  billing_cycle = ${toCycle},
-                  stripe_customer_id = ${customerId},
-                  stripe_subscription_id = ${subscriptionId},
-                  billing_status = 'active',
-                  account_blocked = false,
-                  subscription_started_at = COALESCE(subscription_started_at, NOW()),
-                  next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
-                  updated_at = NOW()
-              WHERE id = ${merchantId}
-            `;
+          if (session.metadata?.is_sponsor_purchase === 'true') {
+            const sponsorTier = session.metadata?.sponsor_tier;
+            const cpe = new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000);
+            
+            let updateSql;
+            if (sponsorTier === 'bundle') {
+              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${cpe}, is_web_sponsored = true, web_sponsored_until = ${cpe}, stripe_bundle_sponsor_subscription_id = ${subscriptionId} WHERE id = ${merchantId}`;
+            } else if (sponsorTier === 'app') {
+              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${cpe}, stripe_app_sponsor_subscription_id = ${subscriptionId} WHERE id = ${merchantId}`;
+            } else if (sponsorTier === 'web') {
+              updateSql = sql`UPDATE "Merchant" SET is_web_sponsored = true, web_sponsored_until = ${cpe}, stripe_web_sponsor_subscription_id = ${subscriptionId} WHERE id = ${merchantId}`;
+            }
+            if (updateSql) await updateSql;
+            console.log(`[Stripe] Merchant ${merchantId} purchased sponsorship via checkout`);
           } else {
-            // Update merchant to active without changing billing cycle
-            await sql`
-              UPDATE "Merchant"
-              SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
-                  stripe_customer_id = ${customerId},
-                  stripe_subscription_id = ${subscriptionId},
-                  billing_status = 'active',
-                  account_blocked = false,
-                  subscription_started_at = COALESCE(subscription_started_at, NOW()),
-                  next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
-                  updated_at = NOW()
-              WHERE id = ${merchantId}
-            `;
+            if (toCycle) {
+              // Update merchant to active and change billing cycle
+              await sql`
+                UPDATE "Merchant"
+                SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
+                    billing_cycle = ${toCycle},
+                    stripe_customer_id = ${customerId},
+                    stripe_subscription_id = ${subscriptionId},
+                    billing_status = 'active',
+                    account_blocked = false,
+                    subscription_started_at = COALESCE(subscription_started_at, NOW()),
+                    next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
+                    updated_at = NOW()
+                WHERE id = ${merchantId}
+              `;
+            } else {
+              // Update merchant to active without changing billing cycle
+              await sql`
+                UPDATE "Merchant"
+                SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
+                    stripe_customer_id = ${customerId},
+                    stripe_subscription_id = ${subscriptionId},
+                    billing_status = 'active',
+                    account_blocked = false,
+                    subscription_started_at = COALESCE(subscription_started_at, NOW()),
+                    next_billing_date = ${new Date((subscription.current_period_end || subscription.items?.data?.[0]?.current_period_end) * 1000)},
+                    updated_at = NOW()
+                WHERE id = ${merchantId}
+              `;
+            }
+            console.log(`[Stripe] Merchant ${merchantId} upgraded via checkout`);
           }
-          console.log(`[Stripe] Merchant ${merchantId} upgraded via checkout`);
         } else if (session.mode === 'payment' && session.metadata?.billing_cycle === 'lifetime') {
           const [merch] = await sql`SELECT promo_code, subscription_tier FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
           if (merch?.promo_code) {
@@ -256,6 +272,9 @@ module.exports = async (req, res) => {
           console.log(`[Stripe] Late invoice cleared for permanently cancelled merchant ${merchant.id}. Keeping blocked status.`);
         } else {
           let currentPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+          let isSponsorship = false;
+          let sponsorTier = null;
+
           if (subscriptionId) {
             try {
               const sub = await stripe.subscriptions.retrieve(subscriptionId);
@@ -263,21 +282,42 @@ module.exports = async (req, res) => {
               if (cpe) {
                 currentPeriodEnd = new Date(cpe * 1000);
               }
+
+              // Check if this subscription is for sponsorship
+              for (const item of sub.items?.data || []) {
+                const pId = item.price.id;
+                if (pId === process.env.STRIPE_SPONSOR_WEB_PRICE_ID) { isSponsorship = true; sponsorTier = 'web'; break; }
+                if (pId === process.env.STRIPE_SPONSOR_APP_PRICE_ID) { isSponsorship = true; sponsorTier = 'app'; break; }
+                if (pId === process.env.STRIPE_SPONSOR_BUNDLE_PRICE_ID) { isSponsorship = true; sponsorTier = 'bundle'; break; }
+              }
             } catch (e) {
               console.error('Failed to fetch subscription for webhook:', e);
             }
           }
-          // Update billing status for active/past_due subscriptions
-          if (merchant.billing_cycle !== 'lifetime') {
-            await sql`
-              UPDATE "Merchant"
-              SET billing_status = 'active',
-                  account_blocked = false,
-                  cancelled_at = NULL,
-                  next_billing_date = ${currentPeriodEnd},
-                  updated_at = NOW()
-              WHERE id = ${merchant.id}
-            `;
+          if (isSponsorship) {
+            let updateSql;
+            if (sponsorTier === 'bundle') {
+              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${currentPeriodEnd}, is_web_sponsored = true, web_sponsored_until = ${currentPeriodEnd}, stripe_bundle_sponsor_subscription_id = COALESCE(stripe_bundle_sponsor_subscription_id, ${subscriptionId}) WHERE id = ${merchant.id}`;
+            } else if (sponsorTier === 'app') {
+              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${currentPeriodEnd}, stripe_app_sponsor_subscription_id = COALESCE(stripe_app_sponsor_subscription_id, ${subscriptionId}) WHERE id = ${merchant.id}`;
+            } else if (sponsorTier === 'web') {
+              updateSql = sql`UPDATE "Merchant" SET is_web_sponsored = true, web_sponsored_until = ${currentPeriodEnd}, stripe_web_sponsor_subscription_id = COALESCE(stripe_web_sponsor_subscription_id, ${subscriptionId}) WHERE id = ${merchant.id}`;
+            }
+            if (updateSql) await updateSql;
+            console.log(`[Stripe] Sponsorship invoice paid for merchant ${merchant.id}, tier: ${sponsorTier}`);
+          } else {
+            if (merchant.billing_cycle !== 'lifetime') {
+              await sql`
+                UPDATE "Merchant"
+                SET billing_status = 'active',
+                    account_blocked = false,
+                    cancelled_at = NULL,
+                    next_billing_date = ${currentPeriodEnd},
+                    updated_at = NOW()
+                WHERE id = ${merchant.id}
+              `;
+            }
+            console.log(`[Stripe] Merchant ${merchant.id} invoice succeeded. Active until ${currentPeriodEnd}`);
           }
         }
 
@@ -391,28 +431,68 @@ module.exports = async (req, res) => {
       case 'customer.subscription.deleted': {
         const subscription = event.data.object;
         const customerId = subscription.customer;
+        const subscriptionId = subscription.id;
 
         const [merchant] = await sql`
-          SELECT id, business_name FROM "Merchant"
+          SELECT id, business_name, stripe_subscription_id, stripe_bundle_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_web_sponsor_subscription_id FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
 
         if (!merchant) break;
 
-        // ═══ FULL BLOCK ═══
-        await sql`
-          UPDATE "Merchant"
-          SET billing_status = 'cancelled',
-              account_blocked = true,
-              cancelled_at = NOW(),
-              stripe_subscription_id = NULL,
-              updated_at = NOW()
-          WHERE id = ${merchant.id}
-        `;
-        await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchant.id} AND status = 'active'`;
+        if (merchant.stripe_bundle_sponsor_subscription_id === subscriptionId) {
+          // It's the bundle sponsor subscription being deleted
+          await sql`
+            UPDATE "Merchant"
+            SET is_app_sponsored = false,
+                is_web_sponsored = false,
+                app_sponsored_until = NULL,
+                web_sponsored_until = NULL,
+                stripe_bundle_sponsor_subscription_id = NULL,
+                updated_at = NOW()
+            WHERE id = ${merchant.id}
+          `;
+          console.log(`[Stripe] Merchant ${merchant.id} (${merchant.business_name}) — bundle sponsor subscription deleted`);
+        } else if (merchant.stripe_app_sponsor_subscription_id === subscriptionId) {
+          // It's the app sponsor subscription being deleted
+          await sql`
+            UPDATE "Merchant"
+            SET is_app_sponsored = false,
+                app_sponsored_until = NULL,
+                stripe_app_sponsor_subscription_id = NULL,
+                updated_at = NOW()
+            WHERE id = ${merchant.id}
+          `;
+          console.log(`[Stripe] Merchant ${merchant.id} (${merchant.business_name}) — app sponsor subscription deleted`);
+        } else if (merchant.stripe_web_sponsor_subscription_id === subscriptionId) {
+          // It's the web sponsor subscription being deleted
+          await sql`
+            UPDATE "Merchant"
+            SET is_web_sponsored = false,
+                web_sponsored_until = NULL,
+                stripe_web_sponsor_subscription_id = NULL,
+                updated_at = NOW()
+            WHERE id = ${merchant.id}
+          `;
+          console.log(`[Stripe] Merchant ${merchant.id} (${merchant.business_name}) — web sponsor subscription deleted`);
+        } else if (merchant.stripe_subscription_id === subscriptionId || !merchant.stripe_subscription_id) {
+          // ═══ FULL BLOCK ═══
+          await sql`
+            UPDATE "Merchant"
+            SET billing_status = 'cancelled',
+                account_blocked = true,
+                cancelled_at = NOW(),
+                stripe_subscription_id = NULL,
+                updated_at = NOW()
+            WHERE id = ${merchant.id}
+          `;
+          await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchant.id} AND status = 'active'`;
 
-        console.error(`[Stripe] 🚫 FULL BLOCK: Merchant ${merchant.id} (${merchant.business_name}) — subscription deleted, campaigns deactivated`);
+          console.error(`[Stripe] 🚫 FULL BLOCK: Merchant ${merchant.id} (${merchant.business_name}) — main subscription deleted, campaigns deactivated`);
+        } else {
+          console.log(`[Stripe] Merchant ${merchant.id} — unknown subscription ${subscriptionId} deleted, ignoring.`);
+        }
         break;
       }
 

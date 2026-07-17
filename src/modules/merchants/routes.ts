@@ -63,4 +63,49 @@ export default async function merchantRoutes(fastify: FastifyInstance) {
       }
     }
   });
+
+  fastify.get('/sponsored', async (request, reply) => {
+    const { platform } = request.query as any;
+    const isApp = platform === 'app';
+    
+    try {
+      const merchants = await fastify.prisma.merchant.findMany({
+        where: {
+          status: 'active',
+          is_hidden: false,
+          ...(isApp 
+            ? { is_app_sponsored: true, app_sponsored_until: { gt: new Date() } }
+            : { is_web_sponsored: true, web_sponsored_until: { gt: new Date() } }
+          )
+        },
+        include: {
+          campaigns: {
+            where: { 
+              status: 'active',
+              OR: [
+                { end_at: null },
+                { end_at: { gt: new Date() } }
+              ]
+            },
+            orderBy: { created_at: 'desc' },
+            take: 1
+          }
+        }
+      });
+
+      // Shuffle using Fisher-Yates
+      for (let i = merchants.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [merchants[i], merchants[j]] = [merchants[j], merchants[i]];
+      }
+
+      // Limit to 8 (so the UI has a decent sliding length but not overwhelming)
+      const limited = merchants.slice(0, 8);
+
+      return success(limited);
+    } catch (err: any) {
+      request.log.error(err);
+      return reply.code(500).send(failure('INTERNAL_ERROR', 'Failed to fetch sponsored merchants'));
+    }
+  });
 }

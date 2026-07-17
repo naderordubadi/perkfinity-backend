@@ -62,8 +62,10 @@ const server = http.createServer(async (req, res) => {
   res.end = function(chunk, ...args) {
     const ms = Date.now() - start;
     try {
-      const body = chunk ? JSON.parse(chunk.toString()) : {};
-      if (!body.success) {
+      const body = chunk && chunk.length ? JSON.parse(chunk.toString()) : null;
+      if (res.statusCode === 204 || (body && body.success)) {
+        console.log(`← ${res.statusCode} (${ms}ms) OK`);
+      } else if (body) {
         console.log(`← ${res.statusCode} (${ms}ms) ERROR:`, JSON.stringify(body));
       } else {
         console.log(`← ${res.statusCode} (${ms}ms) OK`);

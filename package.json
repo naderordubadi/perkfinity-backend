@@ -17,16 +17,16 @@
     "form-data": "^4.0.5",
     "jsonwebtoken": "^9.0.2",
     "pdfkit": "^0.18.0",
-    "pg": "^8.20.0",
+    "pg": "^8.22.0",
     "sib-api-v3-sdk": "^8.5.0",
     "stripe": "^21.0.1"
   },
   "devDependencies": {
-    "@prisma/client": "^7.8.0",
+    "@prisma/client": "^5.21.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/jsonwebtoken": "^9.0.0",
     "@types/node": "^20.5.9",
-    "prisma": "^7.8.0",
+    "prisma": "^5.21.0",
     "tsx": "^3.12.7",
     "typescript": "^5.2.2"
   }

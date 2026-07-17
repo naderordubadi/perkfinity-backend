@@ -1471,6 +1471,44 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
+    // ── GET /api/v1/merchants/sponsored ──────────────────────────────
+    if (method === 'GET' && url.startsWith('/api/v1/merchants/sponsored')) {
+      const qs = (req.url || '').split('?')[1] || '';
+      const platform = new URLSearchParams(qs).get('platform');
+      
+      try {
+        let sponsors;
+        if (platform === 'app') {
+          sponsors = await sql`
+            SELECT 
+              m.id, m.business_name, m.logo_url, m.cover_photo_url, (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
+              (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND (c.end_at IS NULL OR c.end_at > NOW()) ORDER BY c.created_at DESC LIMIT 1) as latest_offer_title
+            FROM "Merchant" m
+            WHERE m.status = 'active' AND m.is_hidden = false AND m.is_app_sponsored = true AND m.app_sponsored_until > NOW()
+          `;
+        } else {
+          sponsors = await sql`
+            SELECT 
+              m.id, m.business_name, m.logo_url, m.cover_photo_url, (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
+              (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND (c.end_at IS NULL OR c.end_at > NOW()) ORDER BY c.created_at DESC LIMIT 1) as latest_offer_title
+            FROM "Merchant" m
+            WHERE m.status = 'active' AND m.is_hidden = false AND m.is_web_sponsored = true AND m.web_sponsored_until > NOW()
+          `;
+        }
+
+        // Shuffle using Fisher-Yates
+        for (let i = sponsors.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [sponsors[i], sponsors[j]] = [sponsors[j], sponsors[i]];
+        }
+
+        return send(res, 200, { success: true, data: sponsors.slice(0, 8) });
+      } catch (err) {
+        console.error('Fetch sponsored merchants error:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
     // ── GET /api/v1/merchants/search?zip=XXXXX ────────────────────
     if (method === 'GET' && url.startsWith('/api/v1/merchants/search')) {
       // NOTE: `url` at line 36 strips the query string, so parse from req.url directly
@@ -1856,6 +1894,7 @@ module.exports = async function handler(req, res) {
         SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, m.subscription_tier,
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
                m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location, m.onboarding_complete,
+               m.is_web_sponsored, m.web_sponsored_until, m.is_app_sponsored, m.app_sponsored_until,
                l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
@@ -1886,6 +1925,10 @@ module.exports = async function handler(req, res) {
       merchantData.qr_public_code = qrData ? qrData.public_code : null;
       merchantData.qr_url = qrData ? `https://www.perkfinity.net/qr/${qrData.public_code}` : null;
       merchantData.perk = campaignData ? campaignData.title : (merchantData.welcome_offer_text || 'Welcome Perk');
+      
+      // Apply active sponsorship logic
+      merchantData.is_web_sponsored = merchantData.is_web_sponsored && (!merchantData.web_sponsored_until || new Date(merchantData.web_sponsored_until) >= new Date()) ? true : false;
+      merchantData.is_app_sponsored = merchantData.is_app_sponsored && (!merchantData.app_sponsored_until || new Date(merchantData.app_sponsored_until) >= new Date()) ? true : false;
 
       return send(res, 200, { success: true, data: merchantData });
     }
@@ -3178,8 +3221,8 @@ module.exports = async function handler(req, res) {
                   WHEN r.status = 'redeemed' OR r.redeemed = true THEN 'Redeemed'
                   WHEN r.status = 'claimed' THEN 'Claimed'
                   WHEN c.end_at IS NOT NULL AND c.end_at < NOW() THEN 'Expired'
-                  WHEN r.status = 'expired' OR (r.redeemed = false AND r.expires_at < NOW()) THEN 'Expired'
-                  WHEN r.status = 'pending' THEN 'Pending'
+                  WHEN r.status = 'expired' THEN 'Expired'
+                  WHEN r.status = 'pending' AND (r.expires_at IS NULL OR r.expires_at > NOW()) THEN 'Pending'
                   ELSE 'Created'
                 END
               )
@@ -3779,7 +3822,14 @@ module.exports = async function handler(req, res) {
       return send(res, 200, {
         success: true,
         data: {
-          merchants: merchants.map(m => ({ ...m, password_hash: undefined, tier: m.subscription_tier || 'free', status: m.status || 'active' })),
+          merchants: merchants.map(m => ({
+            ...m,
+            password_hash: undefined,
+            tier: m.subscription_tier || 'free',
+            status: m.status || 'active',
+            is_web_sponsored: m.is_web_sponsored && (!m.web_sponsored_until || new Date(m.web_sponsored_until) >= new Date()) ? true : false,
+            is_app_sponsored: m.is_app_sponsored && (!m.app_sponsored_until || new Date(m.app_sponsored_until) >= new Date()) ? true : false
+          })),
           stats: { total: merchants.length, active }
         }
       });
@@ -3800,6 +3850,29 @@ module.exports = async function handler(req, res) {
       } catch (err) {
         console.error('Toggle visibility error:', err);
         return send(res, 500, { success: false, error: 'Failed to update visibility' });
+      }
+    }
+
+    // ── PATCH /api/v1/admin/merchants/:id/sponsorship ───────────────
+    const sponsorAdminMatch = url.match(/^\/api\/v1\/admin\/merchants\/([a-zA-Z0-9_-]+)\/sponsorship$/);
+    if (method === 'PATCH' && sponsorAdminMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = sponsorAdminMatch[1];
+      try {
+        const body = req.body || {};
+        await sql`
+          UPDATE "Merchant" 
+          SET 
+            is_web_sponsored = ${body.is_web_sponsored !== undefined ? body.is_web_sponsored : sql`is_web_sponsored`},
+            web_sponsored_until = ${body.web_sponsored_until !== undefined ? (body.web_sponsored_until ? new Date(body.web_sponsored_until) : null) : sql`web_sponsored_until`},
+            is_app_sponsored = ${body.is_app_sponsored !== undefined ? body.is_app_sponsored : sql`is_app_sponsored`},
+            app_sponsored_until = ${body.app_sponsored_until !== undefined ? (body.app_sponsored_until ? new Date(body.app_sponsored_until) : null) : sql`app_sponsored_until`}
+          WHERE id = ${merchantId}
+        `;
+        return send(res, 200, { success: true, message: 'Sponsorship updated' });
+      } catch (err) {
+        console.error('Update sponsorship error:', err);
+        return send(res, 500, { success: false, error: 'Failed to update sponsorship' });
       }
     }
 
@@ -5523,11 +5596,13 @@ module.exports = async function handler(req, res) {
 
       const [merchant] = await sql`
         SELECT id, business_name, subscription_tier, billing_status, account_blocked,
-               stripe_customer_id, stripe_subscription_id, subscription_started_at,
+               stripe_customer_id, stripe_subscription_id, stripe_sponsor_subscription_id, 
+               stripe_web_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_bundle_sponsor_subscription_id,
+               subscription_started_at,
                next_billing_date, member_limit, promo_code, created_at,
                payment_failed_at, payment_failure_reminder_count,
                billing_starts_at_member_count, application_status, business_presence,
-               billing_cycle
+               billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -5559,6 +5634,14 @@ module.exports = async function handler(req, res) {
           created_at: merchant.created_at,
           has_stripe: !!merchant.stripe_customer_id,
           has_subscription: !!merchant.stripe_subscription_id,
+          has_sponsor_subscription: !!merchant.stripe_sponsor_subscription_id || !!merchant.stripe_bundle_sponsor_subscription_id || !!merchant.stripe_web_sponsor_subscription_id || !!merchant.stripe_app_sponsor_subscription_id,
+          has_bundle_subscription: !!merchant.stripe_bundle_sponsor_subscription_id || (!!merchant.stripe_web_sponsor_subscription_id && merchant.stripe_web_sponsor_subscription_id === merchant.stripe_app_sponsor_subscription_id),
+          has_web_subscription: !!merchant.stripe_web_sponsor_subscription_id,
+          has_app_subscription: !!merchant.stripe_app_sponsor_subscription_id,
+          is_web_sponsored: merchant.is_web_sponsored && (!merchant.web_sponsored_until || new Date(merchant.web_sponsored_until) >= new Date()) ? true : false,
+          is_app_sponsored: merchant.is_app_sponsored && (!merchant.app_sponsored_until || new Date(merchant.app_sponsored_until) >= new Date()) ? true : false,
+          web_sponsored_until: merchant.web_sponsored_until || null,
+          app_sponsored_until: merchant.app_sponsored_until || null,
           payment_failed_at: merchant.payment_failed_at || null,
           billing_starts_at_member_count: merchant.billing_starts_at_member_count || null,
           application_status: merchant.application_status || null,
@@ -5654,6 +5737,109 @@ module.exports = async function handler(req, res) {
         return send(res, 200, { success: true, message: 'Subscription reactivated successfully!' });
       } catch (stripeErr) {
         return send(res, 400, { success: false, error: `Reactivation failed: ${stripeErr.message}` });
+      }
+    }
+
+    // ── POST /api/v1/merchants/:id/billing/sponsor ───────────────
+    const sponsorMatch = url.match(/^\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/sponsor$/);
+    if (method === 'POST' && sponsorMatch) {
+      const merchantId = sponsorMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const { tier } = req.body || {};
+      let priceId;
+      if (tier === 'web') priceId = process.env.STRIPE_SPONSOR_WEB_PRICE_ID;
+      else if (tier === 'app') priceId = process.env.STRIPE_SPONSOR_APP_PRICE_ID;
+      else if (tier === 'bundle') priceId = process.env.STRIPE_SPONSOR_BUNDLE_PRICE_ID;
+      else return send(res, 400, { success: false, error: 'Invalid tier specified. Must be web, app, or bundle.' });
+
+      if (!priceId) return send(res, 500, { success: false, error: 'Sponsorship Price ID not configured.' });
+
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      try {
+        const merchants = await sql`SELECT stripe_customer_id, business_name FROM "Merchant" WHERE id = ${merchantId}`;
+        const merchant = merchants[0];
+        if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+        
+        let stripeCustomerId = merchant.stripe_customer_id;
+        if (!stripeCustomerId) {
+          const customer = await stripeClient.customers.create({
+            name: merchant.business_name,
+            metadata: { merchant_id: merchantId }
+          });
+          stripeCustomerId = customer.id;
+          await sql`UPDATE "Merchant" SET stripe_customer_id = ${stripeCustomerId} WHERE id = ${merchantId}`;
+        }
+
+        const session = await stripeClient.checkout.sessions.create({
+          customer: stripeCustomerId,
+          payment_method_types: ['card'],
+          mode: 'subscription',
+          line_items: [{ price: priceId, quantity: 1 }],
+          success_url: `${process.env.FRONTEND_URL || 'https://dashboard.perkfinity.com'}/dashboard/billing?sponsor_success=true`,
+          cancel_url: `${process.env.FRONTEND_URL || 'https://dashboard.perkfinity.com'}/dashboard/billing`,
+          metadata: {
+            merchant_id: merchantId,
+            sponsor_tier: tier,
+            is_sponsor_purchase: 'true'
+          }
+        });
+
+        return send(res, 200, { success: true, url: session.url });
+      } catch (err) {
+        console.error('Sponsor checkout error:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
+    // ── POST /api/v1/merchants/:id/billing/sponsor-cancel ─────────
+    const sponsorCancelMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/sponsor-cancel$/);
+    if (method === 'POST' && sponsorCancelMatch) {
+      const merchantId = sponsorCancelMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      try {
+        const { tier } = req.body || {};
+
+        const [merchant] = await sql`
+          SELECT stripe_bundle_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_web_sponsor_subscription_id
+          FROM "Merchant"
+          WHERE id = ${merchantId}
+          LIMIT 1
+        `;
+
+        if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+        
+        let subId = null;
+        if (tier === 'bundle') subId = merchant.stripe_bundle_sponsor_subscription_id;
+        else if (tier === 'app') subId = merchant.stripe_app_sponsor_subscription_id;
+        else if (tier === 'web') subId = merchant.stripe_web_sponsor_subscription_id;
+        else return send(res, 400, { success: false, error: 'Invalid or missing tier' });
+
+        if (!subId) return send(res, 400, { success: false, error: `No active ${tier} sponsorship` });
+
+        // Cancel at period end
+        await stripeClient.subscriptions.update(subId, {
+          cancel_at_period_end: true
+        });
+
+        return send(res, 200, { success: true });
+      } catch (err) {
+        console.error('Sponsor cancel error:', err);
+        return send(res, 500, { success: false, error: err.message });
       }
     }
 
