@@ -1481,7 +1481,7 @@ module.exports = async function handler(req, res) {
         if (platform === 'app') {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, m.logo_url, m.cover_photo_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, m.website, m.review_url, m.order_url, m.business_presence,
               (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND (c.end_at IS NULL OR c.end_at > NOW()) ORDER BY c.created_at DESC LIMIT 1) as latest_offer_title,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND c.discount_percentage >= 0 ORDER BY c.created_at ASC LIMIT 1) as discount,
@@ -1497,7 +1497,7 @@ module.exports = async function handler(req, res) {
         } else {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, m.logo_url, m.cover_photo_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, m.website, m.review_url, m.order_url, m.business_presence,
               (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND (c.end_at IS NULL OR c.end_at > NOW()) ORDER BY c.created_at DESC LIMIT 1) as latest_offer_title,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND c.discount_percentage >= 0 ORDER BY c.created_at ASC LIMIT 1) as discount,
@@ -1541,7 +1541,7 @@ module.exports = async function handler(req, res) {
         SELECT
           m.id,
           m.business_name,
-          m.logo_url,
+          REPLACE(m.logo_url, 'http://', 'https://') as logo_url,
           l.address,
           l.city,
           l.state,
