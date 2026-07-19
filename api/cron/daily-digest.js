@@ -121,11 +121,20 @@ module.exports = async (req, res) => {
         // Build offer cards HTML
         const offerCards = items.map(item => {
           const isOnline = item.is_online_merchant === true;
-          const addressOrWebsite = item.website
-            ? `<a href="${item.website.startsWith('http') ? item.website : 'https://' + item.website}" style="font-size:11px;color:#5B3FA5;text-decoration:underline;margin-top:3px;display:block;" target="_blank">🌐 ${item.website.replace(/^https?:\/\//, '')}</a>`
-            : (item.store_address && item.store_address !== 'Mobile Business')
-              ? `<div style="font-size:11px;color:#aaa;margin-top:3px;">📍 ${item.store_address}</div>`
-              : '';
+          
+          let displayWebsite = item.website
+            ? `<a href="${item.website.startsWith('http') ? item.website : 'https://' + item.website}" style="font-size:11px;color:#5B3FA5;text-decoration:underline;margin-top:3px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" target="_blank">🌐 ${item.website.replace(/^https?:\/\//, '')}</a>`
+            : '';
+            
+          let displayAddress = '';
+          if (item.store_address && item.store_address !== 'Mobile Business') {
+            displayAddress = `<div style="font-size:11px;color:#aaa;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">📍 ${item.store_address}</div>`;
+          } else if (item.store_address === 'Mobile Business') {
+            displayAddress = `<div style="font-size:11px;color:#aaa;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🚐 Mobile Business</div>`;
+          }
+          
+          const addressOrWebsite = displayWebsite + displayAddress;
+          
           const isMobile = !isOnline && item.store_address === 'Mobile Business';
           const activationHint = isOnline
             ? `<div style="font-size:11px;color:#5B3FA5;margin-top:5px;font-weight:600;">🛍️ Open the Perkfinity app → find ${item.store_name} → Reveal &amp; Copy your code</div>`
