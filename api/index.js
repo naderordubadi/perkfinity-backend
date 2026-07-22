@@ -409,6 +409,18 @@ module.exports = async function handler(req, res) {
       } catch (migErr) { /* columns may already exist */ }
     }
 
+    // ── One-time migration: revenue_type column on Invoice ─────────
+    if (!global._invoiceRevenueTypeMigrated) {
+      try {
+        await sql`ALTER TABLE "Invoice" ADD COLUMN IF NOT EXISTS "revenue_type" TEXT DEFAULT 'platform'`;
+        // Backfill existing invoices based on pricing
+        await sql`UPDATE "Invoice" SET "revenue_type" = 'sponsorship' WHERE "amount_cents" IN (4999, 9999, 12999)`;
+        await sql`UPDATE "Invoice" SET "revenue_type" = 'pouf' WHERE "merchant_id" IN (SELECT "id" FROM "Merchant" WHERE "billing_cycle" = 'lifetime') OR "stripe_invoice_id" LIKE 'cs_%'`;
+        global._invoiceRevenueTypeMigrated = true;
+      } catch (migErr) { /* non-critical */ }
+    }
+
+
     // ── One-time migration: AnnouncementLog table ─────────────────
     if (!global._announcementLogMigrated) {
       try {
@@ -3960,20 +3972,73 @@ module.exports = async function handler(req, res) {
         ORDER BY i.created_at DESC
       `;
 
-      // Billing stats from Merchant table
+      // Billing stats from Merchant table (excluding Demo accounts)
       const [stats] = await sql`
         SELECT
-          COUNT(*) FILTER (WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') AND account_blocked = false AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')) as paying_merchants,
-          COUNT(*) FILTER (WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') AND billing_status = 'pending_cancellation') as pending_cancel,
+          COUNT(*) FILTER (
+            WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
+              AND account_blocked = false 
+              AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')
+              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
+          ) as paying_merchants,
+          COUNT(*) FILTER (
+            WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
+              AND billing_status = 'pending_cancellation'
+              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
+          ) as pending_cancel,
           COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
           COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
           COUNT(*) FILTER (WHERE subscription_tier IN ('none','trial') AND account_blocked = false) as upgrade_eligible
         FROM "Merchant"
       `;
 
+      // Fetch active sponsors (both paid and complimentary)
+      const activeSponsors = await sql`
+        SELECT id, business_name, subscription_tier, 
+               is_web_sponsored, web_sponsored_until, 
+               is_app_sponsored, app_sponsored_until,
+               stripe_bundle_sponsor_subscription_id, 
+               stripe_web_sponsor_subscription_id, 
+               stripe_app_sponsor_subscription_id
+        FROM "Merchant"
+        WHERE ((is_web_sponsored = true AND (web_sponsored_until IS NULL OR web_sponsored_until > NOW()))
+           OR (is_app_sponsored = true AND (app_sponsored_until IS NULL OR app_sponsored_until > NOW())))
+          AND account_blocked = false
+      `;
+
+      // Filter complimentary sponsors specifically for the panel
+      const complimentarySponsors = activeSponsors.filter(s => 
+        !s.stripe_bundle_sponsor_subscription_id && 
+        !s.stripe_web_sponsor_subscription_id && 
+        !s.stripe_app_sponsor_subscription_id
+      );
+
+      // Calculate active paid sponsorship MRR run-rate
+      let sponsorshipMrr = 0;
+      activeSponsors.forEach(m => {
+        if (m.stripe_bundle_sponsor_subscription_id) {
+          sponsorshipMrr += 129.99;
+        } else if (m.stripe_web_sponsor_subscription_id && m.stripe_app_sponsor_subscription_id && m.stripe_web_sponsor_subscription_id === m.stripe_app_sponsor_subscription_id) {
+          // If both web and app fields point to the same bundle subscription ID, count as Everywhere Bundle
+          sponsorshipMrr += 129.99;
+        } else {
+          if (m.stripe_web_sponsor_subscription_id) {
+            sponsorshipMrr += 49.99;
+          }
+          if (m.stripe_app_sponsor_subscription_id) {
+            sponsorshipMrr += 99.99;
+          }
+        }
+      });
+
+      // Count active POUF (lifetime) merchants
+      const [poufStats] = await sql`
+        SELECT COUNT(*)::int as count
+        FROM "Merchant"
+        WHERE billing_cycle = 'lifetime' AND account_blocked = false
+      `;
+
       // MRR + ARR: split by billing_cycle using the most recent paid invoice per active merchant.
-      // MRR = monthly subscribers only. ARR = annual subscribers only (actual Stripe invoice amounts).
-      // Blended MRR = MRR + ARR/12 (total monthly-equivalent recurring revenue across all cycle types).
       const [revenueResult] = await sql`
         SELECT
           COALESCE(SUM(amount_cents) FILTER (WHERE billing_cycle IS NULL OR billing_cycle = 'monthly'), 0) AS mrr_cents,
@@ -3987,22 +4052,39 @@ module.exports = async function handler(req, res) {
             AND m.billing_status = 'active'
             AND m.stripe_subscription_id IS NOT NULL
             AND m.account_blocked = false
+            AND NOT (m.billing_status = 'active' AND m.stripe_subscription_id IS NULL AND m.stripe_payment_method_id IS NULL AND m.member_limit IS NULL AND m.billing_cycle = 'monthly' AND m.subscription_tier != 'free_for_life')
           ORDER BY i.merchant_id, i.paid_at DESC
         ) last_invoices
       `;
+
       const mrr = (parseInt(revenueResult.mrr_cents) || 0) / 100;
       const arr = (parseInt(revenueResult.arr_cents) || 0) / 100;
       const blendedMrr = mrr + arr / 12;
       const annualMerchantCount = parseInt(revenueResult.annual_merchant_count) || 0;
       const payingCount = parseInt(stats.paying_merchants) || 0;
+
+      // Segmented revenues from Invoice list
       const totalRevenue = invoices
         .filter(i => i.status === 'paid')
+        .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
+
+      const platformRevenue = invoices
+        .filter(i => i.status === 'paid' && (i.revenue_type === 'platform' || !i.revenue_type))
+        .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
+
+      const sponsorshipRevenue = invoices
+        .filter(i => i.status === 'paid' && i.revenue_type === 'sponsorship')
+        .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
+
+      const poufRevenue = invoices
+        .filter(i => i.status === 'paid' && i.revenue_type === 'pouf')
         .reduce((sum, i) => sum + (parseInt(i.amount_cents) || 0), 0);
 
       return send(res, 200, {
         success: true,
         data: {
           invoices,
+          complimentarySponsors,
           stats: {
             mrr: mrr.toFixed(2),
             arr: arr.toFixed(2),
@@ -4013,7 +4095,13 @@ module.exports = async function handler(req, res) {
             failed_payments: parseInt(stats.failed_payments) || 0,
             ffl_merchants: parseInt(stats.ffl_merchants) || 0,
             upgrade_eligible: parseInt(stats.upgrade_eligible) || 0,
-            total_revenue_cents: totalRevenue
+            total_revenue_cents: totalRevenue,
+            platform_revenue_cents: platformRevenue,
+            sponsorship_revenue_cents: sponsorshipRevenue,
+            pouf_revenue_cents: poufRevenue,
+            sponsorship_mrr: sponsorshipMrr.toFixed(2),
+            sponsors_count: activeSponsors.length,
+            pouf_count: poufStats.count
           }
         }
       });
@@ -4674,7 +4762,7 @@ module.exports = async function handler(req, res) {
 
                 // Record the one-time POUF payment in the Invoice table
                 await sql`
-                  INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at)
+                  INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
                   VALUES (
                     gen_random_uuid()::text,
                     ${merchantId},
@@ -4685,9 +4773,10 @@ module.exports = async function handler(req, res) {
                     NOW(),
                     NOW(),
                     NOW(),
-                    NOW()
+                    NOW(),
+                    'pouf'
                   )
-                  ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW()
+                  ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = 'pouf'
                 `;
 
                 // Start commission attribution
@@ -5201,8 +5290,8 @@ module.exports = async function handler(req, res) {
           await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchant_id}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${merchant.promo_code} AND type = 'pouf'`;
 
           await sql`
-            INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at)
-            VALUES (gen_random_uuid()::text, ${merchant_id}, ${invoice.id}, ${priceObj.unit_amount}, ${priceObj.currency}, 'paid', NOW(), NOW(), NOW(), NOW())
+            INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
+            VALUES (gen_random_uuid()::text, ${merchant_id}, ${invoice.id}, ${priceObj.unit_amount}, ${priceObj.currency}, 'paid', NOW(), NOW(), NOW(), NOW(), 'pouf')
           `;
 
           await sql`
@@ -6103,14 +6192,13 @@ module.exports = async function handler(req, res) {
       }
 
       // Safe to Wipe PII
-      // NOTE: MerchantUser.password_hash and Merchant.business_name are NOT NULL in the schema,
-      // so they must use sentinel values instead of NULL to avoid constraint violations.
+      // NOTE: MerchantUser.password_hash is NOT NULL in the schema,
+      // so it must use a sentinel value instead of NULL to avoid constraint violations.
       const deletedEmail = 'deleted_' + payload.userId + '@deleted.invalid';
       await sql`UPDATE "MerchantUser" SET email = ${deletedEmail}, password_hash = 'DELETED' WHERE id = ${payload.userId}`;
       await sql`
         UPDATE "Merchant"
-        SET business_name = '[Deleted]',
-            contact_name = NULL,
+        SET contact_name = NULL,
             phone = NULL,
             website = NULL,
             logo_url = NULL,

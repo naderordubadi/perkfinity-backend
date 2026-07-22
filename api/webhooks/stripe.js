@@ -321,9 +321,10 @@ module.exports = async (req, res) => {
           }
         }
 
+        const revenueType = isSponsorship ? 'sponsorship' : 'platform';
         // Record in Invoice table
         await sql`
-          INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at)
+          INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
           VALUES (
             gen_random_uuid()::text,
             ${merchant.id},
@@ -334,9 +335,10 @@ module.exports = async (req, res) => {
             ${invoice.period_start ? new Date(invoice.period_start * 1000) : null},
             ${invoice.period_end ? new Date(invoice.period_end * 1000) : null},
             NOW(),
-            NOW()
+            NOW(),
+            ${revenueType}
           )
-          ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW()
+          ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = ${revenueType}
         `;
 
         // Start commission if there's an active attribution waiting for the first payment
