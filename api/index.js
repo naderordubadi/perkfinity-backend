@@ -6742,9 +6742,7 @@ module.exports = async function handler(req, res) {
             transfers: { requested: true },
             tax_reporting_us_1099_misc: { requested: true }
           },
-          business_type: 'individual',
           business_profile: {
-            name: rep.full_name,
             product_description: 'Independent Sales Contractor for Perkfinity'
           }
         });
