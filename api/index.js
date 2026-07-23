@@ -3720,10 +3720,26 @@ module.exports = async function handler(req, res) {
       
       const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${repId} AND status = 'active' LIMIT 1`;
 
+      let stripeBusinessType = null;
+      if (ctr.stripe_account_id) {
+        try {
+          const stripeKey = process.env.STRIPE_SECRET_KEY || null;
+          if (stripeKey) {
+            const stripeClient = Stripe(stripeKey);
+            const stripeAcc = await stripeClient.accounts.retrieve(ctr.stripe_account_id);
+            stripeBusinessType = stripeAcc.business_type;
+          }
+        } catch (e) {
+          console.error('[ICA] Stripe business type lookup error:', e.message);
+        }
+      }
+
       const { generateICAPdf } = require('./lib/generate-ica.js');
       const pdfBuffer = await generateICAPdf({
         contractorName: ctr.legal_name || ctr.full_name,
         contractorEmail: ctr.email,
+        entityType: ctr.entity_type,
+        stripeBusinessType: stripeBusinessType,
         agreementDate: ctr.ica_status === 'signed' ? ctr.updated_at : new Date(),
         territoryZips: terr && terr.zip_codes ? terr.zip_codes : [], 
         commissionRate: ctr.commission_rate || 15,

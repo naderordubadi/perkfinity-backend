@@ -117,7 +117,31 @@ function generateICAPdf(p) {
     body('Safe Box Financial Technologies and Education LLC, a California limited liability company, doing business as Perkfinity ("Company")');
 
     doc.font('Helvetica-Bold').fontSize(BODY_SIZE).text('Contractor:');
-    body(`${p.contractorName}, an individual ("Contractor")`);
+    
+    // Layer 1: Stripe official classification
+    const isStripeCompany = p.stripeBusinessType === 'company';
+
+    // Layer 2: Local database classification
+    const isCompanyType = ['llc_single', 'llc_partnership', 's_corporation', 'c_corporation'].includes(p.entityType);
+
+    // Layer 3: Legal name suffix check
+    const nameLower = (p.contractorName || '').toLowerCase().trim();
+    const hasCompanySuffix = nameLower.endsWith('inc') || 
+                             nameLower.endsWith('inc.') || 
+                             nameLower.endsWith('llc') || 
+                             nameLower.endsWith('corp') || 
+                             nameLower.endsWith('corp.') || 
+                             nameLower.endsWith('corporation') || 
+                             nameLower.endsWith('co') || 
+                             nameLower.endsWith('co.') || 
+                             nameLower.endsWith('ltd') || 
+                             nameLower.endsWith('ltd.');
+
+    // Final evaluation
+    const isCompany = isStripeCompany || isCompanyType || hasCompanySuffix;
+    const entityDesc = isCompany ? 'a business entity' : 'an individual';
+
+    body(`${p.contractorName}, ${entityDesc} ("Contractor")`);
 
     body('(Each a "Party" and collectively the "Parties")');
     divider();
