@@ -256,13 +256,18 @@ module.exports = async (req, res) => {
 
         // Find the merchant by stripe_customer_id
         const [merchant] = await sql`
-          SELECT id, business_name, account_blocked, stripe_subscription_id, billing_cycle, subscription_tier FROM "Merchant"
+          SELECT id, business_name, billing_status, account_blocked, stripe_subscription_id, billing_cycle, subscription_tier FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
 
         if (!merchant) {
           console.warn(`invoice.payment_succeeded: No merchant found for customer ${customerId}`);
+          break;
+        }
+
+        if (merchant.billing_status === 'deleted') {
+          console.log(`[Stripe Webhook] Merchant ${merchant.id} is deleted. Ignoring invoice.payment_succeeded.`);
           break;
         }
 
@@ -360,12 +365,17 @@ module.exports = async (req, res) => {
         const customerId = invoice.customer;
 
         const [merchant] = await sql`
-          SELECT id, business_name FROM "Merchant"
+          SELECT id, business_name, billing_status FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
 
         if (!merchant) break;
+
+        if (merchant.billing_status === 'deleted') {
+          console.log(`[Stripe Webhook] Merchant ${merchant.id} is deleted. Ignoring invoice.payment_failed.`);
+          break;
+        }
 
         // Mark billing as failed (but don't block yet — Stripe retries automatically)
         await sql`
@@ -396,6 +406,11 @@ module.exports = async (req, res) => {
 
         if (!merchant) {
           console.warn(`customer.subscription.updated: No merchant found for customer ${customerId}`);
+          break;
+        }
+
+        if (merchant.billing_status === 'deleted') {
+          console.log(`[Stripe Webhook] Merchant ${merchant.id} is deleted. Ignoring customer.subscription.updated.`);
           break;
         }
 
@@ -436,12 +451,17 @@ module.exports = async (req, res) => {
         const subscriptionId = subscription.id;
 
         const [merchant] = await sql`
-          SELECT id, business_name, stripe_subscription_id, stripe_bundle_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_web_sponsor_subscription_id FROM "Merchant"
+          SELECT id, business_name, billing_status, stripe_subscription_id, stripe_bundle_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_web_sponsor_subscription_id FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
 
         if (!merchant) break;
+
+        if (merchant.billing_status === 'deleted') {
+          console.log(`[Stripe Webhook] Merchant ${merchant.id} is deleted. Ignoring customer.subscription.deleted.`);
+          break;
+        }
 
         if (merchant.stripe_bundle_sponsor_subscription_id === subscriptionId) {
           // It's the bundle sponsor subscription being deleted
@@ -510,7 +530,7 @@ module.exports = async (req, res) => {
 
         // Find the merchant who had this payment method on file
         const [merchant] = await sql`
-          SELECT id, business_name, subscription_tier FROM "Merchant"
+          SELECT id, business_name, billing_status, subscription_tier FROM "Merchant"
           WHERE stripe_payment_method_id = ${paymentMethodId}
           LIMIT 1
         `;
@@ -518,6 +538,11 @@ module.exports = async (req, res) => {
         if (!merchant) {
           // PM may have been attached to a customer but not the primary one on file — safe to ignore
           console.log(`[Stripe] payment_method.detached: ${paymentMethodId} — no merchant match, ignoring`);
+          break;
+        }
+
+        if (merchant.billing_status === 'deleted') {
+          console.log(`[Stripe Webhook] Merchant ${merchant.id} is deleted. Ignoring payment_method.detached.`);
           break;
         }
 
