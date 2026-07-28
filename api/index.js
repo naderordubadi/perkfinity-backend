@@ -1480,6 +1480,21 @@ module.exports = async function handler(req, res) {
       // 'monthly' | 'annual'. Existing merchants default to 'monthly' safely.
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS billing_cycle TEXT DEFAULT 'monthly'`;
 
+      // Retroactive: backfill Merchant.welcome_offer_text from active welcome/initial campaigns if null
+      await sql`
+        UPDATE "Merchant" m
+        SET welcome_offer_text = (
+          SELECT c.title 
+          FROM "Campaign" c 
+          WHERE c.merchant_id = m.id 
+            AND c.status = 'active' 
+            AND c.campaign_type IN ('initial', 'perk')
+          ORDER BY c.created_at ASC 
+          LIMIT 1
+        )
+        WHERE m.welcome_offer_text IS NULL
+      `;
+
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -1754,7 +1769,7 @@ module.exports = async function handler(req, res) {
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
 
-      const [merchant] = await sql`SELECT id, business_name, logo_url, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified, cap_block_count FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, logo_url, welcome_offer_text, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified, cap_block_count FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
       if (merchant.billing_status === 'deleted') return send(res, 403, { success: false, error: 'This store is no longer available' });
       if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is currently inactive' });
@@ -3368,13 +3383,20 @@ module.exports = async function handler(req, res) {
         }
         // Also sync the initial campaign title so the print sign stays up to date
         if (newWelcomeOfferText) {
-          await sql`
+          const updateResult = await sql`
             UPDATE "Campaign"
             SET title = ${newWelcomeOfferText}, updated_at = ${new Date().toISOString()}
             WHERE merchant_id = ${merchantId}
               AND campaign_type = 'initial'
               AND status = 'active'
           `;
+          if (updateResult.count === 0) {
+            const now = new Date().toISOString();
+            await sql`
+              INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, status, campaign_type, created_at, end_at, updated_at)
+              VALUES (gen_random_uuid()::text, ${merchantId}, ${newWelcomeOfferText}, 10, 'active', 'initial', ${now}, NULL, ${now})
+            `;
+          }
         }
       }
 
