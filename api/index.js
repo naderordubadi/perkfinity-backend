@@ -1447,6 +1447,14 @@ module.exports = async function handler(req, res) {
       // ── Online Merchant Platform: New Merchant columns ────────────
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS business_category VARCHAR(50)`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "cover_photo_url" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "promo_banner_url" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "is_fullpage_sponsored" BOOLEAN DEFAULT false`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "fullpage_sponsored_until" TIMESTAMPTZ`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "stripe_fullpage_sponsor_subscription_id" TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "rating_score" VARCHAR(10)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "rating_count" VARCHAR(20)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "rating_platform" VARCHAR(20)`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS "promo_description" TEXT`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS application_status VARCHAR(20) DEFAULT NULL`;
       await sql`ALTER TABLE "Merchant" DROP COLUMN IF EXISTS sales_volume_range`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS application_notes TEXT`;
@@ -1508,7 +1516,9 @@ module.exports = async function handler(req, res) {
         if (platform === 'app') {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
+              l.address, l.city, l.state, l.postal_code,
               (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND (c.end_at IS NULL OR c.end_at > NOW()) ORDER BY c.created_at DESC LIMIT 1) as latest_offer_title,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND c.discount_percentage >= 0 ORDER BY c.created_at ASC LIMIT 1) as discount,
@@ -1524,7 +1534,9 @@ module.exports = async function handler(req, res) {
         } else {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
+              l.address, l.city, l.state, l.postal_code,
               (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND (c.end_at IS NULL OR c.end_at > NOW()) ORDER BY c.created_at DESC LIMIT 1) as latest_offer_title,
               (SELECT c.title FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active' AND c.discount_percentage >= 0 ORDER BY c.created_at ASC LIMIT 1) as discount,
@@ -1610,6 +1622,8 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code,
+                 m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
+                 m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
           FROM "Merchant" m
@@ -1625,6 +1639,8 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code,
+                 m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
+                 m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
           FROM "Merchant" m
@@ -1655,8 +1671,10 @@ module.exports = async function handler(req, res) {
       if (q && cities.length > 0 && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -1668,8 +1686,10 @@ module.exports = async function handler(req, res) {
       } else if (q && cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -1681,8 +1701,10 @@ module.exports = async function handler(req, res) {
       } else if (q && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -1694,8 +1716,10 @@ module.exports = async function handler(req, res) {
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -1707,8 +1731,10 @@ module.exports = async function handler(req, res) {
       } else if (q) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -1720,8 +1746,10 @@ module.exports = async function handler(req, res) {
       } else if (cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -1733,8 +1761,10 @@ module.exports = async function handler(req, res) {
       } else if (zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -1747,8 +1777,10 @@ module.exports = async function handler(req, res) {
         // No filters — return all local/mobile merchants
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.city,l.state,l.postal_code,
+                 l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2786,15 +2818,19 @@ module.exports = async function handler(req, res) {
       const campaignId = activateMatch[1];
       const code = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6 chars
 
-      // Auto-join merchant member (source = app_discovery — user found merchant via Near Me/Nearby Deals)
-      const [campaign] = await sql`SELECT merchant_id FROM "Campaign" WHERE id = ${campaignId}`;
-      if (campaign) {
-        await sql`
-           INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
-           VALUES (gen_random_uuid()::text, ${campaign.merchant_id}, ${payload.userId}, 'app_discovery', NOW())
-           ON CONFLICT DO NOTHING
-        `;
+      // Auto-join merchant member & verify campaign is active and unexpired
+      const [campaign] = await sql`SELECT merchant_id, status, end_at FROM "Campaign" WHERE id = ${campaignId}`;
+      if (!campaign) return send(res, 404, { success: false, error: 'Campaign not found' });
+
+      if (campaign.status === 'expired' || (campaign.end_at && new Date(campaign.end_at) <= new Date())) {
+        return send(res, 400, { success: false, error: 'This offer has expired and is no longer available.' });
       }
+
+      await sql`
+         INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
+         VALUES (gen_random_uuid()::text, ${campaign.merchant_id}, ${payload.userId}, 'app_discovery', NOW())
+         ON CONFLICT DO NOTHING
+      `;
 
       // UPDATE the most-recent non-redeemed Redemption row → 'pending'
       // Use CTE + LIMIT 1 to guarantee only ONE row is touched (avoids @unique token violation)
@@ -3376,7 +3412,15 @@ module.exports = async function handler(req, res) {
          `;
         // Update nullable URL fields separately (COALESCE would skip intentional clears)
         if (newReviewUrl !== undefined) {
-          await sql`UPDATE "Merchant" SET review_url = ${newReviewUrl} WHERE id = ${merchantId}`;
+          let detectedPlatform = null;
+          if (newReviewUrl) {
+            const rLower = newReviewUrl.toLowerCase();
+            if (rLower.includes('yelp')) detectedPlatform = 'Yelp';
+            else if (rLower.includes('google') || rLower.includes('g.page') || rLower.includes('maps.app.goo.gl')) detectedPlatform = 'Google';
+            else if (rLower.includes('tripadvisor')) detectedPlatform = 'TripAdvisor';
+            else if (rLower.includes('facebook')) detectedPlatform = 'Facebook';
+          }
+          await sql`UPDATE "Merchant" SET review_url = ${newReviewUrl}, rating_platform = COALESCE(${detectedPlatform}, rating_platform) WHERE id = ${merchantId}`;
         }
         if (newOrderUrl !== undefined) {
           await sql`UPDATE "Merchant" SET order_url = ${newOrderUrl} WHERE id = ${merchantId}`;
@@ -3932,7 +3976,9 @@ module.exports = async function handler(req, res) {
             is_web_sponsored = ${body.is_web_sponsored !== undefined ? body.is_web_sponsored : sql`is_web_sponsored`},
             web_sponsored_until = ${body.web_sponsored_until !== undefined ? (body.web_sponsored_until ? new Date(body.web_sponsored_until) : null) : sql`web_sponsored_until`},
             is_app_sponsored = ${body.is_app_sponsored !== undefined ? body.is_app_sponsored : sql`is_app_sponsored`},
-            app_sponsored_until = ${body.app_sponsored_until !== undefined ? (body.app_sponsored_until ? new Date(body.app_sponsored_until) : null) : sql`app_sponsored_until`}
+            app_sponsored_until = ${body.app_sponsored_until !== undefined ? (body.app_sponsored_until ? new Date(body.app_sponsored_until) : null) : sql`app_sponsored_until`},
+            is_fullpage_sponsored = ${body.is_fullpage_sponsored !== undefined ? body.is_fullpage_sponsored : sql`is_fullpage_sponsored`},
+            fullpage_sponsored_until = ${body.fullpage_sponsored_until !== undefined ? (body.fullpage_sponsored_until ? new Date(body.fullpage_sponsored_until) : null) : sql`fullpage_sponsored_until`}
           WHERE id = ${merchantId}
         `;
         return send(res, 200, { success: true, message: 'Sponsorship updated' });
@@ -5741,11 +5787,12 @@ module.exports = async function handler(req, res) {
         SELECT id, business_name, subscription_tier, billing_status, account_blocked,
                stripe_customer_id, stripe_subscription_id, stripe_sponsor_subscription_id, 
                stripe_web_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_bundle_sponsor_subscription_id,
-               subscription_started_at,
+               stripe_fullpage_sponsor_subscription_id, subscription_started_at,
                next_billing_date, member_limit, promo_code, created_at,
                payment_failed_at, payment_failure_reminder_count,
                billing_starts_at_member_count, application_status, business_presence,
-               billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until
+               billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until, promo_banner_url,
+               is_fullpage_sponsored, fullpage_sponsored_until, rating_score, rating_count, rating_platform, promo_description
         FROM "Merchant"
         WHERE id = ${merchantId}
         LIMIT 1
@@ -5777,14 +5824,22 @@ module.exports = async function handler(req, res) {
           created_at: merchant.created_at,
           has_stripe: !!merchant.stripe_customer_id,
           has_subscription: !!merchant.stripe_subscription_id,
-          has_sponsor_subscription: !!merchant.stripe_sponsor_subscription_id || !!merchant.stripe_bundle_sponsor_subscription_id || !!merchant.stripe_web_sponsor_subscription_id || !!merchant.stripe_app_sponsor_subscription_id,
+          has_sponsor_subscription: !!merchant.stripe_sponsor_subscription_id || !!merchant.stripe_bundle_sponsor_subscription_id || !!merchant.stripe_web_sponsor_subscription_id || !!merchant.stripe_app_sponsor_subscription_id || !!merchant.stripe_fullpage_sponsor_subscription_id,
           has_bundle_subscription: !!merchant.stripe_bundle_sponsor_subscription_id || (!!merchant.stripe_web_sponsor_subscription_id && merchant.stripe_web_sponsor_subscription_id === merchant.stripe_app_sponsor_subscription_id),
           has_web_subscription: !!merchant.stripe_web_sponsor_subscription_id,
           has_app_subscription: !!merchant.stripe_app_sponsor_subscription_id,
+          has_fullpage_subscription: !!merchant.stripe_fullpage_sponsor_subscription_id,
           is_web_sponsored: merchant.is_web_sponsored && (!merchant.web_sponsored_until || new Date(merchant.web_sponsored_until) >= new Date()) ? true : false,
           is_app_sponsored: merchant.is_app_sponsored && (!merchant.app_sponsored_until || new Date(merchant.app_sponsored_until) >= new Date()) ? true : false,
+          is_fullpage_sponsored: merchant.is_fullpage_sponsored && (!merchant.fullpage_sponsored_until || new Date(merchant.fullpage_sponsored_until) >= new Date()) ? true : false,
           web_sponsored_until: merchant.web_sponsored_until || null,
           app_sponsored_until: merchant.app_sponsored_until || null,
+          fullpage_sponsored_until: merchant.fullpage_sponsored_until || null,
+          promo_banner_url: merchant.promo_banner_url || null,
+          rating_score: merchant.rating_score || null,
+          rating_count: merchant.rating_count || null,
+          rating_platform: merchant.rating_platform || null,
+          promo_description: merchant.promo_description || null,
           payment_failed_at: merchant.payment_failed_at || null,
           billing_starts_at_member_count: merchant.billing_starts_at_member_count || null,
           application_status: merchant.application_status || null,
@@ -5900,7 +5955,8 @@ module.exports = async function handler(req, res) {
       if (tier === 'web') priceId = process.env.STRIPE_SPONSOR_WEB_PRICE_ID;
       else if (tier === 'app') priceId = process.env.STRIPE_SPONSOR_APP_PRICE_ID;
       else if (tier === 'bundle') priceId = process.env.STRIPE_SPONSOR_BUNDLE_PRICE_ID;
-      else return send(res, 400, { success: false, error: 'Invalid tier specified. Must be web, app, or bundle.' });
+      else if (tier === 'fullpage') priceId = process.env.STRIPE_SPONSOR_FULLPAGE_PRICE_ID;
+      else return send(res, 400, { success: false, error: 'Invalid tier specified. Must be web, app, bundle, or fullpage.' });
 
       if (!priceId) return send(res, 500, { success: false, error: 'Sponsorship Price ID not configured.' });
 
@@ -5944,6 +6000,80 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ── POST /api/v1/merchants/:id/billing/sponsor-verify ─────────
+    const sponsorVerifyMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/sponsor-verify$/);
+    if (method === 'POST' && sponsorVerifyMatch) {
+      const merchantId = sponsorVerifyMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      try {
+        const { session_id } = req.body || {};
+        if (!session_id) return send(res, 400, { success: false, error: 'session_id required' });
+
+        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+        if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+        const stripeClient = Stripe(STRIPE_KEY);
+
+        const session = await stripeClient.checkout.sessions.retrieve(session_id);
+        if (session.payment_status !== 'paid' && session.status !== 'complete') {
+          return send(res, 400, { success: false, error: 'Payment not complete' });
+        }
+
+        const tier = session.metadata?.sponsor_tier;
+        const subId = typeof session.subscription === 'string' ? session.subscription : (session.subscription?.id || null);
+
+        if (tier === 'fullpage') {
+          await sql`
+            UPDATE "Merchant"
+            SET is_fullpage_sponsored = true,
+                fullpage_sponsored_until = NOW() + INTERVAL '30 days',
+                stripe_fullpage_sponsor_subscription_id = COALESCE(${subId}, stripe_fullpage_sponsor_subscription_id),
+                updated_at = NOW()
+            WHERE id = ${merchantId}
+          `;
+        } else if (tier === 'web') {
+          await sql`
+            UPDATE "Merchant"
+            SET is_web_sponsored = true,
+                web_sponsored_until = NOW() + INTERVAL '30 days',
+                stripe_web_sponsor_subscription_id = COALESCE(${subId}, stripe_web_sponsor_subscription_id),
+                updated_at = NOW()
+            WHERE id = ${merchantId}
+          `;
+        } else if (tier === 'app') {
+          await sql`
+            UPDATE "Merchant"
+            SET is_app_sponsored = true,
+                app_sponsored_until = NOW() + INTERVAL '30 days',
+                stripe_app_sponsor_subscription_id = COALESCE(${subId}, stripe_app_sponsor_subscription_id),
+                updated_at = NOW()
+            WHERE id = ${merchantId}
+          `;
+        } else if (tier === 'bundle') {
+          await sql`
+            UPDATE "Merchant"
+            SET is_web_sponsored = true,
+                is_app_sponsored = true,
+                web_sponsored_until = NOW() + INTERVAL '30 days',
+                app_sponsored_until = NOW() + INTERVAL '30 days',
+                stripe_bundle_sponsor_subscription_id = COALESCE(${subId}, stripe_bundle_sponsor_subscription_id),
+                updated_at = NOW()
+            WHERE id = ${merchantId}
+          `;
+        }
+
+        return send(res, 200, { success: true, tier });
+      } catch (err) {
+        console.error('Sponsor verify error:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
     // ── POST /api/v1/merchants/:id/billing/sponsor-cancel ─────────
     const sponsorCancelMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/billing\/sponsor-cancel$/);
     if (method === 'POST' && sponsorCancelMatch) {
@@ -5959,7 +6089,7 @@ module.exports = async function handler(req, res) {
         const { tier } = req.body || {};
 
         const [merchant] = await sql`
-          SELECT stripe_bundle_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_web_sponsor_subscription_id
+          SELECT stripe_bundle_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_web_sponsor_subscription_id, stripe_fullpage_sponsor_subscription_id
           FROM "Merchant"
           WHERE id = ${merchantId}
           LIMIT 1
@@ -5971,6 +6101,7 @@ module.exports = async function handler(req, res) {
         if (tier === 'bundle') subId = merchant.stripe_bundle_sponsor_subscription_id;
         else if (tier === 'app') subId = merchant.stripe_app_sponsor_subscription_id;
         else if (tier === 'web') subId = merchant.stripe_web_sponsor_subscription_id;
+        else if (tier === 'fullpage') subId = merchant.stripe_fullpage_sponsor_subscription_id;
         else return send(res, 400, { success: false, error: 'Invalid or missing tier' });
 
         if (!subId) return send(res, 400, { success: false, error: `No active ${tier} sponsorship` });
@@ -5983,6 +6114,114 @@ module.exports = async function handler(req, res) {
         return send(res, 200, { success: true });
       } catch (err) {
         console.error('Sponsor cancel error:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
+    // ── POST /api/v1/merchants/:id/promo-banner ───────────────────
+    const promoBannerMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/promo-banner$/);
+    if (method === 'POST' && promoBannerMatch) {
+      const merchantId = promoBannerMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      try {
+        const { promo_banner_url } = req.body || {};
+        const bannerValue = promo_banner_url ? promo_banner_url.trim() : null;
+
+        await sql`UPDATE "Merchant" SET promo_banner_url = ${bannerValue} WHERE id = ${merchantId}`;
+        return send(res, 200, { success: true, promo_banner_url: bannerValue });
+      } catch (err) {
+        console.error('Update promo banner error:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
+    // ── POST /api/v1/merchants/:id/promo-text ─────────────────────
+    const promoTextMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/promo-text$/);
+    if (method === 'POST' && promoTextMatch) {
+      const merchantId = promoTextMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      try {
+        const { promo_description } = req.body || {};
+        // Strict 1000 character cap
+        const textValue = promo_description ? promo_description.trim().slice(0, 1000) : null;
+
+        await sql`UPDATE "Merchant" SET promo_description = ${textValue} WHERE id = ${merchantId}`;
+        return send(res, 200, { success: true, promo_description: textValue });
+      } catch (err) {
+        console.error('Update promo text error:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
+    // ── POST /api/v1/merchants/:id/scrape-rating ─────────────────
+    const scrapeRatingMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/scrape-rating$/);
+    if (method === 'POST' && scrapeRatingMatch) {
+      const merchantId = scrapeRatingMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      try {
+        const { rating_score, rating_count, rating_platform } = req.body || {};
+        
+        let score = rating_score ? String(rating_score).trim() : null;
+        let count = rating_count ? String(rating_count).trim() : null;
+        let platform = rating_platform ? String(rating_platform).trim() : null;
+
+        // If not manually provided, try auto-extracting from merchant's review_url
+        if (!score) {
+          const [m] = await sql`SELECT review_url FROM "Merchant" WHERE id = ${merchantId}`;
+          if (m && m.review_url) {
+            const rUrl = m.review_url.toLowerCase();
+            if (rUrl.includes('google')) platform = 'Google';
+            else if (rUrl.includes('yelp')) platform = 'Yelp';
+
+            try {
+              const fetchRes = await fetch(m.review_url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+              const htmlText = await fetchRes.text();
+              const $ = cheerio.load(htmlText);
+              
+              // Extract star rating pattern (e.g. "4.9", "4.8 out of 5")
+              const scoreMatch = htmlText.match(/([3-5]\.\d)\s*(?:out of 5|stars|★)?/i);
+              if (scoreMatch) score = scoreMatch[1];
+
+              // Extract review count pattern (e.g. "140 reviews", "46 ratings")
+              const countMatch = htmlText.match(/(\d+[\d,]*\+?)\s*(?:reviews|ratings)/i);
+              if (countMatch) count = countMatch[1] + '+ reviews';
+            } catch (scrapeErr) {
+              console.warn('Auto rating scrape fallback:', scrapeErr.message);
+            }
+          }
+        }
+
+        if (score || count || platform) {
+          await sql`
+            UPDATE "Merchant"
+            SET rating_score = COALESCE(${score}, rating_score),
+                rating_count = COALESCE(${count}, rating_count),
+                rating_platform = COALESCE(${platform}, rating_platform)
+            WHERE id = ${merchantId}
+          `;
+        }
+
+        return send(res, 200, { success: true, rating_score: score, rating_count: count, rating_platform: platform });
+      } catch (err) {
+        console.error('Rating scrape error:', err);
         return send(res, 500, { success: false, error: err.message });
       }
     }
