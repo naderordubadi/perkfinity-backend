@@ -2555,6 +2555,7 @@ module.exports = async function handler(req, res) {
            c.id as campaign_id,
            m.business_name as merchant_name,
            m.logo_url,
+           m.cover_photo_url,
            m.business_presence,
            m.business_category,
            m.website,
