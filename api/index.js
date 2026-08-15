@@ -4088,6 +4088,7 @@ module.exports = async function handler(req, res) {
           COUNT(*) FILTER (
             WHERE (subscription_tier IN ('none','trial') OR billing_status = 'trial' OR stripe_subscription_id IS NULL)
               AND subscription_tier != 'free_for_life'
+              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
               AND account_blocked = false
           ) as upgrade_eligible
         FROM "Merchant"
