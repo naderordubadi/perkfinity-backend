@@ -4252,6 +4252,15 @@ module.exports = async function handler(req, res) {
                 paid_at = EXCLUDED.paid_at,
                 revenue_type = EXCLUDED.revenue_type
             `;
+
+            // Start commission attribution if not already set
+            const paidAtDate = inv.status_transitions?.paid_at ? new Date(inv.status_transitions.paid_at * 1000) : new Date();
+            await sql`
+              UPDATE "ContractorMerchantAttribution"
+              SET commission_start_date = ${paidAtDate}, updated_at = NOW()
+              WHERE merchant_id = ${m.id} AND commission_start_date IS NULL
+            `;
+
             syncedCount++;
           }
         } catch (e) {
@@ -5683,6 +5692,13 @@ module.exports = async function handler(req, res) {
           ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = 'platform'
         `;
       }
+
+      // Start commission attribution upon first paid subscription invoice
+      await sql`
+        UPDATE "ContractorMerchantAttribution"
+        SET commission_start_date = NOW(), updated_at = NOW()
+        WHERE merchant_id = ${merchant_id} AND commission_start_date IS NULL
+      `;
 
       return send(res, 200, { success: true });
     }
