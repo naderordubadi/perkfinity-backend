@@ -4209,6 +4209,140 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ── GET /api/v1/admin/reports/weekly-accounting-summary ──────────
+    if (method === 'GET' && url.includes('/admin/reports/weekly-accounting-summary')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      const queryParams = new URL(url, 'http://localhost').searchParams;
+      let startStr = queryParams.get('start_date');
+      let endStr = queryParams.get('end_date');
+
+      let startDate, endDate;
+      if (startStr && endStr) {
+        startDate = new Date(startStr);
+        endDate = new Date(endStr);
+      } else {
+        const now = new Date();
+        endDate = new Date(now);
+        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      }
+
+      const paidInvoices = await sql`
+        SELECT i.*, m.business_name
+        FROM "Invoice" i
+        JOIN "Merchant" m ON m.id = i.merchant_id
+        WHERE i.status = 'paid'
+          AND i.paid_at >= ${startDate}
+          AND i.paid_at <= ${endDate}
+      `;
+
+      let platformCents = 0;
+      let sponsorshipCents = 0;
+      let poufCents = 0;
+      let totalCents = 0;
+      let totalTransactions = paidInvoices.length;
+
+      for (const inv of paidInvoices) {
+        const amt = parseInt(inv.amount_cents) || 0;
+        totalCents += amt;
+        if (inv.revenue_type === 'sponsorship') {
+          sponsorshipCents += amt;
+        } else if (inv.revenue_type === 'pouf') {
+          poufCents += amt;
+        } else {
+          platformCents += amt;
+        }
+      }
+
+      let stripeFeesCents = 0;
+      for (const inv of paidInvoices) {
+        const amt = parseInt(inv.amount_cents) || 0;
+        if (amt > 0) {
+          stripeFeesCents += Math.round(amt * 0.029) + 30;
+        }
+      }
+
+      const netClearingCents = totalCents - stripeFeesCents;
+
+      const attInvoices = await sql`
+        SELECT i.amount_cents, a.contractor_id
+        FROM "Invoice" i
+        JOIN "ContractorMerchantAttribution" a ON a.merchant_id = i.merchant_id
+        WHERE i.status = 'paid'
+          AND i.paid_at >= ${startDate}
+          AND i.paid_at <= ${endDate}
+          AND a.commission_start_date IS NOT NULL
+          AND i.revenue_type = 'platform'
+      `;
+
+      let repCommissionCents = 0;
+      for (const ai of attInvoices) {
+        const amt = parseInt(ai.amount_cents) || 0;
+        repCommissionCents += Math.round(amt * 0.20);
+      }
+
+      const formatUsd = (cents) => '$' + (cents / 100).toFixed(2);
+
+      const journalEntryText = `====================================================================
+PERKFINITY WEEKLY ACCOUNTING SUMMARY & FRESHBOOKS JOURNAL ENTRY
+Period: ${startDate.toISOString().slice(0, 10)} to ${endDate.toISOString().slice(0, 10)}
+Generated At: ${new Date().toISOString()}
+====================================================================
+
+--- SUMMARY METRICS ---
+Total Paid Invoices:        ${totalTransactions}
+Gross Cash Collected:       ${formatUsd(totalCents)}
+  • Platform Subscriptions: ${formatUsd(platformCents)} (Account 4000-1)
+  • Carousel Sponsorships:  ${formatUsd(sponsorshipCents)} (Account 4000-8)
+  • POUF / Annual Upfront:  ${formatUsd(poufCents)} (Account 2006 / 4000-9)
+Stripe Processing Fees:     ${formatUsd(stripeFeesCents)} (Account 5000-1)
+Net Stripe Clearing:        ${formatUsd(netClearingCents)} (Account 1000-38)
+Sales Rep Commissions:      ${formatUsd(repCommissionCents)} (Account 6003-6 / 2001)
+
+--------------------------------------------------------------------
+FRESHBOOKS JOURNAL ENTRY 1: REVENUE & CASH CLEARING
+--------------------------------------------------------------------
+Date: ${endDate.toISOString().slice(0, 10)}
+Memo: Perkfinity Weekly Revenue & Stripe Clearing (${startDate.toISOString().slice(0, 10)} - ${endDate.toISOString().slice(0, 10)})
+
+DEBIT:  1000-38 Cash: Stripe-8118 Clearing           ${formatUsd(netClearingCents)}
+DEBIT:  5000-1  COGS: Stripe Processing Fees        ${formatUsd(stripeFeesCents)}
+CREDIT: 4000-1  Revenue: Perkfinity Subscriptions   ${formatUsd(platformCents)}
+CREDIT: 4000-8  Revenue: Carousel Ad Sponsorships   ${formatUsd(sponsorshipCents)}
+CREDIT: 2006    Unearned Revenue (Annual/POUF)      ${formatUsd(poufCents)}
+
+--------------------------------------------------------------------
+FRESHBOOKS JOURNAL ENTRY 2: SALES REP COMMISSION ACCRUAL
+--------------------------------------------------------------------
+Date: ${endDate.toISOString().slice(0, 10)}
+Memo: Perkfinity Sales Rep Weekly Commission Accrual (${startDate.toISOString().slice(0, 10)} - ${endDate.toISOString().slice(0, 10)})
+
+DEBIT:  6003-6  Contractors: Rep Commissions        ${formatUsd(repCommissionCents)}
+CREDIT: 2001    Accrued Sales Commissions Payable   ${formatUsd(repCommissionCents)}
+====================================================================`;
+
+      return send(res, 200, {
+        success: true,
+        data: {
+          period: {
+            start: startDate.toISOString().slice(0, 10),
+            end: endDate.toISOString().slice(0, 10)
+          },
+          metrics: {
+            total_invoices: totalTransactions,
+            gross_collected_usd: (totalCents / 100).toFixed(2),
+            platform_revenue_usd: (platformCents / 100).toFixed(2),
+            sponsorship_revenue_usd: (sponsorshipCents / 100).toFixed(2),
+            pouf_revenue_usd: (poufCents / 100).toFixed(2),
+            stripe_fees_usd: (stripeFeesCents / 100).toFixed(2),
+            net_clearing_usd: (netClearingCents / 100).toFixed(2),
+            rep_commissions_usd: (repCommissionCents / 100).toFixed(2)
+          },
+          freshbooks_journal_entry: journalEntryText
+        }
+      });
+    }
+
     // ── POST /api/v1/admin/sync-stripe-invoices ───────────────────
     if (method === 'POST' && url.endsWith('/admin/sync-stripe-invoices')) {
       const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
