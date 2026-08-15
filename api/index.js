@@ -138,7 +138,7 @@ function getPriceId(tier, billingCycle) {
   return map[tier]?.() || null;
 }
 
-async function autoEnrollUser(sql, userId, publicCode) {
+async function autoEnrollUser(sql, userId, publicCode, joinSource = 'qr_scan') {
   if (!publicCode || !userId) return;
   try {
     const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${publicCode} AND status = 'active'`;
@@ -157,9 +157,10 @@ async function autoEnrollUser(sql, userId, publicCode) {
     }
 
     // 1. Add to member list
+    const effectiveSource = joinSource === 'app_discovery' ? 'app_discovery' : 'qr_scan';
     await sql`
       INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
-      VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${userId}, 'qr_scan', NOW())
+      VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${userId}, ${effectiveSource}, NOW())
       ON CONFLICT DO NOTHING
     `;
 
@@ -1858,10 +1859,15 @@ module.exports = async function handler(req, res) {
           const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
           const userId = decoded.userId;
           resolvedUserId = userId; // mark as successfully authenticated
+          // Support optional ?source=app_discovery query parameter for app joins vs physical QR scans
+          const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+          const joinSourceParam = urlObj.searchParams.get('source');
+          const effectiveJoinSource = joinSourceParam === 'app_discovery' ? 'app_discovery' : 'qr_scan';
+
           // Auto-enroll the user into the merchant's member list if they aren't already
           await sql`
             INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
-            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, 'qr_scan', NOW())
+            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, ${effectiveJoinSource}, NOW())
             ON CONFLICT DO NOTHING
           `;
 
@@ -4199,6 +4205,59 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ── POST /api/v1/admin/sync-stripe-invoices ───────────────────
+    if (method === 'POST' && url.endsWith('/admin/sync-stripe-invoices')) {
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      const merchants = await sql`
+        SELECT id, business_name, stripe_customer_id
+        FROM "Merchant"
+        WHERE stripe_customer_id IS NOT NULL AND stripe_customer_id != ''
+      `;
+
+      let syncedCount = 0;
+      for (const m of merchants) {
+        try {
+          const invList = await stripeClient.invoices.list({ customer: m.stripe_customer_id, status: 'paid', limit: 10 });
+          for (const inv of invList.data) {
+            let revType = 'platform';
+            if (inv.lines?.data?.some(l => (l.description || '').toLowerCase().includes('sponsor') || (l.description || '').toLowerCase().includes('boost'))) {
+              revType = 'sponsorship';
+            }
+            await sql`
+              INSERT INTO "Invoice" (
+                id, merchant_id, stripe_invoice_id, amount_cents, currency,
+                status, period_start, period_end, paid_at, created_at, revenue_type
+              ) VALUES (
+                gen_random_uuid()::text,
+                ${m.id},
+                ${inv.id},
+                ${inv.amount_paid},
+                ${inv.currency || 'usd'},
+                'paid',
+                ${inv.period_start ? new Date(inv.period_start * 1000) : new Date()},
+                ${inv.period_end ? new Date(inv.period_end * 1000) : new Date()},
+                ${inv.status_transitions?.paid_at ? new Date(inv.status_transitions.paid_at * 1000) : new Date()},
+                NOW(),
+                ${revType}
+              )
+              ON CONFLICT (stripe_invoice_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                paid_at = EXCLUDED.paid_at,
+                revenue_type = EXCLUDED.revenue_type
+            `;
+            syncedCount++;
+          }
+        } catch (e) {
+          console.error(`[StripeSync] Failed for ${m.business_name}:`, e.message);
+        }
+      }
+
+      return send(res, 200, { success: true, synced_count: syncedCount });
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // ANNOUNCEMENT ENDPOINTS
     // ═══════════════════════════════════════════════════════════════
@@ -5594,6 +5653,32 @@ module.exports = async function handler(req, res) {
             updated_at            = NOW()
         WHERE id = ${merchant_id}
       `;
+
+      // Record paid subscription invoice in "Invoice" table
+      const stripeInvoiceId = session.invoice
+        ? (typeof session.invoice === 'string' ? session.invoice : session.invoice.id)
+        : (sub && sub.latest_invoice ? (typeof sub.latest_invoice === 'string' ? sub.latest_invoice : sub.latest_invoice.id) : null);
+      const amountCents = session.amount_total || (sub?.items?.data[0]?.price?.unit_amount) || 0;
+
+      if (stripeInvoiceId && amountCents > 0) {
+        await sql`
+          INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
+          VALUES (
+            gen_random_uuid()::text,
+            ${merchant_id},
+            ${stripeInvoiceId},
+            ${amountCents},
+            ${session.currency || 'usd'},
+            'paid',
+            NOW(),
+            ${nextBilling || new Date()},
+            NOW(),
+            NOW(),
+            'platform'
+          )
+          ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = 'platform'
+        `;
+      }
 
       return send(res, 200, { success: true });
     }
