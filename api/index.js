@@ -4074,19 +4074,22 @@ module.exports = async function handler(req, res) {
       const [stats] = await sql`
         SELECT
           COUNT(*) FILTER (
-            WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
-              AND account_blocked = false 
-              AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')
-              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
+            WHERE billing_status = 'active'
+              AND stripe_subscription_id IS NOT NULL
+              AND account_blocked = false
           ) as paying_merchants,
           COUNT(*) FILTER (
             WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
               AND billing_status = 'pending_cancellation'
-              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
+              AND account_blocked = false
           ) as pending_cancel,
-          COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
+          COUNT(*) FILTER (WHERE billing_status = 'payment_failed' AND account_blocked = false) as failed_payments,
           COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
-          COUNT(*) FILTER (WHERE subscription_tier IN ('none','trial') AND account_blocked = false) as upgrade_eligible
+          COUNT(*) FILTER (
+            WHERE (subscription_tier IN ('none','trial') OR billing_status = 'trial' OR stripe_subscription_id IS NULL)
+              AND subscription_tier != 'free_for_life'
+              AND account_blocked = false
+          ) as upgrade_eligible
         FROM "Merchant"
       `;
 
