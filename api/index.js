@@ -78,13 +78,15 @@ const ALLOWED_ORIGINS = [
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:'));
-  // Only echo back the origin if it is explicitly allowed.
-  // Unknown origins get no Access-Control-Allow-Origin header — browser blocks them.
-  // Note: this does not stop curl/Postman (CORS is browser-only); rate limiting handles that.
+  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:')) || (origin && origin.endsWith('.vercel.app'));
   if (isAllowed) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, x-admin-secret');
