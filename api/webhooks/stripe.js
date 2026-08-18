@@ -254,15 +254,43 @@ module.exports = async (req, res) => {
         const customerId = invoice.customer;
         const subscriptionId = invoice.subscription;
 
-        // Find the merchant by stripe_customer_id
-        const [merchant] = await sql`
+        // Find the merchant by stripe_customer_id, subscription_id, or metadata
+        let merchants = await sql`
           SELECT id, business_name, billing_status, account_blocked, stripe_subscription_id, billing_cycle, subscription_tier FROM "Merchant"
           WHERE stripe_customer_id = ${customerId}
           LIMIT 1
         `;
 
+        if (merchants.length === 0 && subscriptionId) {
+          merchants = await sql`
+            SELECT id, business_name, billing_status, account_blocked, stripe_subscription_id, billing_cycle, subscription_tier FROM "Merchant"
+            WHERE stripe_subscription_id = ${subscriptionId}
+               OR stripe_bundle_sponsor_subscription_id = ${subscriptionId}
+               OR stripe_app_sponsor_subscription_id = ${subscriptionId}
+               OR stripe_web_sponsor_subscription_id = ${subscriptionId}
+            LIMIT 1
+          `;
+        }
+
+        if (merchants.length === 0 && subscriptionId) {
+          try {
+            const subObj = await stripe.subscriptions.retrieve(subscriptionId);
+            if (subObj?.metadata?.merchant_id) {
+              merchants = await sql`
+                SELECT id, business_name, billing_status, account_blocked, stripe_subscription_id, billing_cycle, subscription_tier FROM "Merchant"
+                WHERE id = ${subObj.metadata.merchant_id}
+                LIMIT 1
+              `;
+            }
+          } catch (e) {
+            console.error('Failed to retrieve subscription metadata for fallback:', e);
+          }
+        }
+
+        const merchant = merchants[0];
+
         if (!merchant) {
-          console.warn(`invoice.payment_succeeded: No merchant found for customer ${customerId}`);
+          console.warn(`invoice.payment_succeeded: No merchant found for customer ${customerId} or subscription ${subscriptionId}`);
           break;
         }
 

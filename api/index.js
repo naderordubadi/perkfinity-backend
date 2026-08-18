@@ -6051,7 +6051,7 @@ CREDIT: 2001    Accrued Sales Commissions Payable   ${formatUsd(repCommissionCen
 
       // Get invoice history
       const invoices = await sql`
-        SELECT id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at
+        SELECT id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type
         FROM "Invoice"
         WHERE merchant_id = ${merchantId}
         ORDER BY created_at DESC
