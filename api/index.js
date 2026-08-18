@@ -5929,6 +5929,27 @@ CREDIT: 2001    Accrued Sales Commissions Payable   ${formatUsd(repCommissionCen
       }
     }
 
+    // ── GET /api/v1/stripe/invoice-receipt/:id ────────────────────────
+    const receiptMatch = url.match(/\/api\/v1\/stripe\/invoice-receipt\/([a-zA-Z0-9_-]+)$/);
+    if (method === 'GET' && receiptMatch) {
+      const stripeInvoiceId = receiptMatch[1];
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      try {
+        const inv = await stripeClient.invoices.retrieve(stripeInvoiceId);
+        if (inv && inv.hosted_invoice_url) {
+          res.writeHead(302, { Location: inv.hosted_invoice_url });
+          return res.end();
+        } else {
+          return send(res, 404, { success: false, error: 'Stripe receipt not found' });
+        }
+      } catch (e) {
+        return send(res, 500, { success: false, error: e.message || 'Error fetching receipt' });
+      }
+    }
+
     // ── POST /api/v1/merchants/:id/cancel — Self-service cancel (Free For Life / no Stripe)
     const fflCancelMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/cancel$/);
     if (method === 'POST' && fflCancelMatch) {
