@@ -78,15 +78,13 @@ const ALLOWED_ORIGINS = [
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:')) || (origin && origin.endsWith('.vercel.app'));
+  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:'));
+  // Only echo back the origin if it is explicitly allowed.
+  // Unknown origins get no Access-Control-Allow-Origin header — browser blocks them.
+  // Note: this does not stop curl/Postman (CORS is browser-only); rate limiting handles that.
   if (isAllowed) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, x-admin-secret');
@@ -140,7 +138,7 @@ function getPriceId(tier, billingCycle) {
   return map[tier]?.() || null;
 }
 
-async function autoEnrollUser(sql, userId, publicCode, joinSource = 'qr_scan') {
+async function autoEnrollUser(sql, userId, publicCode) {
   if (!publicCode || !userId) return;
   try {
     const [qrData] = await sql`SELECT merchant_id FROM "QrCode" WHERE public_code = ${publicCode} AND status = 'active'`;
@@ -159,10 +157,9 @@ async function autoEnrollUser(sql, userId, publicCode, joinSource = 'qr_scan') {
     }
 
     // 1. Add to member list
-    const effectiveSource = joinSource === 'app_discovery' ? 'app_discovery' : 'qr_scan';
     await sql`
       INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
-      VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${userId}, ${effectiveSource}, NOW())
+      VALUES (gen_random_uuid()::text, ${qrData.merchant_id}, ${userId}, 'qr_scan', NOW())
       ON CONFLICT DO NOTHING
     `;
 
@@ -616,8 +613,8 @@ module.exports = async function handler(req, res) {
 
       // Insert merchant with presence and welcome offer fields
       const [merchant] = await sql`
-        INSERT INTO "Merchant" (id, business_name, contact_name, phone, website, pos_system, business_presence, welcome_promo_code, welcome_offer_text, subscription_tier, member_limit, promo_code, business_category, status, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.website || ''}, ${data.pos_system || ''}, ${presence}, ${welcomePromoCode}, ${data.welcome_offer_text}, ${selectedTier}, ${memberLimit}, ${promoCode}, ${data.business_category || null}, 'active', ${now}, ${now})
+        INSERT INTO "Merchant" (id, business_name, contact_name, phone, public_phone, public_email, website, pos_system, business_presence, welcome_promo_code, welcome_offer_text, subscription_tier, member_limit, promo_code, business_category, status, created_at, updated_at)
+        VALUES (gen_random_uuid()::text, ${data.name}, ${data.contactName}, ${data.phone}, ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null}, ${data.website || ''}, ${data.pos_system || ''}, ${presence}, ${welcomePromoCode}, ${data.welcome_offer_text}, ${selectedTier}, ${memberLimit}, ${promoCode}, ${data.business_category || null}, 'active', ${now}, ${now})
         RETURNING id, business_name, subscription_tier, member_limit, welcome_promo_code
       `;
 
@@ -780,7 +777,7 @@ module.exports = async function handler(req, res) {
 
       const [merchant] = await sql`
         INSERT INTO "Merchant" (
-          id, business_name, contact_name, phone, website, business_presence,
+          id, business_name, contact_name, phone, public_phone, public_email, website, business_presence,
           welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
           promo_code, status, billing_status, application_status,
           business_category, billing_starts_at_member_count, is_multi_location,
@@ -788,6 +785,7 @@ module.exports = async function handler(req, res) {
           stripe_customer_id, stripe_payment_method_id, logo_url, cover_photo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
+          ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
           ${data.tier}, ${memberLimit}, ${promoCode}, 'active', 'trial',
           'pending', ${data.category},
@@ -943,7 +941,7 @@ module.exports = async function handler(req, res) {
 
       const [merchant] = await sql`
         INSERT INTO "Merchant" (
-          id, business_name, contact_name, phone, website, business_presence,
+          id, business_name, contact_name, phone, public_phone, public_email, website, business_presence,
           welcome_promo_code, welcome_offer_text, subscription_tier, member_limit,
           promo_code, status, billing_status, application_status,
           business_category, billing_starts_at_member_count, is_multi_location,
@@ -951,6 +949,7 @@ module.exports = async function handler(req, res) {
           stripe_customer_id, logo_url, cover_photo_url, created_at, updated_at
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
+          ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
           ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
           ${data.tier}, ${memberLimit}, ${promoCode}, 'active', null,
           'in_progress', ${data.category},
@@ -1464,6 +1463,8 @@ module.exports = async function handler(req, res) {
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS billing_starts_at_member_count INT DEFAULT NULL`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS member_cap_notified BOOLEAN DEFAULT FALSE`;
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS cap_block_count INT DEFAULT 0`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS public_phone TEXT`;
+      await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS public_email TEXT`;
 
       // ── Onboarding completion tracking ───────────────────────────
       await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS onboarding_complete BOOLEAN DEFAULT false`;
@@ -1520,6 +1521,7 @@ module.exports = async function handler(req, res) {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
               m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.public_phone, m.public_email,
               m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
               l.address, l.city, l.state, l.postal_code,
               (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
@@ -1538,6 +1540,7 @@ module.exports = async function handler(req, res) {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
               m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.public_phone, m.public_email,
               m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
               l.address, l.city, l.state, l.postal_code,
               (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code, m.welcome_offer_text,
@@ -1624,12 +1627,13 @@ module.exports = async function handler(req, res) {
       if (category && category !== 'all') {
         merchants = await sql`
           SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
-                 m.business_category, m.welcome_promo_code,
+                 m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
                  m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
+                 l.address, l.city, l.state, l.postal_code,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
-          FROM "Merchant" m
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('online', 'hybrid')
             AND m.application_status = 'approved'
             AND m.account_blocked = false
@@ -1641,12 +1645,13 @@ module.exports = async function handler(req, res) {
       } else {
         merchants = await sql`
           SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
-                 m.business_category, m.welcome_promo_code,
+                 m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
                  m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
+                 l.address, l.city, l.state, l.postal_code,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
-          FROM "Merchant" m
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('online', 'hybrid')
             AND m.application_status = 'approved'
             AND m.account_blocked = false
@@ -1675,7 +1680,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1690,7 +1695,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1705,7 +1710,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1720,7 +1725,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1735,7 +1740,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1750,7 +1755,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1765,7 +1770,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1781,7 +1786,7 @@ module.exports = async function handler(req, res) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
-                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
@@ -1861,15 +1866,10 @@ module.exports = async function handler(req, res) {
           const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
           const userId = decoded.userId;
           resolvedUserId = userId; // mark as successfully authenticated
-          // Support optional ?source=app_discovery query parameter for app joins vs physical QR scans
-          const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-          const joinSourceParam = urlObj.searchParams.get('source');
-          const effectiveJoinSource = joinSourceParam === 'app_discovery' ? 'app_discovery' : 'qr_scan';
-
           // Auto-enroll the user into the merchant's member list if they aren't already
           await sql`
             INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
-            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, ${effectiveJoinSource}, NOW())
+            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, 'qr_scan', NOW())
             ON CONFLICT DO NOTHING
           `;
 
@@ -1974,7 +1974,7 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
-        SELECT m.business_name, m.contact_name, m.phone, m.website, m.logo_url, m.subscription_tier,
+        SELECT m.business_name, m.contact_name, m.phone, m.public_phone, m.public_email, m.website, m.logo_url, m.subscription_tier,
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
                m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location, m.onboarding_complete,
                m.is_web_sponsored, m.web_sponsored_until, m.is_app_sponsored, m.app_sponsored_until,
@@ -3409,7 +3409,7 @@ module.exports = async function handler(req, res) {
       `;
 
       // Update Merchant Details (welcome_promo_code is intentionally excluded — never editable)
-      if (data.business_name || data.contact_name || data.phone || data.website !== undefined ||
+      if (data.business_name || data.contact_name || data.phone || data.public_phone !== undefined || data.public_email !== undefined || data.website !== undefined ||
         data.welcome_offer_text !== undefined || data.review_url !== undefined || data.order_url !== undefined) {
         // Build the update safely — always update all present fields
         const newWelcomeOfferText = data.welcome_offer_text !== undefined ? data.welcome_offer_text : null;
@@ -3422,6 +3422,8 @@ module.exports = async function handler(req, res) {
              business_name = COALESCE(${data.business_name || null}, business_name),
              contact_name = COALESCE(${data.contact_name || null}, contact_name),
              phone = COALESCE(${data.phone || null}, phone),
+             public_phone = ${data.public_phone !== undefined ? (data.public_phone || null) : sql`public_phone`},
+             public_email = ${data.public_email !== undefined ? (data.public_email ? data.public_email.toLowerCase() : null) : sql`public_email`},
              website = COALESCE(${data.website !== undefined ? data.website : null}, website),
              welcome_offer_text = COALESCE(${newWelcomeOfferText}, welcome_offer_text)
            WHERE id = ${merchantId}
@@ -3440,6 +3442,14 @@ module.exports = async function handler(req, res) {
         }
         if (newOrderUrl !== undefined) {
           await sql`UPDATE "Merchant" SET order_url = ${newOrderUrl} WHERE id = ${merchantId}`;
+        }
+        if (data.public_phone !== undefined) {
+          const newPublicPhone = data.public_phone ? data.public_phone.trim() : null;
+          await sql`UPDATE "Merchant" SET public_phone = ${newPublicPhone} WHERE id = ${merchantId}`;
+        }
+        if (data.public_email !== undefined) {
+          const newPublicEmail = data.public_email ? data.public_email.trim().toLowerCase() : null;
+          await sql`UPDATE "Merchant" SET public_email = ${newPublicEmail} WHERE id = ${merchantId}`;
         }
         // Also sync the initial campaign title so the print sign stays up to date
         if (newWelcomeOfferText) {
@@ -4076,23 +4086,19 @@ module.exports = async function handler(req, res) {
       const [stats] = await sql`
         SELECT
           COUNT(*) FILTER (
-            WHERE billing_status = 'active'
-              AND stripe_subscription_id IS NOT NULL
-              AND account_blocked = false
+            WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
+              AND account_blocked = false 
+              AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')
+              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
           ) as paying_merchants,
           COUNT(*) FILTER (
             WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
               AND billing_status = 'pending_cancellation'
-              AND account_blocked = false
-          ) as pending_cancel,
-          COUNT(*) FILTER (WHERE billing_status = 'payment_failed' AND account_blocked = false) as failed_payments,
-          COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
-          COUNT(*) FILTER (
-            WHERE (subscription_tier IN ('none','trial') OR billing_status = 'trial' OR stripe_subscription_id IS NULL)
-              AND subscription_tier != 'free_for_life'
               AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
-              AND account_blocked = false
-          ) as upgrade_eligible
+          ) as pending_cancel,
+          COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
+          COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
+          COUNT(*) FILTER (WHERE subscription_tier IN ('none','trial') AND account_blocked = false) as upgrade_eligible
         FROM "Merchant"
       `;
 
@@ -4209,202 +4215,6 @@ module.exports = async function handler(req, res) {
           }
         }
       });
-    }
-
-    // ── GET /api/v1/admin/reports/weekly-accounting-summary ──────────
-    if (method === 'GET' && url.includes('/admin/reports/weekly-accounting-summary')) {
-      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
-
-      const queryParams = new URL(url, 'http://localhost').searchParams;
-      let startStr = queryParams.get('start_date');
-      let endStr = queryParams.get('end_date');
-
-      let startDate, endDate;
-      if (startStr && endStr) {
-        startDate = new Date(startStr);
-        endDate = new Date(endStr);
-      } else {
-        const now = new Date();
-        endDate = new Date(now);
-        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      }
-
-      const paidInvoices = await sql`
-        SELECT i.*, m.business_name
-        FROM "Invoice" i
-        JOIN "Merchant" m ON m.id = i.merchant_id
-        WHERE i.status = 'paid'
-          AND i.paid_at >= ${startDate}
-          AND i.paid_at <= ${endDate}
-      `;
-
-      let platformCents = 0;
-      let sponsorshipCents = 0;
-      let poufCents = 0;
-      let totalCents = 0;
-      let totalTransactions = paidInvoices.length;
-
-      for (const inv of paidInvoices) {
-        const amt = parseInt(inv.amount_cents) || 0;
-        totalCents += amt;
-        if (inv.revenue_type === 'sponsorship') {
-          sponsorshipCents += amt;
-        } else if (inv.revenue_type === 'pouf') {
-          poufCents += amt;
-        } else {
-          platformCents += amt;
-        }
-      }
-
-      let stripeFeesCents = 0;
-      for (const inv of paidInvoices) {
-        const amt = parseInt(inv.amount_cents) || 0;
-        if (amt > 0) {
-          stripeFeesCents += Math.round(amt * 0.029) + 30;
-        }
-      }
-
-      const netClearingCents = totalCents - stripeFeesCents;
-
-      const attInvoices = await sql`
-        SELECT i.amount_cents, a.contractor_id
-        FROM "Invoice" i
-        JOIN "ContractorMerchantAttribution" a ON a.merchant_id = i.merchant_id
-        WHERE i.status = 'paid'
-          AND i.paid_at >= ${startDate}
-          AND i.paid_at <= ${endDate}
-          AND a.commission_start_date IS NOT NULL
-          AND i.revenue_type = 'platform'
-      `;
-
-      let repCommissionCents = 0;
-      for (const ai of attInvoices) {
-        const amt = parseInt(ai.amount_cents) || 0;
-        repCommissionCents += Math.round(amt * 0.20);
-      }
-
-      const formatUsd = (cents) => '$' + (cents / 100).toFixed(2);
-
-      const journalEntryText = `====================================================================
-PERKFINITY WEEKLY ACCOUNTING SUMMARY & FRESHBOOKS JOURNAL ENTRY
-Period: ${startDate.toISOString().slice(0, 10)} to ${endDate.toISOString().slice(0, 10)}
-Generated At: ${new Date().toISOString()}
-====================================================================
-
---- SUMMARY METRICS ---
-Total Paid Invoices:        ${totalTransactions}
-Gross Cash Collected:       ${formatUsd(totalCents)}
-  • Platform Subscriptions: ${formatUsd(platformCents)} (Account 4000-1)
-  • Carousel Sponsorships:  ${formatUsd(sponsorshipCents)} (Account 4000-8)
-  • POUF / Annual Upfront:  ${formatUsd(poufCents)} (Account 2006 / 4000-9)
-Stripe Processing Fees:     ${formatUsd(stripeFeesCents)} (Account 5000-1)
-Net Stripe Clearing:        ${formatUsd(netClearingCents)} (Account 1000-38)
-Sales Rep Commissions:      ${formatUsd(repCommissionCents)} (Account 6003-6 / 2001)
-
---------------------------------------------------------------------
-FRESHBOOKS JOURNAL ENTRY 1: REVENUE & CASH CLEARING
---------------------------------------------------------------------
-Date: ${endDate.toISOString().slice(0, 10)}
-Memo: Perkfinity Weekly Revenue & Stripe Clearing (${startDate.toISOString().slice(0, 10)} - ${endDate.toISOString().slice(0, 10)})
-
-DEBIT:  1000-38 Cash: Stripe-8118 Clearing           ${formatUsd(netClearingCents)}
-DEBIT:  5000-1  COGS: Stripe Processing Fees        ${formatUsd(stripeFeesCents)}
-CREDIT: 4000-1  Revenue: Perkfinity Subscriptions   ${formatUsd(platformCents)}
-CREDIT: 4000-8  Revenue: Carousel Ad Sponsorships   ${formatUsd(sponsorshipCents)}
-CREDIT: 2006    Unearned Revenue (Annual/POUF)      ${formatUsd(poufCents)}
-
---------------------------------------------------------------------
-FRESHBOOKS JOURNAL ENTRY 2: SALES REP COMMISSION ACCRUAL
---------------------------------------------------------------------
-Date: ${endDate.toISOString().slice(0, 10)}
-Memo: Perkfinity Sales Rep Weekly Commission Accrual (${startDate.toISOString().slice(0, 10)} - ${endDate.toISOString().slice(0, 10)})
-
-DEBIT:  6003-6  Contractors: Rep Commissions        ${formatUsd(repCommissionCents)}
-CREDIT: 2001    Accrued Sales Commissions Payable   ${formatUsd(repCommissionCents)}
-====================================================================`;
-
-      return send(res, 200, {
-        success: true,
-        data: {
-          period: {
-            start: startDate.toISOString().slice(0, 10),
-            end: endDate.toISOString().slice(0, 10)
-          },
-          metrics: {
-            total_invoices: totalTransactions,
-            gross_collected_usd: (totalCents / 100).toFixed(2),
-            platform_revenue_usd: (platformCents / 100).toFixed(2),
-            sponsorship_revenue_usd: (sponsorshipCents / 100).toFixed(2),
-            pouf_revenue_usd: (poufCents / 100).toFixed(2),
-            stripe_fees_usd: (stripeFeesCents / 100).toFixed(2),
-            net_clearing_usd: (netClearingCents / 100).toFixed(2),
-            rep_commissions_usd: (repCommissionCents / 100).toFixed(2)
-          },
-          freshbooks_journal_entry: journalEntryText
-        }
-      });
-    }
-
-    // ── POST /api/v1/admin/sync-stripe-invoices ───────────────────
-    if (method === 'POST' && url.endsWith('/admin/sync-stripe-invoices')) {
-      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
-      const stripeClient = Stripe(STRIPE_KEY);
-
-      const merchants = await sql`
-        SELECT id, business_name, stripe_customer_id
-        FROM "Merchant"
-        WHERE stripe_customer_id IS NOT NULL AND stripe_customer_id != ''
-      `;
-
-      let syncedCount = 0;
-      for (const m of merchants) {
-        try {
-          const invList = await stripeClient.invoices.list({ customer: m.stripe_customer_id, status: 'paid', limit: 10 });
-          for (const inv of invList.data) {
-            let revType = 'platform';
-            if (inv.lines?.data?.some(l => (l.description || '').toLowerCase().includes('sponsor') || (l.description || '').toLowerCase().includes('boost'))) {
-              revType = 'sponsorship';
-            }
-            await sql`
-              INSERT INTO "Invoice" (
-                id, merchant_id, stripe_invoice_id, amount_cents, currency,
-                status, period_start, period_end, paid_at, created_at, revenue_type
-              ) VALUES (
-                gen_random_uuid()::text,
-                ${m.id},
-                ${inv.id},
-                ${inv.amount_paid},
-                ${inv.currency || 'usd'},
-                'paid',
-                ${inv.period_start ? new Date(inv.period_start * 1000) : new Date()},
-                ${inv.period_end ? new Date(inv.period_end * 1000) : new Date()},
-                ${inv.status_transitions?.paid_at ? new Date(inv.status_transitions.paid_at * 1000) : new Date()},
-                NOW(),
-                ${revType}
-              )
-              ON CONFLICT (stripe_invoice_id) DO UPDATE SET
-                status = EXCLUDED.status,
-                paid_at = EXCLUDED.paid_at,
-                revenue_type = EXCLUDED.revenue_type
-            `;
-
-            // Start commission attribution if not already set
-            const paidAtDate = inv.status_transitions?.paid_at ? new Date(inv.status_transitions.paid_at * 1000) : new Date();
-            await sql`
-              UPDATE "ContractorMerchantAttribution"
-              SET commission_start_date = ${paidAtDate}, updated_at = NOW()
-              WHERE merchant_id = ${m.id} AND commission_start_date IS NULL
-            `;
-
-            syncedCount++;
-          }
-        } catch (e) {
-          console.error(`[StripeSync] Failed for ${m.business_name}:`, e.message);
-        }
-      }
-
-      return send(res, 200, { success: true, synced_count: syncedCount });
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -5803,39 +5613,6 @@ CREDIT: 2001    Accrued Sales Commissions Payable   ${formatUsd(repCommissionCen
         WHERE id = ${merchant_id}
       `;
 
-      // Record paid subscription invoice in "Invoice" table
-      const stripeInvoiceId = session.invoice
-        ? (typeof session.invoice === 'string' ? session.invoice : session.invoice.id)
-        : (sub && sub.latest_invoice ? (typeof sub.latest_invoice === 'string' ? sub.latest_invoice : sub.latest_invoice.id) : null);
-      const amountCents = session.amount_total || (sub?.items?.data[0]?.price?.unit_amount) || 0;
-
-      if (stripeInvoiceId && amountCents > 0) {
-        await sql`
-          INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
-          VALUES (
-            gen_random_uuid()::text,
-            ${merchant_id},
-            ${stripeInvoiceId},
-            ${amountCents},
-            ${session.currency || 'usd'},
-            'paid',
-            NOW(),
-            ${nextBilling || new Date()},
-            NOW(),
-            NOW(),
-            'platform'
-          )
-          ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = 'platform'
-        `;
-      }
-
-      // Start commission attribution upon first paid subscription invoice
-      await sql`
-        UPDATE "ContractorMerchantAttribution"
-        SET commission_start_date = NOW(), updated_at = NOW()
-        WHERE merchant_id = ${merchant_id} AND commission_start_date IS NULL
-      `;
-
       return send(res, 200, { success: true });
     }
 
@@ -5928,27 +5705,6 @@ CREDIT: 2001    Accrued Sales Commissions Payable   ${formatUsd(repCommissionCen
         return send(res, 200, { success: true, data: { url: portalSession.url } });
       } catch (e) {
         return send(res, 500, { success: false, error: e.message });
-      }
-    }
-
-    // ── GET /api/v1/stripe/invoice-receipt/:id ────────────────────────
-    const receiptMatch = url.match(/\/api\/v1\/stripe\/invoice-receipt\/([a-zA-Z0-9_-]+)$/);
-    if (method === 'GET' && receiptMatch) {
-      const stripeInvoiceId = receiptMatch[1];
-      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-      if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
-      const stripeClient = Stripe(STRIPE_KEY);
-
-      try {
-        const inv = await stripeClient.invoices.retrieve(stripeInvoiceId);
-        if (inv && inv.hosted_invoice_url) {
-          res.writeHead(302, { Location: inv.hosted_invoice_url });
-          return res.end();
-        } else {
-          return send(res, 404, { success: false, error: 'Stripe receipt not found' });
-        }
-      } catch (e) {
-        return send(res, 500, { success: false, error: e.message || 'Error fetching receipt' });
       }
     }
 
@@ -6074,7 +5830,7 @@ CREDIT: 2001    Accrued Sales Commissions Payable   ${formatUsd(repCommissionCen
 
       // Get invoice history
       const invoices = await sql`
-        SELECT id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type
+        SELECT id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at
         FROM "Invoice"
         WHERE merchant_id = ${merchantId}
         ORDER BY created_at DESC
