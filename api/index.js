@@ -1960,6 +1960,106 @@ module.exports = async function handler(req, res) {
     }
 
 
+    // ── POST /api/v1/merchants/claim ──────────────────────────────
+    if (method === 'POST' && url === '/api/v1/merchants/claim') {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      let payload;
+      try { 
+        payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); 
+      } catch (err) { 
+        return send(res, 401, { success: false, error: 'Invalid or expired session token' }); 
+      }
+
+      const merchantId = payload.merchantId;
+      const data = req.body || {};
+      const { contact_name, email, phone, password } = data;
+
+      // Validation
+      const missing = [];
+      if (!contact_name) missing.push('Full Name');
+      if (!email) missing.push('Email Address');
+      if (!phone) missing.push('Phone Number');
+      if (!password) missing.push('New Password');
+
+      if (missing.length > 0) {
+        return send(res, 400, { success: false, error: `Missing required fields: ${missing.join(', ')}` });
+      }
+
+      const cleanEmail = email.toLowerCase().trim();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(cleanEmail)) {
+        return send(res, 400, { success: false, error: 'Please enter a valid email address.' });
+      }
+
+      const phoneRegex = /^\d{3}-\d{3}-\d{4}$/;
+      if (!phoneRegex.test(phone.trim())) {
+        return send(res, 400, { success: false, error: 'Phone number must be in xxx-xxx-xxxx format.' });
+      }
+
+      if (password.length < 6) {
+        return send(res, 400, { success: false, error: 'Password must be at least 6 characters.' });
+      }
+
+      // Check if email already used by another merchant user
+      const [existingUser] = await sql`
+        SELECT id FROM "MerchantUser" 
+        WHERE LOWER(email) = ${cleanEmail} AND merchant_id != ${merchantId}
+        LIMIT 1
+      `;
+      if (existingUser) {
+        return send(res, 400, { success: false, error: 'An account with this email address already exists.' });
+      }
+
+      const newPasswordHash = await bcrypt.hash(password, 12);
+
+      // Update MerchantUser
+      await sql`
+        UPDATE "MerchantUser"
+        SET email = ${cleanEmail},
+            password_hash = ${newPasswordHash}
+        WHERE merchant_id = ${merchantId} AND id = ${payload.userId}
+      `;
+
+      // Update Merchant
+      await sql`
+        UPDATE "Merchant"
+        SET contact_name = ${contact_name.trim()},
+            phone = ${phone.trim()},
+            is_claimed = true,
+            is_hidden = false,
+            temp_password_plain = NULL,
+            presetup_claimed_at = NOW(),
+            onboarding_complete = true,
+            updated_at = NOW()
+        WHERE id = ${merchantId}
+      `;
+
+      // Generate fresh tokens
+      const token = jwt.sign(
+        { userId: payload.userId, merchantId, role: 'owner', email: cleanEmail },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRY || '8h' }
+      );
+      const refreshToken = jwt.sign(
+        { userId: payload.userId, merchantId, type: 'refresh' },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_REFRESH_EXPIRY || '7d' }
+      );
+
+      return send(res, 200, {
+        success: true,
+        message: 'Profile claimed successfully!',
+        token,
+        refreshToken,
+        email: cleanEmail,
+        merchant_id: merchantId,
+        is_claimed: true,
+        is_hidden: false
+      });
+    }
+
     // ── GET /api/v1/merchants/:id/profile ─────────────────────────
     const getProfileMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/profile/);
     if (method === 'GET' && getProfileMatch) {
@@ -1978,6 +2078,7 @@ module.exports = async function handler(req, res) {
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
                m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location, m.onboarding_complete,
                m.is_web_sponsored, m.web_sponsored_until, m.is_app_sponsored, m.app_sponsored_until,
+               m.is_presetup, m.is_claimed, m.member_limit, m.is_hidden,
                l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
         JOIN "MerchantUser" u ON u.merchant_id = m.id
@@ -3451,6 +3552,9 @@ module.exports = async function handler(req, res) {
           const newPublicEmail = data.public_email ? data.public_email.trim().toLowerCase() : null;
           await sql`UPDATE "Merchant" SET public_email = ${newPublicEmail} WHERE id = ${merchantId}`;
         }
+        if (data.is_multi_location !== undefined) {
+          await sql`UPDATE "Merchant" SET is_multi_location = ${!!data.is_multi_location} WHERE id = ${merchantId}`;
+        }
         // Also sync the initial campaign title so the print sign stays up to date
         if (newWelcomeOfferText) {
           const updateResult = await sql`
@@ -3471,15 +3575,15 @@ module.exports = async function handler(req, res) {
       }
 
       // Update Location Details (assuming 1 location for now per merchant, based on onboarding signup logic)
-      if (data.address || data.suite !== undefined || data.city || data.state || data.zip) {
+      if (data.address !== undefined || data.suite !== undefined || data.city !== undefined || data.state !== undefined || data.zip !== undefined) {
         await sql`
            UPDATE "MerchantLocation" 
            SET 
-             address = COALESCE(${data.address}, address),
-             suite = COALESCE(${data.suite}, suite),
-             city = COALESCE(${data.city}, city),
-             state = COALESCE(${data.state}, state),
-             postal_code = COALESCE(${data.zip}, postal_code)
+             address = ${data.address !== undefined ? (data.address ? data.address.trim() : null) : sql`address`},
+             suite = ${data.suite !== undefined ? (data.suite ? data.suite.trim() : null) : sql`suite`},
+             city = ${data.city !== undefined ? (data.city ? data.city.trim() : null) : sql`city`},
+             state = ${data.state !== undefined ? (data.state ? data.state.trim().toUpperCase() : null) : sql`state`},
+             postal_code = ${data.zip !== undefined ? (data.zip ? data.zip.trim() : null) : sql`postal_code`}
            WHERE merchant_id = ${merchantId}
         `;
       }
@@ -4011,6 +4115,134 @@ module.exports = async function handler(req, res) {
       } catch (err) {
         console.error('Update sponsorship error:', err);
         return send(res, 500, { success: false, error: 'Failed to update sponsorship' });
+      }
+    }
+
+    // ── POST /api/v1/admin/merchants/presetup ─────────────────────
+    if (method === 'POST' && url === '/api/v1/admin/merchants/presetup') {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      const data = req.body || {};
+      const missing = [];
+      if (!data.business_name) missing.push('Business Name');
+      if (!data.business_category) missing.push('Category');
+      if (!data.welcome_offer_text) missing.push('Welcome Offer');
+
+      if (missing.length > 0) {
+        return send(res, 400, { success: false, error: `Missing required fields: ${missing.join(', ')}` });
+      }
+
+      try {
+        const cleanSlug = (data.business_name || 'store').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'merchant';
+        const zip5 = data.zip ? data.zip.replace(/[^0-9]/g, '').slice(0, 5) : '00000';
+        const rand4 = Math.floor(1000 + Math.random() * 9000);
+        const tempEmail = `${cleanSlug}_${zip5 !== '00000' ? zip5 : rand4}_${rand4}@presetup.perkfinity.net`;
+
+        const nameCap = cleanSlug.charAt(0).toUpperCase() + cleanSlug.slice(1);
+        const tempPassword = `${nameCap}2026!`;
+        const password_hash = await bcrypt.hash(tempPassword, 12);
+
+        const memberLimit = parseInt(data.member_limit) || 50;
+        const isHidden = data.is_hidden !== undefined ? !!data.is_hidden : true;
+        const isWebSponsor = !!data.is_web_sponsored;
+        const isAppSponsor = !!data.is_app_sponsored;
+        const isFullpageSponsor = !!data.is_fullpage_sponsored;
+        const sponsorUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days trial
+
+        const addressVal = data.address ? data.address.trim() : null;
+        const cityVal = data.city ? data.city.trim() : null;
+        const stateVal = data.state ? data.state.trim().toUpperCase() : null;
+        const postalCodeVal = (data.zip && data.zip.trim()) ? data.zip.trim() : null;
+        const isMultiLoc = !addressVal;
+
+        // 1. Create Merchant
+        const [merchant] = await sql`
+          INSERT INTO "Merchant" (
+            id, business_name, contact_name, phone, public_phone, public_email,
+            website, review_url, order_url, logo_url, cover_photo_url, promo_description,
+            business_presence, business_category, welcome_offer_text, is_multi_location,
+            subscription_tier, member_limit, status, is_hidden, is_presetup, is_claimed,
+            temp_password_plain, is_web_sponsored, web_sponsored_until,
+            is_app_sponsored, app_sponsored_until, is_fullpage_sponsored, fullpage_sponsored_until,
+            created_at, updated_at
+          ) VALUES (
+            gen_random_uuid()::text, ${data.business_name.trim()}, ${data.contact_name ? data.contact_name.trim() : 'Store Owner'}, ${data.phone ? data.phone.trim() : null}, ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
+            ${data.website ? data.website.trim() : ''}, ${data.review_url ? data.review_url.trim() : null}, ${data.order_url ? data.order_url.trim() : null}, ${data.logo_url || null}, ${data.cover_photo_url || null}, ${data.promo_description || null},
+            'hybrid', ${data.business_category}, ${data.welcome_offer_text.trim()}, ${isMultiLoc},
+            'presetup_50', ${memberLimit}, 'active', ${isHidden}, true, false,
+            ${tempPassword}, ${isWebSponsor}, ${isWebSponsor ? sponsorUntil : null},
+            ${isAppSponsor}, ${isAppSponsor ? sponsorUntil : null}, ${isFullpageSponsor}, ${isFullpageSponsor ? sponsorUntil : null},
+            NOW(), NOW()
+          )
+          RETURNING *
+        `;
+
+        // 2. Create Location
+        await sql`
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${addressVal}, ${cityVal}, ${stateVal}, ${postalCodeVal}, 'US', true, NOW())
+        `;
+
+        // 3. Create MerchantUser
+        await sql`
+          INSERT INTO "MerchantUser" (id, merchant_id, email, password_hash, role, status, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${tempEmail}, ${password_hash}, 'owner', 'active', NOW())
+        `;
+
+        // 4. Create QR Code
+        const public_code = crypto.randomBytes(9).toString('base64url');
+        await sql`
+          INSERT INTO "QrCode" (id, merchant_id, public_code, status, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${public_code}, 'active', NOW())
+        `;
+
+        // 5. Create Welcome Campaign
+        await sql`
+          INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, campaign_type, start_at, end_at, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text.trim()}, 10, ${data.terms ? data.terms.trim() : 'Valid for first-time customers. Cannot be combined with other offers.'}, 'active', 'initial', NOW(), NULL, NOW(), NOW())
+        `;
+
+        return send(res, 200, {
+          success: true,
+          message: 'Pre-setup merchant created successfully!',
+          data: {
+            ...merchant,
+            temp_email: tempEmail,
+            temp_password: tempPassword,
+            public_code,
+            address: data.address,
+            city: data.city,
+            state: data.state,
+            postal_code: zip5
+          }
+        });
+      } catch (err) {
+        console.error('Error creating pre-setup merchant:', err);
+        return send(res, 500, { success: false, error: 'Failed to create pre-setup merchant: ' + err.message });
+      }
+    }
+
+    // ── GET /api/v1/admin/merchants/presetup ──────────────────────
+    if (method === 'GET' && url === '/api/v1/admin/merchants/presetup') {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      try {
+        const rows = await sql`
+          SELECT m.*,
+            mu.email as temp_email,
+            (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) as public_code,
+            (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
+            l.address, l.city, l.state, l.postal_code
+          FROM "Merchant" m
+          LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
+          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
+          WHERE m.is_presetup = true
+          ORDER BY m.created_at DESC
+        `;
+        return send(res, 200, { success: true, data: rows });
+      } catch (err) {
+        console.error('Error fetching pre-setup merchants:', err);
+        return send(res, 500, { success: false, error: 'Failed to fetch pre-setup merchants: ' + err.message });
       }
     }
 

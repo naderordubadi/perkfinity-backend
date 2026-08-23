@@ -48,6 +48,11 @@ model Merchant {
   // merchant_logos    MerchantLogo?
   // members           MerchantMember[]
 
+  is_presetup         Boolean   @default(false)
+  is_claimed          Boolean   @default(true)
+  temp_password_plain String?
+  presetup_claimed_at DateTime?
+
   is_app_sponsored    Boolean   @default(false)
   app_sponsored_until DateTime?
   is_web_sponsored    Boolean   @default(false)
