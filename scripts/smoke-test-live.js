@@ -71,10 +71,10 @@ async function run() {
       console.log(`✅ PASSED: ${appItems.length} app sponsors returned.`);
     }
 
-    // 4. Check public merchants endpoint
-    console.log('Testing GET /api/v1/merchants...');
-    const merchRes = await getJson('/api/v1/merchants');
-    const merchItems = merchRes.data && (Array.isArray(merchRes.data) ? merchRes.data : merchRes.data.data);
+    // 4. Check merchant search endpoint
+    console.log('Testing GET /api/v1/merchants/search?zip=92691...');
+    const merchRes = await getJson('/api/v1/merchants/search?zip=92691');
+    const merchItems = merchRes.data && (Array.isArray(merchRes.data) ? merchRes.data : merchRes.data.data || merchRes.data.merchants);
     if (merchRes.status !== 200) {
       console.error(`❌ FAILED: Expected 200, got ${merchRes.status}.`);
       passed = false;
@@ -82,7 +82,7 @@ async function run() {
       console.error('❌ FAILED: Response data is not an array:', merchRes.data);
       passed = false;
     } else {
-      console.log(`✅ PASSED: ${merchItems.length} active merchants returned.`);
+      console.log(`✅ PASSED: ${merchItems.length} merchants found for zip 92691.`);
     }
 
   } catch (err) {
