@@ -1635,7 +1635,7 @@ module.exports = async function handler(req, res) {
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('online', 'hybrid')
-            AND m.application_status = 'approved'
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.account_blocked = false
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
@@ -1653,7 +1653,7 @@ module.exports = async function handler(req, res) {
                  (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id AND c.status = 'active') AS active_campaign_count
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('online', 'hybrid')
-            AND m.application_status = 'approved'
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.account_blocked = false
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
@@ -4186,7 +4186,7 @@ module.exports = async function handler(req, res) {
             id, business_name, contact_name, phone, public_phone, public_email,
             website, review_url, order_url, logo_url, cover_photo_url, promo_description,
             business_presence, business_category, welcome_offer_text, is_multi_location,
-            subscription_tier, member_limit, status, is_hidden, is_presetup, is_claimed,
+            subscription_tier, member_limit, status, application_status, is_hidden, is_presetup, is_claimed,
             temp_password_plain, is_web_sponsored, web_sponsored_until,
             is_app_sponsored, app_sponsored_until, is_fullpage_sponsored, fullpage_sponsored_until,
             created_at, updated_at
@@ -4194,7 +4194,7 @@ module.exports = async function handler(req, res) {
             gen_random_uuid()::text, ${data.business_name.trim()}, ${data.contact_name ? data.contact_name.trim() : 'Store Owner'}, ${data.phone ? data.phone.trim() : null}, ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
             ${data.website ? data.website.trim() : ''}, ${data.review_url ? data.review_url.trim() : null}, ${data.order_url ? data.order_url.trim() : null}, ${data.logo_url || null}, ${data.cover_photo_url || null}, ${data.promo_description || null},
             'hybrid', ${data.business_category}, ${data.welcome_offer_text.trim()}, ${isMultiLoc},
-            'presetup_50', ${memberLimit}, 'active', ${isHidden}, true, false,
+            'presetup_50', ${memberLimit}, 'active', 'approved', ${isHidden}, true, false,
             ${tempPassword}, ${isWebSponsor}, ${isWebSponsor ? sponsorUntil : null},
             ${isAppSponsor}, ${isAppSponsor ? sponsorUntil : null}, ${isFullpageSponsor}, ${isFullpageSponsor ? sponsorUntil : null},
             NOW(), NOW()
