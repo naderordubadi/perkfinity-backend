@@ -1993,10 +1993,12 @@ module.exports = async function handler(req, res) {
         return send(res, 400, { success: false, error: 'Please enter a valid email address.' });
       }
 
-      const phoneRegex = /^\d{3}-\d{3}-\d{4}$/;
-      if (!phoneRegex.test(phone.trim())) {
-        return send(res, 400, { success: false, error: 'Phone number must be in xxx-xxx-xxxx format.' });
+      let cleanPhone = phone.trim().replace(/\D/g, '');
+      if (cleanPhone.length === 11 && cleanPhone.startsWith('1')) cleanPhone = cleanPhone.slice(1);
+      if (cleanPhone.length !== 10) {
+        return send(res, 400, { success: false, error: 'Please enter a valid 10-digit phone number.' });
       }
+      const formattedPhone = `${cleanPhone.slice(0,3)}-${cleanPhone.slice(3,6)}-${cleanPhone.slice(6)}`;
 
       if (password.length < 6) {
         return send(res, 400, { success: false, error: 'Password must be at least 6 characters.' });
@@ -2026,7 +2028,7 @@ module.exports = async function handler(req, res) {
       await sql`
         UPDATE "Merchant"
         SET contact_name = ${contact_name.trim()},
-            phone = ${phone.trim()},
+            phone = ${formattedPhone},
             is_claimed = true,
             is_hidden = false,
             temp_password_plain = NULL,
@@ -2074,10 +2076,11 @@ module.exports = async function handler(req, res) {
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
-        SELECT m.business_name, m.contact_name, m.phone, m.public_phone, m.public_email, m.website, m.logo_url, m.subscription_tier,
+        SELECT m.business_name, m.contact_name, m.phone, m.public_phone, m.public_email, m.website, m.logo_url, m.cover_photo_url, m.promo_banner_url, m.promo_description, m.subscription_tier,
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
                m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location, m.onboarding_complete,
                m.is_web_sponsored, m.web_sponsored_until, m.is_app_sponsored, m.app_sponsored_until,
+               m.is_fullpage_sponsored, m.fullpage_sponsored_until,
                m.is_presetup, m.is_claimed, m.member_limit, m.is_hidden,
                l.address, l.suite, l.city, l.state, l.postal_code, u.email
         FROM "Merchant" m
@@ -3351,6 +3354,27 @@ module.exports = async function handler(req, res) {
       return send(res, 200, { success: true, data: { logo_url: logoValue } });
     }
 
+    // ── POST /api/v1/merchants/:id/cover-photo ────────────────────
+    const coverPhotoMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/cover-photo/);
+    if (method === 'POST' && coverPhotoMatch) {
+      const merchantId = coverPhotoMatch[1];
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
+
+      const data = req.body || {};
+      if (data.cover_photo_url === undefined) return send(res, 400, { success: false, error: 'Missing cover_photo_url' });
+
+      const coverValue = data.cover_photo_url || null;
+      await sql`UPDATE "Merchant" SET cover_photo_url = ${coverValue} WHERE id = ${merchantId}`;
+      return send(res, 200, { success: true, data: { cover_photo_url: coverValue } });
+    }
+
     // ── POST /api/v1/merchants/:id/update-profile ──────────────────
     // Called from signup Step 5 when merchant edits Step 1 fields before Finish Setup.
     const updateProfileMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/update-profile$/);
@@ -3962,6 +3986,7 @@ module.exports = async function handler(req, res) {
                me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
                me.billing_status, me.billing_cycle, me.contact_name, me.application_status,
                me.stripe_subscription_id, me.stripe_payment_method_id, me.billing_starts_at_member_count, me.member_limit,
+               me.is_presetup, me.is_claimed, me.presetup_claimed_at,
                (SELECT COUNT(*) FROM "MerchantMember" WHERE merchant_id = me.id) AS member_count
         FROM "ContractorMerchantAttribution" a
         JOIN "Merchant" me ON me.id = a.merchant_id
@@ -4202,6 +4227,25 @@ module.exports = async function handler(req, res) {
           VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text.trim()}, 10, ${data.terms ? data.terms.trim() : 'Valid for first-time customers. Cannot be combined with other offers.'}, 'active', 'initial', NOW(), NULL, NOW(), NOW())
         `;
 
+        // 6. Optional Sales Rep Attribution
+        let contractorInfo = null;
+        if (data.contractor_id && String(data.contractor_id).trim() !== '') {
+          const [ctr] = await sql`
+            SELECT id, full_name, referral_code, email, phone FROM "Contractor" WHERE id = ${data.contractor_id} LIMIT 1
+          `;
+          if (ctr) {
+            contractorInfo = ctr;
+            await sql`
+              INSERT INTO "ContractorMerchantAttribution" (
+                id, contractor_id, merchant_id, source, created_at, updated_at
+              ) VALUES (
+                gen_random_uuid()::text, ${ctr.id}, ${merchant.id}, 'presetup', NOW(), NOW()
+              )
+              ON CONFLICT (merchant_id) DO UPDATE SET contractor_id = ${ctr.id}, updated_at = NOW()
+            `;
+          }
+        }
+
         return send(res, 200, {
           success: true,
           message: 'Pre-setup merchant created successfully!',
@@ -4213,7 +4257,12 @@ module.exports = async function handler(req, res) {
             address: data.address,
             city: data.city,
             state: data.state,
-            postal_code: zip5
+            postal_code: zip5,
+            contractor_id: contractorInfo ? contractorInfo.id : null,
+            contractor_name: contractorInfo ? contractorInfo.full_name : null,
+            contractor_referral_code: contractorInfo ? contractorInfo.referral_code : null,
+            contractor_phone: contractorInfo ? contractorInfo.phone : null,
+            contractor_email: contractorInfo ? contractorInfo.email : null
           }
         });
       } catch (err) {
@@ -4232,10 +4281,14 @@ module.exports = async function handler(req, res) {
             mu.email as temp_email,
             (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) as public_code,
             (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
-            l.address, l.city, l.state, l.postal_code
+            l.address, l.city, l.state, l.postal_code,
+            c.id as contractor_id, c.full_name as contractor_name, c.referral_code as contractor_referral_code,
+            c.email as contractor_email, c.phone as contractor_phone
           FROM "Merchant" m
           LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
           LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
+          LEFT JOIN "ContractorMerchantAttribution" cma ON cma.merchant_id = m.id
+          LEFT JOIN "Contractor" c ON c.id = cma.contractor_id
           WHERE m.is_presetup = true
           ORDER BY m.created_at DESC
         `;
@@ -6049,7 +6102,7 @@ module.exports = async function handler(req, res) {
                next_billing_date, member_limit, promo_code, created_at,
                payment_failed_at, payment_failure_reminder_count,
                billing_starts_at_member_count, application_status, business_presence,
-               billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until, promo_banner_url,
+               billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until, promo_banner_url, cover_photo_url,
                is_fullpage_sponsored, fullpage_sponsored_until, rating_score, rating_count, rating_platform, promo_description
         FROM "Merchant"
         WHERE id = ${merchantId}
@@ -6093,6 +6146,7 @@ module.exports = async function handler(req, res) {
           web_sponsored_until: merchant.web_sponsored_until || null,
           app_sponsored_until: merchant.app_sponsored_until || null,
           fullpage_sponsored_until: merchant.fullpage_sponsored_until || null,
+          cover_photo_url: merchant.cover_photo_url || null,
           promo_banner_url: merchant.promo_banner_url || null,
           rating_score: merchant.rating_score || null,
           rating_count: merchant.rating_count || null,
@@ -6529,16 +6583,15 @@ module.exports = async function handler(req, res) {
         FROM "Merchant" WHERE id = ${merchantId} LIMIT 1
       `;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
-      if (!merchant.stripe_customer_id) return send(res, 400, { success: false, error: 'No Stripe customer on file' });
       if (merchant.account_blocked) return send(res, 400, { success: false, error: 'Account is blocked. Please reactivate first.' });
 
       const currentTier = merchant.subscription_tier;
       const hasActiveSubscription = !!merchant.stripe_subscription_id && merchant.billing_status === 'active';
       const isPromoPhase = !!merchant.billing_starts_at_member_count;
-      const isTrialTier = ['trial', 'free'].includes(currentTier);
+      const isTrialTier = ['trial', 'free', 'free_for_life'].includes(currentTier) || merchant.is_presetup;
 
       // Validate upgrade direction for online tiers
-      if (!isTrialTier && !isPromoPhase) {
+      if (!isTrialTier && !isPromoPhase && hasActiveSubscription) {
         const currentIdx = upgradeOrder.indexOf(currentTier);
         const targetIdx = upgradeOrder.indexOf(target_tier);
         if (currentIdx === -1 || targetIdx === -1 || targetIdx <= currentIdx) {
@@ -6547,27 +6600,28 @@ module.exports = async function handler(req, res) {
       }
 
       try {
-        if (merchant.billing_cycle === 'lifetime') {
-          // Lifetime merchants have no active recurring subscription.
-          // Force them to a new checkout session to establish one.
+        // ── If no Stripe customer, no saved card, or no active subscription → open Stripe Checkout ──
+        if (!merchant.stripe_customer_id || !merchant.stripe_payment_method_id || !merchant.stripe_subscription_id || merchant.billing_cycle === 'lifetime') {
           const origin = req.headers.origin || 'https://perkfinity.net';
-          const session = await stripeClient.checkout.sessions.create({
-            customer: merchant.stripe_customer_id,
+          const sessionParams = {
             payment_method_types: ['card'],
             line_items: [{ price: targetPriceId, quantity: 1 }],
             mode: 'subscription',
             success_url: `${origin}/dashboard.html?tab=billing&upgrade_success=true&session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${origin}/dashboard.html?tab=billing&upgrade_cancelled=true`,
             metadata: { merchant_id: merchantId, billing_cycle: 'monthly', trigger: 'manual_upgrade', to_tier: target_tier }
-          });
+          };
+          if (merchant.stripe_customer_id) {
+            sessionParams.customer = merchant.stripe_customer_id;
+          } else {
+            sessionParams.customer_email = payload.email || undefined;
+          }
+          const session = await stripeClient.checkout.sessions.create(sessionParams);
           return send(res, 200, { success: true, checkout_url: session.url });
         }
 
-        // ── Case A & B: No active subscription → create one immediately ──
-        if (isTrialTier || isPromoPhase) {
-          if (!merchant.stripe_payment_method_id) {
-            return send(res, 400, { success: false, error: 'No payment method on file. Please update your payment method before upgrading.' });
-          }
+        // ── Case A & B: Saved card on file but no active subscription → create one immediately ──
+        if (isTrialTier || isPromoPhase || !hasActiveSubscription) {
           const subscription = await stripeClient.subscriptions.create({
             customer: merchant.stripe_customer_id,
             items: [{ price: targetPriceId }],

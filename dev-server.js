@@ -74,7 +74,9 @@ const server = http.createServer(async (req, res) => {
     return origEnd(chunk, ...args);
   };
 
-  handler(req, res);
+  delete require.cache[require.resolve('./api/index.js')];
+  const dynamicHandler = require('./api/index.js');
+  dynamicHandler(req, res);
 });
 
 server.listen(PORT, () => {

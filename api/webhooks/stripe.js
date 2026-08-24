@@ -129,12 +129,21 @@ module.exports = async (req, res) => {
             if (updateSql) await updateSql;
             console.log(`[Stripe] Merchant ${merchantId} purchased sponsorship via checkout`);
           } else {
+            const tierLimitMap = {
+              tier1: 999999, online_starter: 500, online_growth: 2500, online_scale: 999999,
+            };
+            const newMemberLimit = toTier && tierLimitMap[toTier] ? tierLimitMap[toTier] : null;
+
             if (toCycle) {
               // Update merchant to active and change billing cycle
               await sql`
                 UPDATE "Merchant"
                 SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
                     billing_cycle = ${toCycle},
+                    member_limit = COALESCE(${newMemberLimit}, member_limit),
+                    billing_starts_at_member_count = NULL,
+                    member_cap_notified = false,
+                    cap_block_count = 0,
                     stripe_customer_id = ${customerId},
                     stripe_subscription_id = ${subscriptionId},
                     billing_status = 'active',
@@ -149,6 +158,10 @@ module.exports = async (req, res) => {
               await sql`
                 UPDATE "Merchant"
                 SET subscription_tier = COALESCE(${toTier}, subscription_tier, 'tier1'),
+                    member_limit = COALESCE(${newMemberLimit}, member_limit),
+                    billing_starts_at_member_count = NULL,
+                    member_cap_notified = false,
+                    cap_block_count = 0,
                     stripe_customer_id = ${customerId},
                     stripe_subscription_id = ${subscriptionId},
                     billing_status = 'active',
@@ -159,7 +172,7 @@ module.exports = async (req, res) => {
                 WHERE id = ${merchantId}
               `;
             }
-            console.log(`[Stripe] Merchant ${merchantId} upgraded via checkout`);
+            console.log(`[Stripe] Merchant ${merchantId} upgraded to ${toTier || 'active plan'} via checkout`);
           }
         } else if (session.mode === 'payment' && session.metadata?.billing_cycle === 'lifetime') {
           const [merch] = await sql`SELECT promo_code, subscription_tier FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;

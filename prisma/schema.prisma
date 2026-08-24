@@ -31,11 +31,31 @@ model Merchant {
   id                String             @id @default(uuid())
   business_name     String
   legal_name        String?
+  contact_name      String?
+  phone             String?
+  public_phone      String?
+  public_email      String?
+  website           String?
+  review_url        String?
+  order_url         String?
   logo_url          String?
   cover_photo_url   String?
+  promo_description String?
+  business_presence String?            @default("in_person")
+  business_category String?
+  welcome_offer_text String?
+  is_multi_location Boolean            @default(false)
   status            String             @default("active")
   is_hidden         Boolean            @default(false)
   subscription_tier String             @default("free")
+  member_limit      Int?
+  billing_cycle     String?
+  billing_status    String?
+  application_status String?
+  stripe_customer_id String?
+  stripe_payment_method_id String?
+  stripe_subscription_id String?
+  billing_starts_at_member_count Int?
   created_at        DateTime           @default(now())
   updated_at        DateTime           @updatedAt
   campaigns         Campaign[]
@@ -53,14 +73,18 @@ model Merchant {
   temp_password_plain String?
   presetup_claimed_at DateTime?
 
-  is_app_sponsored    Boolean   @default(false)
-  app_sponsored_until DateTime?
-  is_web_sponsored    Boolean   @default(false)
-  web_sponsored_until DateTime?
+  is_app_sponsored      Boolean   @default(false)
+  app_sponsored_until   DateTime?
+  is_web_sponsored      Boolean   @default(false)
+  web_sponsored_until   DateTime?
+  is_fullpage_sponsored Boolean   @default(false)
+  fullpage_sponsored_until DateTime?
 
-  stripe_web_sponsor_subscription_id    String?
-  stripe_app_sponsor_subscription_id    String?
-  stripe_bundle_sponsor_subscription_id String?
+  stripe_web_sponsor_subscription_id      String?
+  stripe_app_sponsor_subscription_id      String?
+  stripe_fullpage_sponsor_subscription_id String?
+  stripe_bundle_sponsor_subscription_id   String?
+  stripe_sponsor_subscription_id          String?
 
   @@schema("public")
 }
@@ -205,6 +229,48 @@ model AuditLog {
   target_id   String?
   metadata    Json      @default("{}")
   created_at  DateTime  @default(now())
+
+  @@schema("public")
+}
+
+model Contractor {
+  id                        String    @id @default(uuid())
+  full_name                 String
+  legal_name                String?
+  entity_type               String?
+  email                     String    @unique
+  phone                     String?
+  address                   String?
+  password_hash             String?
+  referral_code             String    @unique
+  status                    String    @default("pending")
+  ica_status                String    @default("not_sent")
+  ica_company_signatory     String?
+  dropbox_sign_request_id   String?
+  w9_status                 String    @default("not_sent")
+  taxbandits_submission_id  String?
+  payment_method            String    @default("stripe")
+  stripe_account_id         String?
+  stripe_onboarding_status  String    @default("not_started")
+  notes                     String?
+  invite_token              String?
+  invite_expires_at         DateTime?
+  created_at                DateTime  @default(now())
+  updated_at                DateTime  @updatedAt
+
+  @@schema("public")
+}
+
+model ContractorMerchantAttribution {
+  id                     String    @id @default(uuid())
+  contractor_id          String
+  merchant_id            String    @unique
+  source                 String    @default("referral_link")
+  commission_start_date  DateTime?
+  commission_end_date    DateTime?
+  retention_bonuses_paid Int       @default(0)
+  created_at             DateTime  @default(now())
+  updated_at             DateTime  @updatedAt
 
   @@schema("public")
 }

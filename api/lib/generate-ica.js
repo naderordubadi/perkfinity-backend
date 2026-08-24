@@ -198,7 +198,7 @@ function generateICAPdf(p) {
     
     const rateVal = Number(p.commissionRate) || 0;
     const displayRate = (rateVal <= 1 ? rateVal * 100 : rateVal).toFixed(2).replace(/\.00$/, '');
-    body(`6.1 Commission. The Company will pay the Contractor a commission of ${displayRate}% of the net subscription revenue collected from each attributed Merchant for a period of ${p.commissionDurationMonths} months from the date of the Merchant's first successful payment ("Commission Period").`);
+    body(`6.1 Commission. The Company will pay the Contractor a commission of ${displayRate}% of all net revenues—including core platform subscription fees and recurring add-on services (such as Carousel Ad Sponsorships, VIP Takeovers, and promotional upgrades)—collected from each attributed Merchant for a period of ${p.commissionDurationMonths} months from the date of the Merchant's first successful payment ("Commission Period").`);
     
     let sec6Num = 2;
     if (Number(retainer) > 0) {
