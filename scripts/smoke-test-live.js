@@ -31,7 +31,17 @@ async function run() {
   let passed = true;
 
   try {
-    // 1. Check sponsored merchants endpoint (used by codes.html and localperks.html)
+    // 1. Health check
+    console.log('Testing GET /health...');
+    const healthRes = await getJson('/health');
+    if (healthRes.status === 200) {
+      console.log('✅ PASSED: Backend is healthy.');
+    } else {
+      console.error(`❌ FAILED: Health returned status ${healthRes.status}`);
+      passed = false;
+    }
+
+    // 2. Check sponsored merchants endpoint (web)
     console.log('Testing GET /api/v1/merchants/sponsored?platform=web...');
     const res = await getJson('/api/v1/merchants/sponsored?platform=web');
     const items = res.data && (Array.isArray(res.data) ? res.data : res.data.data);
@@ -46,7 +56,7 @@ async function run() {
       console.log(`✅ PASSED: ${items.length} web sponsors returned.`);
     }
 
-    // 2. Check app sponsored merchants endpoint
+    // 3. Check app sponsored merchants endpoint
     console.log('Testing GET /api/v1/merchants/sponsored?platform=app...');
     const appRes = await getJson('/api/v1/merchants/sponsored?platform=app');
     const appItems = appRes.data && (Array.isArray(appRes.data) ? appRes.data : appRes.data.data);
@@ -59,6 +69,20 @@ async function run() {
       passed = false;
     } else {
       console.log(`✅ PASSED: ${appItems.length} app sponsors returned.`);
+    }
+
+    // 4. Check public merchants endpoint
+    console.log('Testing GET /api/v1/merchants...');
+    const merchRes = await getJson('/api/v1/merchants');
+    const merchItems = merchRes.data && (Array.isArray(merchRes.data) ? merchRes.data : merchRes.data.data);
+    if (merchRes.status !== 200) {
+      console.error(`❌ FAILED: Expected 200, got ${merchRes.status}.`);
+      passed = false;
+    } else if (!Array.isArray(merchItems)) {
+      console.error('❌ FAILED: Response data is not an array:', merchRes.data);
+      passed = false;
+    } else {
+      console.log(`✅ PASSED: ${merchItems.length} active merchants returned.`);
     }
 
   } catch (err) {
