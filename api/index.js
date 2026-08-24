@@ -1136,7 +1136,7 @@ module.exports = async function handler(req, res) {
       const [user] = await sql`
         SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status, m.logo_url,
                m.stripe_payment_method_id, m.stripe_subscription_id, m.billing_status, m.billing_cycle,
-               m.business_presence, m.onboarding_complete, m.application_status
+               m.business_presence, m.onboarding_complete, m.application_status, m.is_presetup, m.is_claimed
         FROM "MerchantUser" u
         JOIN "Merchant" m ON m.id = u.merchant_id
         WHERE u.email = ${data.email.toLowerCase()}
@@ -1226,7 +1226,8 @@ module.exports = async function handler(req, res) {
         user.subscription_tier !== 'free_for_life' &&
         user.billing_cycle !== 'lifetime' &&
         !['cancelled', 'deleted', 'pending_cancellation'].includes(user.billing_status) &&
-        !isDemoAccount
+        !isDemoAccount &&
+        !user.is_presetup
       );
 
       const { password_hash: _pw, ...safeUser } = user;
