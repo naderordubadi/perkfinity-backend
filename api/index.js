@@ -4373,8 +4373,8 @@ module.exports = async function handler(req, res) {
           COUNT(*) FILTER (
             WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
               AND account_blocked = false 
-              AND billing_status NOT IN ('cancelled','payment_failed','pending_cancellation','deleted')
-              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
+              AND billing_status = 'active'
+              AND stripe_subscription_id IS NOT NULL
           ) as paying_merchants,
           COUNT(*) FILTER (
             WHERE subscription_tier IN ('tier1','online_starter','online_growth','online_scale') 
@@ -4383,7 +4383,13 @@ module.exports = async function handler(req, res) {
           ) as pending_cancel,
           COUNT(*) FILTER (WHERE billing_status = 'payment_failed') as failed_payments,
           COUNT(*) FILTER (WHERE subscription_tier = 'free_for_life' AND account_blocked = false) as ffl_merchants,
-          COUNT(*) FILTER (WHERE subscription_tier IN ('none','trial') AND account_blocked = false) as upgrade_eligible
+          COUNT(*) FILTER (
+            WHERE subscription_tier != 'free_for_life' 
+              AND account_blocked = false 
+              AND (billing_status != 'deleted' OR billing_status IS NULL)
+              AND (stripe_subscription_id IS NULL OR billing_status != 'active')
+              AND NOT (billing_status = 'active' AND stripe_subscription_id IS NULL AND stripe_payment_method_id IS NULL AND member_limit IS NULL AND billing_cycle = 'monthly' AND subscription_tier != 'free_for_life')
+          ) as upgrade_eligible
         FROM "Merchant"
       `;
 
