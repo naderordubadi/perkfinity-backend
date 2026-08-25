@@ -4144,6 +4144,36 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ── PATCH /api/v1/admin/merchants/:id/creative ───────────────────
+    const creativeAdminMatch = url.match(/^\/api\/v1\/admin\/merchants\/([a-zA-Z0-9_-]+)\/creative$/);
+    if (method === 'PATCH' && creativeAdminMatch) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+      const merchantId = creativeAdminMatch[1];
+      try {
+        const body = req.body || {};
+        const sanitizeImg = (u) => {
+          if (!u || typeof u !== 'string') return null;
+          const trimmed = u.trim();
+          if (!trimmed) return null;
+          if (trimmed.startsWith('http://')) return trimmed.replace(/^http:\/\//i, 'https://');
+          return trimmed;
+        };
+
+        if (body.cover_photo_url !== undefined) {
+          const coverVal = sanitizeImg(body.cover_photo_url);
+          await sql`UPDATE "Merchant" SET cover_photo_url = ${coverVal}, updated_at = NOW() WHERE id = ${merchantId}`;
+        }
+        if (body.logo_url !== undefined) {
+          const logoVal = sanitizeImg(body.logo_url);
+          await sql`UPDATE "Merchant" SET logo_url = ${logoVal}, updated_at = NOW() WHERE id = ${merchantId}`;
+        }
+        return send(res, 200, { success: true, message: 'Creative updated successfully' });
+      } catch (err) {
+        console.error('Update creative error:', err);
+        return send(res, 500, { success: false, error: 'Failed to update creative' });
+      }
+    }
+
     // ── POST /api/v1/admin/merchants/presetup ─────────────────────
     if (method === 'POST' && url === '/api/v1/admin/merchants/presetup') {
       if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
@@ -4181,6 +4211,17 @@ module.exports = async function handler(req, res) {
         const postalCodeVal = (data.zip && data.zip.trim()) ? data.zip.trim() : null;
         const isMultiLoc = !addressVal;
 
+        const sanitizeImgUrl = (u) => {
+          if (!u || typeof u !== 'string') return null;
+          const trimmed = u.trim();
+          if (!trimmed) return null;
+          if (trimmed.startsWith('http://')) return trimmed.replace(/^http:\/\//i, 'https://');
+          return trimmed;
+        };
+
+        const finalLogoUrl = sanitizeImgUrl(data.logo_url);
+        const finalCoverUrl = sanitizeImgUrl(data.cover_photo_url);
+
         // 1. Create Merchant
         const [merchant] = await sql`
           INSERT INTO "Merchant" (
@@ -4193,7 +4234,7 @@ module.exports = async function handler(req, res) {
             created_at, updated_at
           ) VALUES (
             gen_random_uuid()::text, ${data.business_name.trim()}, ${data.contact_name ? data.contact_name.trim() : 'Store Owner'}, ${data.phone ? data.phone.trim() : null}, ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
-            ${data.website ? data.website.trim() : ''}, ${data.review_url ? data.review_url.trim() : null}, ${data.order_url ? data.order_url.trim() : null}, ${data.logo_url || null}, ${data.cover_photo_url || null}, ${data.promo_description || null},
+            ${data.website ? data.website.trim() : ''}, ${data.review_url ? data.review_url.trim() : null}, ${data.order_url ? data.order_url.trim() : null}, ${finalLogoUrl}, ${finalCoverUrl}, ${data.promo_description || null},
             'hybrid', ${data.business_category}, ${data.welcome_offer_text.trim()}, ${isMultiLoc},
             'presetup_50', ${memberLimit}, 'active', 'approved', ${isHidden}, true, false,
             ${tempPassword}, ${isWebSponsor}, ${isWebSponsor ? sponsorUntil : null},
