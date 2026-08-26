@@ -3561,8 +3561,18 @@ module.exports = async function handler(req, res) {
             const rLower = newReviewUrl.toLowerCase();
             if (rLower.includes('yelp')) detectedPlatform = 'Yelp';
             else if (rLower.includes('google') || rLower.includes('g.page') || rLower.includes('maps.app.goo.gl')) detectedPlatform = 'Google';
+            else if (rLower.includes('instagram.com') || rLower.includes('instagr.am')) detectedPlatform = 'Instagram';
+            else if (rLower.includes('facebook.com') || rLower.includes('fb.me') || rLower.includes('fb.com')) detectedPlatform = 'Facebook';
+            else if (rLower.includes('tiktok.com')) detectedPlatform = 'TikTok';
+            else if (rLower.includes('twitter.com') || rLower.includes('x.com')) detectedPlatform = 'X';
+            else if (rLower.includes('youtube.com') || rLower.includes('youtu.be')) detectedPlatform = 'YouTube';
+            else if (rLower.includes('linkedin.com')) detectedPlatform = 'LinkedIn';
+            else if (rLower.includes('pinterest.com') || rLower.includes('pin.it')) detectedPlatform = 'Pinterest';
+            else if (rLower.includes('threads.net')) detectedPlatform = 'Threads';
+            else if (rLower.includes('nextdoor.com')) detectedPlatform = 'Nextdoor';
             else if (rLower.includes('tripadvisor')) detectedPlatform = 'TripAdvisor';
-            else if (rLower.includes('facebook')) detectedPlatform = 'Facebook';
+            else if (rLower.includes('trustpilot')) detectedPlatform = 'Trustpilot';
+            else if (rLower.includes('bbb.org')) detectedPlatform = 'BBB';
           }
           await sql`UPDATE "Merchant" SET review_url = ${newReviewUrl}, rating_platform = COALESCE(${detectedPlatform}, rating_platform) WHERE id = ${merchantId}`;
         }
@@ -4222,11 +4232,30 @@ module.exports = async function handler(req, res) {
         const finalLogoUrl = sanitizeImgUrl(data.logo_url);
         const finalCoverUrl = sanitizeImgUrl(data.cover_photo_url);
 
+        let detectedPlatform = null;
+        if (data.review_url) {
+          const rLower = data.review_url.toLowerCase();
+          if (rLower.includes('yelp')) detectedPlatform = 'Yelp';
+          else if (rLower.includes('google') || rLower.includes('g.page') || rLower.includes('maps.app.goo.gl')) detectedPlatform = 'Google';
+          else if (rLower.includes('instagram.com') || rLower.includes('instagr.am')) detectedPlatform = 'Instagram';
+          else if (rLower.includes('facebook.com') || rLower.includes('fb.me') || rLower.includes('fb.com')) detectedPlatform = 'Facebook';
+          else if (rLower.includes('tiktok.com')) detectedPlatform = 'TikTok';
+          else if (rLower.includes('twitter.com') || rLower.includes('x.com')) detectedPlatform = 'X';
+          else if (rLower.includes('youtube.com') || rLower.includes('youtu.be')) detectedPlatform = 'YouTube';
+          else if (rLower.includes('linkedin.com')) detectedPlatform = 'LinkedIn';
+          else if (rLower.includes('pinterest.com') || rLower.includes('pin.it')) detectedPlatform = 'Pinterest';
+          else if (rLower.includes('threads.net')) detectedPlatform = 'Threads';
+          else if (rLower.includes('nextdoor.com')) detectedPlatform = 'Nextdoor';
+          else if (rLower.includes('tripadvisor')) detectedPlatform = 'TripAdvisor';
+          else if (rLower.includes('trustpilot')) detectedPlatform = 'Trustpilot';
+          else if (rLower.includes('bbb.org')) detectedPlatform = 'BBB';
+        }
+
         // 1. Create Merchant
         const [merchant] = await sql`
           INSERT INTO "Merchant" (
             id, business_name, contact_name, phone, public_phone, public_email,
-            website, review_url, order_url, logo_url, cover_photo_url, promo_description,
+            website, review_url, rating_platform, order_url, logo_url, cover_photo_url, promo_description,
             business_presence, business_category, welcome_offer_text, is_multi_location,
             subscription_tier, member_limit, status, application_status, is_hidden, is_presetup, is_claimed,
             temp_password_plain, is_web_sponsored, web_sponsored_until,
@@ -4234,7 +4263,7 @@ module.exports = async function handler(req, res) {
             created_at, updated_at
           ) VALUES (
             gen_random_uuid()::text, ${data.business_name.trim()}, ${data.contact_name ? data.contact_name.trim() : 'Store Owner'}, ${data.phone ? data.phone.trim() : null}, ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
-            ${data.website ? data.website.trim() : ''}, ${data.review_url ? data.review_url.trim() : null}, ${data.order_url ? data.order_url.trim() : null}, ${finalLogoUrl}, ${finalCoverUrl}, ${data.promo_description || null},
+            ${data.website ? data.website.trim() : ''}, ${data.review_url ? data.review_url.trim() : null}, ${detectedPlatform}, ${data.order_url ? data.order_url.trim() : null}, ${finalLogoUrl}, ${finalCoverUrl}, ${data.promo_description || null},
             'hybrid', ${data.business_category}, ${data.welcome_offer_text.trim()}, ${isMultiLoc},
             'presetup_50', ${memberLimit}, 'active', 'approved', ${isHidden}, true, false,
             ${tempPassword}, ${isWebSponsor}, ${isWebSponsor ? sponsorUntil : null},
