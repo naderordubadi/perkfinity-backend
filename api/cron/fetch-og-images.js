@@ -51,20 +51,13 @@ module.exports = async function handler(req, res) {
   const sql = neon(process.env.DATABASE_URL);
 
   try {
-    // 1. Cleanup: Wipes cover_photo_url if website was deleted by the merchant
-    await sql`
-      UPDATE "Merchant" 
-      SET cover_photo_url = NULL 
-      WHERE (website IS NULL OR TRIM(website) = '') 
-        AND cover_photo_url IS NOT NULL
-    `;
-
-    // 2. Fetch cover photos for ALL active merchants with a website
+    // Fetch cover photos ONLY for active merchants who do NOT have any cover photo set
     const merchants = await sql`
-      SELECT id, website, cover_photo_url 
+      SELECT id, website 
       FROM "Merchant" 
       WHERE website IS NOT NULL 
         AND TRIM(website) != ''
+        AND (cover_photo_url IS NULL OR TRIM(cover_photo_url) = '')
         AND account_blocked = false
         AND (billing_status IS NULL OR billing_status NOT IN ('deleted', 'cancelled'))
     `;
@@ -72,9 +65,16 @@ module.exports = async function handler(req, res) {
     let updatedCount = 0;
 
     for (const m of merchants) {
-      const newOgImage = await fetchOpenGraphImage(m.website);
-      if (newOgImage && newOgImage !== m.cover_photo_url) {
-        await sql`UPDATE "Merchant" SET cover_photo_url = ${newOgImage}, updated_at = NOW() WHERE id = ${m.id}`;
+      let newOgImage = await fetchOpenGraphImage(m.website);
+      if (newOgImage) {
+        if (newOgImage.startsWith('http://')) {
+          newOgImage = newOgImage.replace(/^http:\/\//i, 'https://');
+        }
+        await sql`
+          UPDATE "Merchant" 
+          SET cover_photo_url = ${newOgImage}, updated_at = NOW() 
+          WHERE id = ${m.id} AND (cover_photo_url IS NULL OR TRIM(cover_photo_url) = '')
+        `;
         updatedCount++;
       }
     }
