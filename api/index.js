@@ -3835,6 +3835,73 @@ module.exports = async function handler(req, res) {
       } catch (e) { return null; }
     }
 
+    // ── POST /api/v1/rep/forgot-password ──────────────────────────
+    if (method === 'POST' && url.endsWith('/rep/forgot-password')) {
+      const data = req.body || {};
+      if (!data.email) return send(res, 400, { success: false, error: 'Email is required.' });
+
+      const emailClean = data.email.toLowerCase().trim();
+      const [rep] = await sql`
+        SELECT id, full_name, email FROM "Contractor"
+        WHERE LOWER(email) = ${emailClean} AND status != 'terminated'
+        LIMIT 1
+      `;
+
+      if (rep) {
+        const rawToken = crypto.randomBytes(32).toString('hex');
+        await sql`
+          UPDATE "Contractor"
+          SET invite_token = ${rawToken},
+              invite_expires_at = NOW() + INTERVAL '1 hour',
+              updated_at = NOW()
+          WHERE id = ${rep.id}
+        `;
+
+        const BREVO_KEY = process.env.BREVO_API_KEY;
+        if (BREVO_KEY) {
+          try {
+            const brevoClient = SibApiV3Sdk.ApiClient.instance;
+            brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+            const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+
+            const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+            sendSmtpEmail.sender = { name: 'Perkfinity', email: 'noreply@perkfinity.net' };
+            sendSmtpEmail.to = [{ email: rep.email }];
+            sendSmtpEmail.subject = 'Reset your Perkfinity Rep Portal Password';
+
+            const origin = req.headers.origin || 'https://perkfinity.net';
+            const resetLink = `${origin}/reps/index.html?token=${rawToken}`;
+
+            sendSmtpEmail.htmlContent = `
+              <div style="font-family:'Helvetica Neue',Arial,sans-serif; max-width:520px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; border:1px solid #eee;">
+                <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf); padding:28px 24px; text-align:center;">
+                  <div style="color:#fff; font-size:24px; font-weight:800;">Perkfinity</div>
+                </div>
+                <div style="padding:28px 24px;">
+                  <div style="font-size:20px; font-weight:700; color:#1a1a2e; margin-bottom:16px;">Rep Portal Password Reset</div>
+                  <p style="font-size:15px; color:#555; line-height:1.6; margin-bottom:24px;">
+                    Hi ${rep.full_name || 'there'},<br><br>
+                    We received a request to reset the password for your Perkfinity Sales Rep account. Click the button below to choose a new password. This link expires in 1 hour.
+                  </p>
+                  <div style="text-align:center; margin-bottom:24px;">
+                    <a href="${resetLink}" style="display:inline-block; background:#5b3fa5; color:#fff; font-weight:600; text-decoration:none; padding:14px 28px; border-radius:10px;">Reset Password</a>
+                  </div>
+                  <p style="font-size:13px; color:#aaa; text-align:center;">If you did not request this, you can safely ignore this email.</p>
+                </div>
+              </div>
+            `;
+
+            await emailApi.sendTransacEmail(sendSmtpEmail);
+            console.log(`[Brevo] Rep reset password email sent to ${rep.email}`);
+          } catch (brevoErr) {
+            console.error('Brevo rep reset email failed:', brevoErr.message || brevoErr);
+          }
+        }
+      }
+
+      return send(res, 200, { success: true, message: 'If that email is registered, a reset link was sent. Check your inbox.' });
+    }
+
     // ── POST /api/v1/rep/reset-password ──────────────────────────
     if (method === 'POST' && url.endsWith('/rep/reset-password')) {
       const { token, password } = req.body || {};
