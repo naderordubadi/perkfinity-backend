@@ -2110,9 +2110,21 @@ module.exports = async function handler(req, res) {
         LIMIT 1
       `;
 
+      // Fetch attributed sales rep (if any)
+      const [contractorData] = await sql`
+        SELECT c.full_name as contractor_name, c.phone as contractor_phone, c.email as contractor_email
+        FROM "ContractorMerchantAttribution" a
+        JOIN "Contractor" c ON c.id = a.contractor_id
+        WHERE a.merchant_id = ${merchantId}
+        LIMIT 1
+      `;
+
       merchantData.qr_public_code = qrData ? qrData.public_code : null;
       merchantData.qr_url = qrData ? `https://www.perkfinity.net/qr/${qrData.public_code}` : null;
       merchantData.perk = campaignData ? campaignData.title : (merchantData.welcome_offer_text || 'Welcome Perk');
+      merchantData.contractor_name = contractorData ? contractorData.contractor_name : null;
+      merchantData.contractor_phone = contractorData ? contractorData.contractor_phone : null;
+      merchantData.contractor_email = contractorData ? contractorData.contractor_email : null;
       
       // Apply active sponsorship logic
       merchantData.is_web_sponsored = merchantData.is_web_sponsored && (!merchantData.web_sponsored_until || new Date(merchantData.web_sponsored_until) >= new Date()) ? true : false;
