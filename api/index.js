@@ -1508,6 +1508,22 @@ module.exports = async function handler(req, res) {
         WHERE m.welcome_offer_text IS NULL
       `;
 
+      // Retroactive: backfill welcome_promo_code for presetup / hybrid merchants if null
+      await sql`
+        UPDATE "Merchant"
+        SET welcome_promo_code = 'HELLO-' || SUBSTRING(UPPER(REGEXP_REPLACE(business_name, '[^a-zA-Z0-9]', '', 'g')), 1, 12)
+        WHERE welcome_promo_code IS NULL AND (is_presetup = true OR business_presence IN ('online', 'hybrid'))
+      `;
+      await sql`
+        UPDATE "Campaign" c
+        SET promo_code = m.welcome_promo_code
+        FROM "Merchant" m
+        WHERE c.merchant_id = m.id
+          AND c.campaign_type = 'initial'
+          AND (c.promo_code IS NULL OR c.promo_code = '')
+          AND m.welcome_promo_code IS NOT NULL
+      `;
+
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
@@ -4330,12 +4346,15 @@ module.exports = async function handler(req, res) {
           else if (rLower.includes('bbb.org')) detectedPlatform = 'BBB';
         }
 
+        // Auto-generate welcome promo code for presetup (same logic as hybrid signup)
+        const welcomePromoCode = 'HELLO-' + data.business_name.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+
         // 1. Create Merchant
         const [merchant] = await sql`
           INSERT INTO "Merchant" (
             id, business_name, contact_name, phone, public_phone, public_email,
             website, review_url, rating_platform, order_url, logo_url, cover_photo_url, promo_description,
-            business_presence, business_category, welcome_offer_text, is_multi_location,
+            business_presence, business_category, welcome_promo_code, welcome_offer_text, is_multi_location,
             subscription_tier, member_limit, status, application_status, is_hidden, is_presetup, is_claimed,
             temp_password_plain, is_web_sponsored, web_sponsored_until,
             is_app_sponsored, app_sponsored_until, is_fullpage_sponsored, fullpage_sponsored_until,
@@ -4343,7 +4362,7 @@ module.exports = async function handler(req, res) {
           ) VALUES (
             gen_random_uuid()::text, ${data.business_name.trim()}, ${data.contact_name ? data.contact_name.trim() : 'Store Owner'}, ${data.phone ? data.phone.trim() : null}, ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
             ${data.website ? data.website.trim() : ''}, ${data.review_url ? data.review_url.trim() : null}, ${detectedPlatform}, ${data.order_url ? data.order_url.trim() : null}, ${finalLogoUrl}, ${finalCoverUrl}, ${data.promo_description || null},
-            'hybrid', ${data.business_category}, ${data.welcome_offer_text.trim()}, ${isMultiLoc},
+            'hybrid', ${data.business_category}, ${welcomePromoCode}, ${data.welcome_offer_text.trim()}, ${isMultiLoc},
             'presetup_50', ${memberLimit}, 'active', 'approved', ${isHidden}, true, false,
             ${tempPassword}, ${isWebSponsor}, ${isWebSponsor ? sponsorUntil : null},
             ${isAppSponsor}, ${isAppSponsor ? sponsorUntil : null}, ${isFullpageSponsor}, ${isFullpageSponsor ? sponsorUntil : null},
@@ -4373,8 +4392,8 @@ module.exports = async function handler(req, res) {
 
         // 5. Create Welcome Campaign
         await sql`
-          INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, campaign_type, start_at, end_at, created_at, updated_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text.trim()}, 10, ${data.terms ? data.terms.trim() : 'Valid for first-time customers. Cannot be combined with other offers.'}, 'active', 'initial', NOW(), NULL, NOW(), NOW())
+          INSERT INTO "Campaign" (id, merchant_id, title, discount_percentage, terms, status, campaign_type, promo_code, start_at, end_at, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.welcome_offer_text.trim()}, 10, ${data.terms ? data.terms.trim() : 'Valid for first-time customers. Cannot be combined with other offers.'}, 'active', 'initial', ${welcomePromoCode}, NOW(), NULL, NOW(), NOW())
         `;
 
         // 6. Optional Sales Rep Attribution
@@ -4401,6 +4420,7 @@ module.exports = async function handler(req, res) {
           message: 'Pre-setup merchant created successfully!',
           data: {
             ...merchant,
+            welcome_promo_code: welcomePromoCode,
             temp_email: tempEmail,
             temp_password: tempPassword,
             public_code,
