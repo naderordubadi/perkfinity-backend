@@ -4272,6 +4272,10 @@ module.exports = async function handler(req, res) {
           const logoVal = sanitizeImg(body.logo_url);
           await sql`UPDATE "Merchant" SET logo_url = ${logoVal}, updated_at = NOW() WHERE id = ${merchantId}`;
         }
+        if (body.promo_description !== undefined) {
+          const promoDesc = body.promo_description ? body.promo_description.trim().slice(0, 1000) : null;
+          await sql`UPDATE "Merchant" SET promo_description = ${promoDesc}, updated_at = NOW() WHERE id = ${merchantId}`;
+        }
         return send(res, 200, { success: true, message: 'Creative updated successfully' });
       } catch (err) {
         console.error('Update creative error:', err);
