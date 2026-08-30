@@ -1524,6 +1524,29 @@ module.exports = async function handler(req, res) {
           AND m.welcome_promo_code IS NOT NULL
       `;
 
+      const neugloText = `WHAT WE STAND FOR
+
+Every NEUGLO formula is developed and manufactured by us. Not a contract lab or a white-label supplier.
+
+THIS is the reason this brand can exist. When you make it yourself, you know exactly what’s in it, exactly what it cost, and what you had to give up to keep your standards. So we publish that info.
+
+Green chemistry isn’t a marketing word here. It’s a constraint.
+Green chemistry is an EPA framework for designing compounds that are renewable, biodegradable, and low-impact by design.
+
+In practice, that rules out ingredients that would make our lives easier:
+• No microplastics or synthetic polymers
+• No silicones
+• No petrochemical-derived ingredients
+• No synthetic fragrance
+
+Working this way is harder and more expensive. The actives still have to earn their place: Bakuchiol & astaxanthin in BioGlo, willow bark & panthenol in our cleanser, elemental magnesium & German chamomile in our body lotion.`;
+
+      await sql`
+        UPDATE "Merchant"
+        SET promo_description = ${neugloText}
+        WHERE id = 'b434f5da-4696-4499-b1fb-3ab783002b50' OR business_name ILIKE '%NEUGLO%'
+      `;
+
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
