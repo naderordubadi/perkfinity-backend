@@ -1541,13 +1541,14 @@ In practice, that rules out ingredients that would make our lives easier:
 
 Working this way is harder and more expensive. The actives still have to earn their place: Bakuchiol & astaxanthin in BioGlo, willow bark & panthenol in our cleanser, elemental magnesium & German chamomile in our body lotion.`;
 
-      await sql`
+      const updateResult = await sql`
         UPDATE "Merchant"
         SET promo_description = ${neugloText}
-        WHERE id = 'b434f5da-4696-4499-b1fb-3ab783002b50' OR business_name ILIKE '%NEUGLO%'
+        WHERE id::text = 'b434f5da-4696-4499-b1fb-3ab783002b50' OR UPPER(business_name) = 'NEUGLO'
+        RETURNING id, business_name
       `;
 
-      return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
+      return send(res, 200, { success: true, message: "DB table migrations strictly applied!", neuglo_updated: updateResult });
     }
 
     // ── GET /api/v1/merchants/sponsored ──────────────────────────────
