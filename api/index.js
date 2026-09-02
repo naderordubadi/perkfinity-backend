@@ -4190,6 +4190,7 @@ Working this way is harder and more expensive. The actives still have to earn th
     if (method === 'GET' && url.endsWith('/admin/merchants')) {
       const merchants = await sql`
         SELECT m.*,
+          (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) as public_code,
           (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.merchant_id = m.id) as member_count,
           (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id) as campaign_count,
           (SELECT COUNT(*) FROM "Redemption" r JOIN "Campaign" c2 ON c2.id = r.campaign_id WHERE c2.merchant_id = m.id AND r.status = 'redeemed') as redemption_count,
