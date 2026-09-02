@@ -1541,53 +1541,7 @@ In practice, that rules out ingredients that would make our lives easier:
 
 Working this way is harder and more expensive. The actives still have to earn their place: Bakuchiol & astaxanthin in BioGlo, willow bark & panthenol in our cleanser, elemental magnesium & German chamomile in our body lotion.`;
 
-      const sattvaHash = await bcrypt.hash('Sattva2026!', 12);
-      const neugloHash = await bcrypt.hash('Neuglo2026!', 12);
-
-      // 1. Update Sattva Indian
-      const sattvaMerchants = await sql`
-        UPDATE "Merchant"
-        SET temp_password_plain = 'Sattva2026!'
-        WHERE (UPPER(business_name) LIKE '%SATTVA%' OR id = '5926ec07-5b68-450f-a4a3-7649514f08ca')
-          AND is_presetup = true AND is_claimed = false
-        RETURNING id, business_name
-      `;
-
-      let sattvaUserUpdate = [];
-      if (sattvaMerchants.length > 0) {
-        sattvaUserUpdate = await sql`
-          UPDATE "MerchantUser"
-          SET email = 'sattvaindian@presetup.net', password_hash = ${sattvaHash}
-          WHERE merchant_id = ${sattvaMerchants[0].id}
-          RETURNING id, email, merchant_id
-        `;
-      }
-
-      // 2. Update NEUGLO
-      const neugloMerchants = await sql`
-        UPDATE "Merchant"
-        SET temp_password_plain = 'Neuglo2026!'
-        WHERE (UPPER(business_name) = 'NEUGLO' OR id = 'b434f5da-4696-4499-b1fb-3ab783002b50')
-          AND is_presetup = true AND is_claimed = false
-        RETURNING id, business_name
-      `;
-
-      let neugloUserUpdate = [];
-      if (neugloMerchants.length > 0) {
-        neugloUserUpdate = await sql`
-          UPDATE "MerchantUser"
-          SET email = 'neuglo@presetup.net', password_hash = ${neugloHash}
-          WHERE merchant_id = ${neugloMerchants[0].id}
-          RETURNING id, email, merchant_id
-        `;
-      }
-
-      return send(res, 200, {
-        success: true,
-        message: "Sattva and NEUGLO presetup emails migrated to clean format!",
-        sattva: { merchant: sattvaMerchants, user: sattvaUserUpdate },
-        neuglo: { merchant: neugloMerchants, user: neugloUserUpdate }
-      });
+      return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
     // ── GET /api/v1/merchants/sponsored ──────────────────────────────
