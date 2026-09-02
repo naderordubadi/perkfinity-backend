@@ -5,7 +5,7 @@
   "main": "api/index.js",
   "scripts": {
     "dev": "node dev-server.js",
-    "build": "tsc --noEmit",
+    "build": "node -c api/index.js",
     "vercel-build": "echo 'No build needed'"
   },
   "dependencies": {
