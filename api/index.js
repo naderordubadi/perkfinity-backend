@@ -4322,10 +4322,25 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
 
       try {
-        const cleanSlug = (data.business_name || 'store').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 15) || 'merchant';
-        const zip5 = data.zip ? data.zip.replace(/[^0-9]/g, '').slice(0, 5) : '00000';
-        const rand4 = Math.floor(1000 + Math.random() * 9000);
-        const tempEmail = `${cleanSlug}_${zip5 !== '00000' ? zip5 : rand4}_${rand4}@presetup.perkfinity.net`;
+        const cleanSlug = (data.business_name || 'store').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 18) || 'merchant';
+        let tempEmail = `${cleanSlug}@presetup.net`;
+        const [existingUser] = await sql`SELECT 1 FROM "MerchantUser" WHERE email = ${tempEmail} LIMIT 1`;
+        if (existingUser) {
+          let counter = 2;
+          while (counter <= 50) {
+            const candidate = `${cleanSlug}${counter}@presetup.net`;
+            const [dup] = await sql`SELECT 1 FROM "MerchantUser" WHERE email = ${candidate} LIMIT 1`;
+            if (!dup) {
+              tempEmail = candidate;
+              break;
+            }
+            counter++;
+          }
+          if (counter > 50) {
+            const rand2 = Math.floor(10 + Math.random() * 90);
+            tempEmail = `${cleanSlug}${rand2}@presetup.net`;
+          }
+        }
 
         const nameCap = cleanSlug.charAt(0).toUpperCase() + cleanSlug.slice(1);
         const tempPassword = `${nameCap}2026!`;
