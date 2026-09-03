@@ -4506,6 +4506,177 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
     }
 
+    // ── DELETE /api/v1/admin/merchants/presetup/:id ───────────────
+    if (method === 'DELETE' && url.startsWith('/api/v1/admin/merchants/presetup/')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      const merchantId = url.split('/api/v1/admin/merchants/presetup/')[1];
+      if (!merchantId) return send(res, 400, { success: false, error: 'Merchant ID is required' });
+
+      try {
+        const [merchant] = await sql`
+          SELECT id, business_name, is_presetup, is_claimed FROM "Merchant" WHERE id = ${merchantId} LIMIT 1
+        `;
+        if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+        if (!merchant.is_presetup) return send(res, 400, { success: false, error: 'Not a pre-setup merchant' });
+        if (merchant.is_claimed) {
+          return send(res, 400, { success: false, error: 'Cannot delete claimed merchant account from pre-setup pipeline. Manage under active merchants.' });
+        }
+
+        // Full Cascade Cleanup across 6 tables
+        await sql`DELETE FROM "ContractorMerchantAttribution" WHERE merchant_id = ${merchantId}`;
+        await sql`DELETE FROM "QrCode" WHERE merchant_id = ${merchantId}`;
+        await sql`DELETE FROM "Campaign" WHERE merchant_id = ${merchantId}`;
+        await sql`DELETE FROM "MerchantLocation" WHERE merchant_id = ${merchantId}`;
+        await sql`DELETE FROM "MerchantUser" WHERE merchant_id = ${merchantId}`;
+        await sql`DELETE FROM "Merchant" WHERE id = ${merchantId}`;
+
+        return send(res, 200, {
+          success: true,
+          message: `Pre-setup merchant "${merchant.business_name}" permanently deleted.`
+        });
+      } catch (err) {
+        console.error('Error deleting pre-setup merchant:', err);
+        return send(res, 500, { success: false, error: 'Failed to delete pre-setup merchant: ' + err.message });
+      }
+    }
+
+    // ── PUT /api/v1/admin/merchants/presetup/:id ──────────────────
+    if (method === 'PUT' && url.startsWith('/api/v1/admin/merchants/presetup/')) {
+      if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      const merchantId = url.split('/api/v1/admin/merchants/presetup/')[1];
+      if (!merchantId) return send(res, 400, { success: false, error: 'Merchant ID is required' });
+
+      const data = req.body || {};
+      try {
+        const [merchant] = await sql`
+          SELECT id, business_name, is_presetup FROM "Merchant" WHERE id = ${merchantId} LIMIT 1
+        `;
+        if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
+        if (!merchant.is_presetup) return send(res, 400, { success: false, error: 'Not a pre-setup merchant' });
+
+        const sanitizeImgUrl = (u) => {
+          if (!u || typeof u !== 'string') return null;
+          const trimmed = u.trim();
+          if (!trimmed) return null;
+          if (trimmed.startsWith('http://')) return trimmed.replace(/^http:\/\//i, 'https://');
+          return trimmed;
+        };
+
+        let detectedPlatform = null;
+        if (data.review_url) {
+          const rLower = data.review_url.toLowerCase();
+          if (rLower.includes('yelp')) detectedPlatform = 'Yelp';
+          else if (rLower.includes('google') || rLower.includes('g.page') || rLower.includes('maps.app.goo.gl')) detectedPlatform = 'Google';
+          else if (rLower.includes('instagram.com') || rLower.includes('instagr.am')) detectedPlatform = 'Instagram';
+          else if (rLower.includes('facebook.com') || rLower.includes('fb.me') || rLower.includes('fb.com')) detectedPlatform = 'Facebook';
+          else if (rLower.includes('tiktok.com')) detectedPlatform = 'TikTok';
+          else if (rLower.includes('twitter.com') || rLower.includes('x.com')) detectedPlatform = 'X';
+          else if (rLower.includes('youtube.com') || rLower.includes('youtu.be')) detectedPlatform = 'YouTube';
+          else if (rLower.includes('linkedin.com')) detectedPlatform = 'LinkedIn';
+          else if (rLower.includes('pinterest.com') || rLower.includes('pin.it')) detectedPlatform = 'Pinterest';
+          else if (rLower.includes('threads.net')) detectedPlatform = 'Threads';
+          else if (rLower.includes('nextdoor.com')) detectedPlatform = 'Nextdoor';
+          else if (rLower.includes('tripadvisor')) detectedPlatform = 'TripAdvisor';
+          else if (rLower.includes('trustpilot')) detectedPlatform = 'Trustpilot';
+          else if (rLower.includes('bbb.org')) detectedPlatform = 'BBB';
+        }
+
+        const addressVal = data.address ? data.address.trim() : null;
+        const cityVal = data.city ? data.city.trim() : null;
+        const stateVal = data.state ? data.state.trim().toUpperCase() : null;
+        const postalCodeVal = (data.zip && data.zip.trim()) ? data.zip.trim() : null;
+        const isMultiLoc = !addressVal;
+        const memberLimit = data.member_limit !== undefined ? (parseInt(data.member_limit) || 50) : undefined;
+        const isHidden = data.is_hidden !== undefined ? !!data.is_hidden : undefined;
+        const isWebSponsor = data.is_web_sponsored !== undefined ? !!data.is_web_sponsored : undefined;
+        const isAppSponsor = data.is_app_sponsored !== undefined ? !!data.is_app_sponsored : undefined;
+        const isFullpageSponsor = data.is_fullpage_sponsored !== undefined ? !!data.is_fullpage_sponsored : undefined;
+
+        // 1. Update Merchant
+        await sql`
+          UPDATE "Merchant" SET
+            business_name = COALESCE(${data.business_name ? data.business_name.trim() : null}, business_name),
+            business_category = COALESCE(${data.business_category || null}, business_category),
+            welcome_offer_text = COALESCE(${data.welcome_offer_text ? data.welcome_offer_text.trim() : null}, welcome_offer_text),
+            contact_name = COALESCE(${data.contact_name ? data.contact_name.trim() : null}, contact_name),
+            phone = ${data.phone ? data.phone.trim() : null},
+            public_phone = ${data.public_phone ? data.public_phone.trim() : null},
+            public_email = ${data.public_email ? data.public_email.trim().toLowerCase() : null},
+            website = ${data.website ? data.website.trim() : ''},
+            review_url = ${data.review_url ? data.review_url.trim() : null},
+            rating_platform = ${detectedPlatform},
+            order_url = ${data.order_url ? data.order_url.trim() : null},
+            logo_url = ${sanitizeImgUrl(data.logo_url)},
+            cover_photo_url = ${sanitizeImgUrl(data.cover_photo_url)},
+            promo_description = ${data.promo_description || null},
+            is_multi_location = ${isMultiLoc},
+            member_limit = COALESCE(${memberLimit}, member_limit),
+            is_hidden = COALESCE(${isHidden}, is_hidden),
+            is_web_sponsored = COALESCE(${isWebSponsor}, is_web_sponsored),
+            is_app_sponsored = COALESCE(${isAppSponsor}, is_app_sponsored),
+            is_fullpage_sponsored = COALESCE(${isFullpageSponsor}, is_fullpage_sponsored),
+            updated_at = NOW()
+          WHERE id = ${merchantId}
+        `;
+
+        // 2. Update Location
+        const [loc] = await sql`SELECT id FROM "MerchantLocation" WHERE merchant_id = ${merchantId} LIMIT 1`;
+        if (loc) {
+          await sql`
+            UPDATE "MerchantLocation" SET
+              address = ${addressVal},
+              city = ${cityVal},
+              state = ${stateVal},
+              postal_code = ${postalCodeVal},
+              is_active = true
+            WHERE id = ${loc.id}
+          `;
+        } else {
+          await sql`
+            INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, is_active, created_at)
+            VALUES (gen_random_uuid()::text, ${merchantId}, ${addressVal}, ${cityVal}, ${stateVal}, ${postalCodeVal}, 'US', true, NOW())
+          `;
+        }
+
+        // 3. Update Welcome Campaign
+        if (data.welcome_offer_text) {
+          await sql`
+            UPDATE "Campaign" SET
+              title = ${data.welcome_offer_text.trim()},
+              terms = COALESCE(${data.terms ? data.terms.trim() : null}, terms),
+              updated_at = NOW()
+            WHERE merchant_id = ${merchantId} AND campaign_type = 'initial'
+          `;
+        }
+
+        // 4. Update Sales Rep Attribution
+        if (data.contractor_id !== undefined) {
+          if (data.contractor_id && String(data.contractor_id).trim() !== '') {
+            const [ctr] = await sql`SELECT id FROM "Contractor" WHERE id = ${data.contractor_id} LIMIT 1`;
+            if (ctr) {
+              await sql`
+                INSERT INTO "ContractorMerchantAttribution" (
+                  id, contractor_id, merchant_id, source, created_at, updated_at
+                ) VALUES (
+                  gen_random_uuid()::text, ${ctr.id}, ${merchantId}, 'presetup', NOW(), NOW()
+                )
+                ON CONFLICT (merchant_id) DO UPDATE SET contractor_id = ${ctr.id}, updated_at = NOW()
+              `;
+            }
+          } else {
+            await sql`DELETE FROM "ContractorMerchantAttribution" WHERE merchant_id = ${merchantId}`;
+          }
+        }
+
+        return send(res, 200, { success: true, message: 'Pre-setup merchant updated successfully' });
+      } catch (err) {
+        console.error('Error updating pre-setup merchant:', err);
+        return send(res, 500, { success: false, error: 'Failed to update pre-setup merchant: ' + err.message });
+      }
+    }
+
     // ── GET /api/v1/admin/members ────────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/members')) {
       const members = await sql`
