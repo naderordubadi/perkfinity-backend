@@ -7117,6 +7117,30 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
     }
 
+    // One-time cleanup for duplicate Family Tree pre-setups (2 and 3)
+    if (method === 'GET' && url === '/api/v1/admin/cleanup-duplicate-familytree') {
+      try {
+        const users = await sql`
+          SELECT merchant_id, email FROM "MerchantUser" 
+          WHERE email IN ('familytreeorthodon2@presetup.net', 'familytreeorthodon3@presetup.net')
+        `;
+        const deletedIds = [];
+        for (const u of users) {
+          const mid = u.merchant_id;
+          await sql`DELETE FROM "ContractorMerchantAttribution" WHERE merchant_id = ${mid}`;
+          await sql`DELETE FROM "QrCode" WHERE merchant_id = ${mid}`;
+          await sql`DELETE FROM "Campaign" WHERE merchant_id = ${mid}`;
+          await sql`DELETE FROM "MerchantLocation" WHERE merchant_id = ${mid}`;
+          await sql`DELETE FROM "MerchantUser" WHERE merchant_id = ${mid}`;
+          await sql`DELETE FROM "Merchant" WHERE id = ${mid}`;
+          deletedIds.push({ merchant_id: mid, email: u.email });
+        }
+        return send(res, 200, { success: true, deleted: deletedIds });
+      } catch (err) {
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
 
     // ══════════════════════════════════════════════════════════════
     // ENTERPRISE INQUIRY ENDPOINTS
