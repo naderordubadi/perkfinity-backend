@@ -2721,6 +2721,8 @@ Working this way is harder and more expensive. The actives still have to earn th
            m.welcome_offer_text,
            m.review_url,
            m.order_url,
+           m.public_phone,
+           m.public_email,
            m.is_fullpage_sponsored,
            m.fullpage_sponsored_until,
            m.promo_banner_url,
