@@ -4701,6 +4701,34 @@ Working this way is harder and more expensive. The actives still have to earn th
       });
     }
 
+    // ── GET /api/v1/admin/members/:id/merchants ───────────────────
+    // Returns the list of merchants joined by a specific member.
+    {
+      const memMerchantsMatch = url.match(/\/admin\/members\/([^/]+)\/merchants$/);
+      if (method === 'GET' && memMerchantsMatch) {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const memberId = memMerchantsMatch[1];
+        const merchants = await sql`
+          SELECT 
+            m.id, 
+            m.business_name, 
+            m.business_presence, 
+            m.subscription_tier, 
+            m.billing_status,
+            m.logo_url,
+            (SELECT ml.city FROM "MerchantLocation" ml WHERE ml.merchant_id = m.id AND ml.is_active = true LIMIT 1) as location_city,
+            (SELECT ml.postal_code FROM "MerchantLocation" ml WHERE ml.merchant_id = m.id AND ml.is_active = true LIMIT 1) as location_zip,
+            mm.created_at as joined_at,
+            mm.join_source
+          FROM "MerchantMember" mm
+          JOIN "Merchant" m ON m.id = mm.merchant_id
+          WHERE mm.user_id = ${memberId}
+          ORDER BY mm.created_at DESC
+        `;
+        return send(res, 200, { success: true, data: merchants });
+      }
+    }
+
     // ── GET /api/v1/admin/campaigns ──────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/campaigns')) {
       const campaigns = await sql`
