@@ -265,7 +265,13 @@ module.exports = async (req, res) => {
       case 'invoice.payment_succeeded': {
         const invoice = event.data.object;
         const customerId = invoice.customer;
-        const subscriptionId = invoice.subscription;
+        const subscriptionId = invoice.subscription
+          || invoice.parent?.subscription_details?.subscription
+          || invoice.lines?.data?.[0]?.parent?.subscription_item_details?.subscription
+          || null;
+
+        let isSponsorship = false;
+        let sponsorTier = null;
 
         // Find the merchant by stripe_customer_id
         const [merchant] = await sql`
@@ -286,16 +292,15 @@ module.exports = async (req, res) => {
 
         // If merchant is fully blocked (subscription was deleted) and has no active subscription attached,
         // do not unblock them just because an old invoice cleared.
-        if (merchant.account_blocked && !merchant.stripe_subscription_id) {
+        const activeSubId = subscriptionId || merchant.stripe_subscription_id;
+        if (merchant.account_blocked && !activeSubId) {
           console.log(`[Stripe] Late invoice cleared for permanently cancelled merchant ${merchant.id}. Keeping blocked status.`);
         } else {
-          let currentPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-          let isSponsorship = false;
-          let sponsorTier = null;
+          let currentPeriodEnd = null;
 
-          if (subscriptionId) {
+          if (activeSubId) {
             try {
-              const sub = await stripe.subscriptions.retrieve(subscriptionId);
+              const sub = await stripe.subscriptions.retrieve(activeSubId);
               const cpe = sub.current_period_end || sub.items?.data?.[0]?.current_period_end;
               if (cpe) {
                 currentPeriodEnd = new Date(cpe * 1000);
@@ -312,14 +317,22 @@ module.exports = async (req, res) => {
               console.error('Failed to fetch subscription for webhook:', e);
             }
           }
+
+          if (!currentPeriodEnd) {
+            const lineEnd = invoice.lines?.data?.[0]?.period?.end;
+            currentPeriodEnd = lineEnd
+              ? new Date(lineEnd * 1000)
+              : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+          }
+
           if (isSponsorship) {
             let updateSql;
             if (sponsorTier === 'bundle') {
-              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${currentPeriodEnd}, is_web_sponsored = true, web_sponsored_until = ${currentPeriodEnd}, stripe_bundle_sponsor_subscription_id = COALESCE(stripe_bundle_sponsor_subscription_id, ${subscriptionId}) WHERE id = ${merchant.id}`;
+              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${currentPeriodEnd}, is_web_sponsored = true, web_sponsored_until = ${currentPeriodEnd}, stripe_bundle_sponsor_subscription_id = COALESCE(stripe_bundle_sponsor_subscription_id, ${activeSubId}) WHERE id = ${merchant.id}`;
             } else if (sponsorTier === 'app') {
-              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${currentPeriodEnd}, stripe_app_sponsor_subscription_id = COALESCE(stripe_app_sponsor_subscription_id, ${subscriptionId}) WHERE id = ${merchant.id}`;
+              updateSql = sql`UPDATE "Merchant" SET is_app_sponsored = true, app_sponsored_until = ${currentPeriodEnd}, stripe_app_sponsor_subscription_id = COALESCE(stripe_app_sponsor_subscription_id, ${activeSubId}) WHERE id = ${merchant.id}`;
             } else if (sponsorTier === 'web') {
-              updateSql = sql`UPDATE "Merchant" SET is_web_sponsored = true, web_sponsored_until = ${currentPeriodEnd}, stripe_web_sponsor_subscription_id = COALESCE(stripe_web_sponsor_subscription_id, ${subscriptionId}) WHERE id = ${merchant.id}`;
+              updateSql = sql`UPDATE "Merchant" SET is_web_sponsored = true, web_sponsored_until = ${currentPeriodEnd}, stripe_web_sponsor_subscription_id = COALESCE(stripe_web_sponsor_subscription_id, ${activeSubId}) WHERE id = ${merchant.id}`;
             }
             if (updateSql) await updateSql;
             console.log(`[Stripe] Sponsorship invoice paid for merchant ${merchant.id}, tier: ${sponsorTier}`);
@@ -340,6 +353,17 @@ module.exports = async (req, res) => {
         }
 
         const revenueType = isSponsorship ? 'sponsorship' : 'platform';
+        const linePeriod = invoice.lines?.data?.[0]?.period;
+        const periodStart = linePeriod?.start
+          ? new Date(linePeriod.start * 1000)
+          : (invoice.period_start ? new Date(invoice.period_start * 1000) : null);
+        const periodEnd = linePeriod?.end
+          ? new Date(linePeriod.end * 1000)
+          : (invoice.period_end ? new Date(invoice.period_end * 1000) : null);
+        const paidAtDate = invoice.status_transitions?.paid_at
+          ? new Date(invoice.status_transitions.paid_at * 1000)
+          : new Date();
+
         // Record in Invoice table
         await sql`
           INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
@@ -350,13 +374,13 @@ module.exports = async (req, res) => {
             ${invoice.amount_paid ?? 0},
             ${invoice.currency || 'usd'},
             'paid',
-            ${invoice.period_start ? new Date(invoice.period_start * 1000) : null},
-            ${invoice.period_end ? new Date(invoice.period_end * 1000) : null},
-            NOW(),
+            ${periodStart},
+            ${periodEnd},
+            ${paidAtDate},
             NOW(),
             ${revenueType}
           )
-          ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = ${revenueType}
+          ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = ${paidAtDate}, period_start = ${periodStart}, period_end = ${periodEnd}, revenue_type = ${revenueType}
         `;
 
         // Start commission if there's an active attribution waiting for the first payment
