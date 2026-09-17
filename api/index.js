@@ -118,6 +118,18 @@ function checkSignupRateLimit(req) {
   return { allowed: true };
 }
 
+// ── Welcome Promo Code Generator ─────────────────────────────
+// Generates a clean, hyphen-free promo code (max 10 chars) formatted as
+// HI + first word of brand name (e.g. HISTEMTREE, HISATTVA, HIJTP).
+// Strictly alphanumeric to guarantee universal POS/Stripe interoperability.
+function generateWelcomePromoCode(businessName) {
+  if (!businessName || !businessName.trim()) return 'HI';
+  const words = businessName.trim().split(/\s+/);
+  const targetWord = (words[0].toLowerCase() === 'the' && words[1]) ? words[1] : words[0];
+  const cleanWord = targetWord.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+  return 'HI' + cleanWord;
+}
+
 // ── Stripe price ID maps ─────────────────────────────────────
 // Central helper so all billing paths (checkout, admin approval,
 // reactivate, auto-charge) resolve the correct Stripe price in one place.
@@ -580,7 +592,7 @@ module.exports = async function handler(req, res) {
 
       // Auto-generate welcome promo code for online merchants only
       const welcomePromoCode = presence === 'online'
-        ? 'HELLO-' + data.name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12)
+        ? generateWelcomePromoCode(data.name)
         : null;
 
       // Admin promo code validation → member_limit / tier
@@ -714,7 +726,7 @@ module.exports = async function handler(req, res) {
         if (!data[f]) return send(res, 400, { success: false, error: `${f} is required` });
       }
 
-      // Both Online and Hybrid: backend auto-generates HELLO-[BRANDNAME] as the welcome promo code.
+      // Both Online and Hybrid: backend auto-generates HI[BRANDNAME] as the welcome promo code.
       // No separate welcome_campaign_promo field needed from the frontend.
 
       // Hybrid single-location: address is required
@@ -732,8 +744,8 @@ module.exports = async function handler(req, res) {
       const password_hash = await bcrypt.hash(data.password, 12);
       const now = new Date();
 
-      // Welcome promo code: HELLO-BRANDNAME (auto-generated system code for QR join flow)
-      const welcomePromoCode = 'HELLO-' + data.name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+      // Welcome promo code: HIBRANDNAME (auto-generated system code for QR join flow)
+      const welcomePromoCode = generateWelcomePromoCode(data.name);
 
       // Promo code validation (extended_trial only)
       let memberLimit = data.tier === 'online_starter' ? 500 : data.tier === 'online_growth' ? 2500 : null;
@@ -890,7 +902,7 @@ module.exports = async function handler(req, res) {
 
       const password_hash = await bcrypt.hash(data.password, 12);
       const now = new Date();
-      const welcomePromoCode = 'HELLO-' + data.name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+      const welcomePromoCode = generateWelcomePromoCode(data.name);
 
       let memberLimit = data.tier === 'online_starter' ? 500 : data.tier === 'online_growth' ? 2500 : null;
       let billingStartsAt = null;
@@ -4386,7 +4398,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         }
 
         // Auto-generate welcome promo code for presetup (same logic as hybrid signup)
-        const welcomePromoCode = 'HELLO-' + data.business_name.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+        const welcomePromoCode = generateWelcomePromoCode(data.business_name);
 
         // 1. Create Merchant
         const [merchant] = await sql`
