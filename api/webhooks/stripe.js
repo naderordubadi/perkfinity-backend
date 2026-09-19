@@ -337,7 +337,7 @@ module.exports = async (req, res) => {
             if (updateSql) await updateSql;
             console.log(`[Stripe] Sponsorship invoice paid for merchant ${merchant.id}, tier: ${sponsorTier}`);
           } else {
-            if (merchant.billing_cycle !== 'lifetime') {
+            if (merchant.billing_cycle !== 'lifetime' && merchant.subscription_tier !== 'free_for_life') {
               await sql`
                 UPDATE "Merchant"
                 SET billing_status = 'active',

@@ -4780,12 +4780,28 @@ Working this way is harder and more expensive. The actives still have to earn th
     // ── GET /api/v1/admin/billing ─────────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/billing')) {
       // Invoices with merchant names and billing details
-      const invoices = await sql`
-        SELECT i.*, m.business_name as merchant_name, m.subscription_tier, m.next_billing_date, m.billing_status, m.billing_cycle
+      const rawInvoices = await sql`
+        SELECT i.*, m.business_name as merchant_name, m.subscription_tier, m.next_billing_date as merchant_next_billing_date, 
+               m.billing_status, m.billing_cycle, m.web_sponsored_until, m.app_sponsored_until, m.fullpage_sponsored_until
         FROM "Invoice" i
         LEFT JOIN "Merchant" m ON m.id = i.merchant_id
         ORDER BY i.created_at DESC
       `;
+
+      const invoices = rawInvoices.map(inv => {
+        let computedNextBilling = null;
+        if (inv.revenue_type === 'pouf' || inv.billing_cycle === 'lifetime') {
+          computedNextBilling = null;
+        } else if (inv.revenue_type === 'sponsorship') {
+          computedNextBilling = inv.period_end || inv.web_sponsored_until || inv.app_sponsored_until || inv.fullpage_sponsored_until || null;
+        } else {
+          computedNextBilling = inv.period_end || inv.merchant_next_billing_date || null;
+        }
+        return {
+          ...inv,
+          next_billing_date: computedNextBilling
+        };
+      });
 
       // Billing stats from Merchant table (excluding Demo accounts)
       const [stats] = await sql`
