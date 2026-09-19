@@ -6435,6 +6435,70 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
     }
 
+    // ── GET /api/v1/stripe/invoice-receipt/:invoiceId ──────────────
+    const invoiceReceiptMatch = url.match(/^\/api\/v1\/stripe\/invoice-receipt\/([a-zA-Z0-9_.-]+)$/);
+    if (method === 'GET' && invoiceReceiptMatch) {
+      const invoiceId = invoiceReceiptMatch[1];
+      const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+      if (!STRIPE_KEY) {
+        return send(res, 500, { success: false, error: 'Stripe is not configured' });
+      }
+
+      const stripeClient = Stripe(STRIPE_KEY);
+
+      try {
+        let redirectUrl = null;
+
+        if (invoiceId.startsWith('in_')) {
+          const invoice = await stripeClient.invoices.retrieve(invoiceId);
+          redirectUrl = invoice.invoice_pdf || invoice.hosted_invoice_url;
+        } else if (invoiceId.startsWith('ch_') || invoiceId.startsWith('py_')) {
+          const charge = await stripeClient.charges.retrieve(invoiceId);
+          redirectUrl = charge.receipt_url;
+        } else if (invoiceId.startsWith('cs_')) {
+          const session = await stripeClient.checkout.sessions.retrieve(invoiceId, {
+            expand: ['invoice', 'payment_intent.latest_charge']
+          });
+          redirectUrl =
+            session.invoice?.invoice_pdf ||
+            session.invoice?.hosted_invoice_url ||
+            session.payment_intent?.latest_charge?.receipt_url ||
+            session.url;
+        } else {
+          try {
+            const invoice = await stripeClient.invoices.retrieve(invoiceId);
+            redirectUrl = invoice.invoice_pdf || invoice.hosted_invoice_url;
+          } catch (invErr) {
+            try {
+              const charge = await stripeClient.charges.retrieve(invoiceId);
+              redirectUrl = charge.receipt_url;
+            } catch (chErr) {
+              // Ignore fallback errors
+            }
+          }
+        }
+
+        if (redirectUrl) {
+          res.writeHead(302, { Location: redirectUrl });
+          return res.end();
+        }
+
+        if (req.headers.accept && req.headers.accept.includes('application/json')) {
+          return send(res, 404, { success: false, error: 'Receipt not found' });
+        }
+
+        res.writeHead(404, { 'Content-Type': 'text/html' });
+        return res.end(`<!DOCTYPE html><html><head><title>Receipt Not Available</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc;padding:20px;box-sizing:border-box;"><div style="text-align:center;background:white;padding:36px;border-radius:12px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);max-width:440px;width:100%;"><h2 style="color:#1e293b;margin:0 0 12px;font-size:20px;">Receipt Not Available</h2><p style="color:#64748b;font-size:14px;line-height:1.5;margin:0 0 20px;">A downloadable receipt is not available for this record (ID: <code>${invoiceId}</code>).</p><button onclick="window.close()" style="background:#5B3FA5;color:white;border:none;padding:8px 18px;border-radius:6px;font-weight:600;cursor:pointer;">Close Window</button></div></body></html>`);
+      } catch (err) {
+        console.error('Invoice receipt fetch error:', err);
+        if (req.headers.accept && req.headers.accept.includes('application/json')) {
+          return send(res, 404, { success: false, error: err.message || 'Receipt not found' });
+        }
+        res.writeHead(404, { 'Content-Type': 'text/html' });
+        return res.end(`<!DOCTYPE html><html><head><title>Receipt Error</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc;padding:20px;box-sizing:border-box;"><div style="text-align:center;background:white;padding:36px;border-radius:12px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);max-width:440px;width:100%;"><h2 style="color:#e11d48;margin:0 0 12px;font-size:20px;">Receipt Not Available</h2><p style="color:#64748b;font-size:14px;line-height:1.5;margin:0 0 20px;">${err.message || 'The requested invoice could not be retrieved.'}</p><button onclick="window.close()" style="background:#5B3FA5;color:white;border:none;padding:8px 18px;border-radius:6px;font-weight:600;cursor:pointer;">Close Window</button></div></body></html>`);
+      }
+    }
+
     // ── POST /api/v1/merchants/:id/cancel — Self-service cancel (Free For Life / no Stripe)
     const fflCancelMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/cancel$/);
     if (method === 'POST' && fflCancelMatch) {
