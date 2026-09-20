@@ -4141,13 +4141,50 @@ Working this way is harder and more expensive. The actives still have to earn th
       if (!repW9) return send(res, 404, { success: false, error: 'Not found.' });
       if (repW9.stripe_onboarding_status !== 'complete')
         return send(res, 200, { success: true, gated: true, message: 'Complete Stripe onboarding to view earnings.' });
-      const repPayoutsAll = await sql`SELECT status, total_cents, commission_cents, retainer_cents FROM "ContractorPayout" WHERE contractor_id = ${repId}`;
-      const total_earned_cents = repPayoutsAll.reduce((s, p) => s + (p.total_cents || 0), 0);
-      const pending_cents = repPayoutsAll.filter(p => p.status === 'pending' || p.status === 'approved').reduce((s, p) => s + (p.total_cents || 0), 0);
-      const paid_cents = repPayoutsAll.filter(p => p.status === 'paid').reduce((s, p) => s + (p.total_cents || 0), 0);
+
       const [repRule] = await sql`SELECT commission_rate, commission_duration_months, retainer_cents FROM "ContractorCompensationRule" WHERE contractor_id = ${repId} LIMIT 1`;
       const defaultRule = { commission_rate: 0.25, commission_duration_months: 12, retainer_cents: 0 };
-      return send(res, 200, { success: true, gated: false, data: { total_earned_cents, pending_cents, paid_cents, rule: repRule || defaultRule } });
+      const rule = repRule || defaultRule;
+      const commRate = parseFloat(rule.commission_rate) || 0.25;
+
+      const repPayoutsAll = await sql`SELECT status, total_cents, commission_cents, retainer_cents, milestone_bonus_cents, retention_bonus_cents, special_bonus_cents FROM "ContractorPayout" WHERE contractor_id = ${repId}`;
+      const paid_cents = repPayoutsAll.filter(p => p.status === 'paid').reduce((s, p) => s + (p.total_cents || 0), 0);
+
+      // Real-time live commission from paid invoices for attributed merchants
+      const liveEarnedInvoices = await sql`
+        SELECT i.id, i.amount_cents, i.paid_at, i.merchant_id
+        FROM "Invoice" i
+        JOIN "ContractorMerchantAttribution" a ON a.merchant_id = i.merchant_id
+        JOIN "Merchant" m ON m.id = a.merchant_id
+        WHERE a.contractor_id = ${repId}
+          AND a.commission_start_date IS NOT NULL
+          AND i.status = 'paid'
+          AND i.amount_cents > 0
+          AND m.subscription_tier NOT IN ('free_for_life', 'trial', 'free')
+          AND (i.paid_at >= a.commission_start_date)
+          AND (a.commission_end_date IS NULL OR i.paid_at <= a.commission_end_date)
+      `;
+
+      const liveCommissionCents = liveEarnedInvoices.reduce((sum, inv) => sum + Math.round(inv.amount_cents * commRate), 0);
+
+      const specialBonuses = await sql`SELECT amount_cents FROM "ContractorSpecialBonus" WHERE contractor_id = ${repId}`;
+      const totalSpecialBonusCents = specialBonuses.reduce((s, b) => s + (b.amount_cents || 0), 0);
+
+      const milestoneRecords = await sql`
+        SELECT mc.bonus_cents 
+        FROM "ContractorMilestoneRecord" mr
+        JOIN "SystemMilestoneConfig" mc ON mc.id = mr.milestone_id
+        WHERE mr.contractor_id = ${repId}
+      `;
+      const totalMilestoneBonusCents = milestoneRecords.reduce((s, m) => s + m.bonus_cents, 0);
+
+      const total_earned_cents = Math.max(
+        liveCommissionCents + totalSpecialBonusCents + totalMilestoneBonusCents,
+        repPayoutsAll.reduce((s, p) => s + (p.total_cents || 0), 0)
+      );
+      const pending_cents = Math.max(0, total_earned_cents - paid_cents);
+
+      return send(res, 200, { success: true, gated: false, data: { total_earned_cents, pending_cents, paid_cents, rule } });
     }
 
     // ── GET /api/v1/rep/payouts ──────────────────────────────────
@@ -8397,19 +8434,19 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
     }
 
-    // ── POST /api/v1/admin/contractors/run-payouts ────────────────────
+    // ── POST /api/v1/admin/contractors/calculate-payouts / run-payouts ────────
     // Manual payout calculation trigger (same algorithm as the monthly cron).
-    if (method === 'POST' && url.endsWith('/admin/contractors/run-payouts')) {
+    if (method === 'POST' && (url.endsWith('/admin/contractors/run-payouts') || url.endsWith('/admin/contractors/calculate-payouts'))) {
       if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
       const rpInput = req.body || {};
       let rpStart, rpEnd;
       if (rpInput.period_start && rpInput.period_end) {
         rpStart = new Date(rpInput.period_start);
-        rpEnd   = new Date(rpInput.period_end);
+        rpEnd   = new Date(rpInput.period_end + (rpInput.period_end.length === 10 ? 'T23:59:59.999Z' : ''));
       } else {
         const rpNow = new Date();
         rpStart = new Date(rpNow.getFullYear(), rpNow.getMonth() - 1, 1);
-        rpEnd   = new Date(rpNow.getFullYear(), rpNow.getMonth(), 0);
+        rpEnd   = new Date(rpNow.getFullYear(), rpNow.getMonth(), 0, 23, 59, 59, 999);
       }
       const rpPs = rpStart.toISOString().slice(0, 10);
       const rpPe = rpEnd.toISOString().slice(0, 10);
@@ -8421,6 +8458,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         WHERE c.status = 'active'
       `;
       const rpResults = [];
+      const skipped = [];
       for (const rc of rpContractors) {
         const rpAttrs = await sql`
           SELECT a.id, a.merchant_id, a.commission_start_date, a.commission_end_date, a.retention_bonuses_paid
@@ -8481,36 +8519,49 @@ Working this way is harder and more expensive. The actives still have to earn th
         const rpSpecCents = rpSpecBonuses.reduce((s, b) => s + b.amount_cents, 0);
         const rpRetainer = parseInt(rc.retainer_cents) || 0;
         const rpTotal = rpComm + rpRetainer + rpMilCents + rpRet + rpSpecCents;
-        if (rpTotal > 0 && rc.stripe_onboarding_status === 'complete') {
-          const [rpPayout] = await sql`
-            INSERT INTO "ContractorPayout" (
-              id, contractor_id, period_start, period_end,
-              commission_cents, retainer_cents, milestone_bonus_cents,
-              retention_bonus_cents, special_bonus_cents, total_cents,
-              breakdown, status, created_at, updated_at
-            ) VALUES (
-              gen_random_uuid()::text, ${rc.id}, ${rpPs}, ${rpPe},
-              ${rpComm}, ${rpRetainer}, ${rpMilCents},
-              ${rpRet}, ${rpSpecCents}, ${rpTotal},
-              ${JSON.stringify({ active_subscribers: rpSubCount, merchant_breakdown: rpMb, milestones: rpMilestones.map(mm => mm.label), special_bonuses: rpSpecBonuses.map(b => b.label) })},
-              'pending', NOW(), NOW()
-            ) RETURNING id
-          `;
-          for (const rpMs of rpMilestones) {
-            await sql`
-              INSERT INTO "ContractorMilestoneRecord" (id, contractor_id, milestone_id, payout_id, earned_at)
-              VALUES (gen_random_uuid()::text, ${rc.id}, ${rpMs.id}, ${rpPayout.id}, NOW())
-              ON CONFLICT (contractor_id, milestone_id) DO NOTHING
+        if (rpTotal > 0) {
+          if (rc.stripe_onboarding_status === 'complete') {
+            const [rpPayout] = await sql`
+              INSERT INTO "ContractorPayout" (
+                id, contractor_id, period_start, period_end,
+                commission_cents, retainer_cents, milestone_bonus_cents,
+                retention_bonus_cents, special_bonus_cents, total_cents,
+                breakdown, status, created_at, updated_at
+              ) VALUES (
+                gen_random_uuid()::text, ${rc.id}, ${rpPs}, ${rpPe},
+                ${rpComm}, ${rpRetainer}, ${rpMilCents},
+                ${rpRet}, ${rpSpecCents}, ${rpTotal},
+                ${JSON.stringify({ active_subscribers: rpSubCount, merchant_breakdown: rpMb, milestones: rpMilestones.map(mm => mm.label), special_bonuses: rpSpecBonuses.map(b => b.label) })},
+                'pending', NOW(), NOW()
+              ) RETURNING id
             `;
+            for (const rpMs of rpMilestones) {
+              await sql`
+                INSERT INTO "ContractorMilestoneRecord" (id, contractor_id, milestone_id, payout_id, earned_at)
+                VALUES (gen_random_uuid()::text, ${rc.id}, ${rpMs.id}, ${rpPayout.id}, NOW())
+                ON CONFLICT (contractor_id, milestone_id) DO NOTHING
+              `;
+            }
+            if (rpSpecBonuses.length > 0) {
+              const rpSpecIds = rpSpecBonuses.map(b => b.id);
+              await sql`UPDATE "ContractorSpecialBonus" SET status = 'paid', payout_id = ${rpPayout.id}, updated_at = NOW() WHERE id = ANY(${rpSpecIds})`;
+            }
+            rpResults.push({ contractor_id: rc.id, name: rc.full_name, payout_id: rpPayout.id, total_cents: rpTotal });
+          } else {
+            skipped.push({ id: rc.id, name: rc.full_name, reason: 'stripe_kyc_incomplete', total_cents: rpTotal });
           }
-          if (rpSpecBonuses.length > 0) {
-            const rpSpecIds = rpSpecBonuses.map(b => b.id);
-            await sql`UPDATE "ContractorSpecialBonus" SET status = 'paid', payout_id = ${rpPayout.id}, updated_at = NOW() WHERE id = ANY(${rpSpecIds})`;
-          }
-          rpResults.push({ contractor_id: rc.id, name: rc.full_name, payout_id: rpPayout.id, total_cents: rpTotal });
         }
       }
-      return send(res, 200, { success: true, data: { payouts_created: rpResults.length, period: `${rpPs} to ${rpPe}`, results: rpResults } });
+      return send(res, 200, {
+        success: true,
+        created: rpResults.length,
+        skipped,
+        data: {
+          payouts_created: rpResults.length,
+          period: `${rpPs} to ${rpPe}`,
+          results: rpResults
+        }
+      });
     }
     // ── PATCH /api/v1/admin/contractors/:id/manual-kyc ─────────────────
     // Manually marks the Stripe KYC process as complete (fallback).
