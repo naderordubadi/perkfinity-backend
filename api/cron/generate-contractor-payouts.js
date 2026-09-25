@@ -124,13 +124,14 @@ module.exports = async (req, res) => {
     const stripeSkippedReps = [];   // collect reps blocked by KYC gate for admin notification
 
     for (const rc of contractors) {
-      const durationMonths = parseInt(rc.commission_duration_months) || 12;
+      const isOngoing = rc.commission_duration_months === null || rc.commission_duration_months === undefined;
+      const durationMonths = isOngoing ? null : (parseInt(rc.commission_duration_months) || 12);
 
-      // Max annual invoices that earn commission:  12-month plan → 1,  24-month plan → 2
-      const maxAnnualCommPayments = Math.floor(durationMonths / 12);
+      // Max annual invoices that earn commission:  Ongoing → Infinity, 12-month plan → 1, 24-month plan → 2
+      const maxAnnualCommPayments = isOngoing ? Infinity : Math.floor(durationMonths / 12);
 
-      // Max retention bonuses — one per 12-month block (same denominator)
-      const maxRetentionBonuses   = Math.floor(durationMonths / 12);
+      // Max retention bonuses — one per 12-month block (unbounded if ongoing)
+      const maxRetentionBonuses   = isOngoing ? Infinity : Math.floor(durationMonths / 12);
 
       // ── Get attributed merchants whose commission window is open ───────────
       // Includes merchants where commission_end_date IS NULL (webhook pre-fix)
@@ -163,14 +164,14 @@ module.exports = async (req, res) => {
         const msStart      = new Date(ra.commission_start_date);
 
         // Effective commission end date — use DB value if set, otherwise calculate
-        // dynamically from commission_start_date + duration for pre-fix attributions.
+        // dynamically from commission_start_date + duration for pre-fix attributions (or null for ongoing).
         const effectiveEndDate = ra.commission_end_date
           ? new Date(ra.commission_end_date)
-          : (() => {
+          : (isOngoing ? null : (() => {
               const d = new Date(msStart);
               d.setMonth(d.getMonth() + durationMonths);
               return d;
-            })();
+            })());
 
         // ── Get invoices paid in this period ───────────────────────────────
         const allInvs = await sql`
@@ -200,14 +201,6 @@ module.exports = async (req, res) => {
         const invTotal = allInvs.reduce((s, i) => s + i.amount_cents, 0);
 
         // ── For annual merchants: count total paid invoices since commission start ──
-        // Fetched only when the merchant has a paid invoice this period because:
-        //   (a) annual merchants pay once per year, so invTotal > 0 is the signal
-        //       that a relevant billing event occurred this month;
-        //   (b) the count is used only for commission cap and retention checks,
-        //       both of which also require invTotal > 0 to fire.
-        // This means if no annual invoice arrived this period, totalAnnualInvoicesPaid
-        // stays 0 and all commission/retention checks are safely skipped via the
-        // `if (invTotal > 0)` guard below.
         let totalAnnualInvoicesPaid = 0;
         if ((billingCycle === 'annual' || billingCycle === 'lifetime') && invTotal > 0) {
           const [annRow] = await sql`
@@ -226,12 +219,11 @@ module.exports = async (req, res) => {
 
         if (invs.length > 0) {
           if (billingCycle === 'annual' || billingCycle === 'lifetime') {
-            // Annual/Lifetime: only pay commission for invoices within the agreed renewal count.
-            // Subtract the 1 event from this period to get the milestone count BEFORE this period
+            // Annual/Lifetime: only pay commission for invoices within the agreed renewal count (or unlimited if ongoing).
             let pastAnnualInvoicesCount = totalAnnualInvoicesPaid - 1;
             if (pastAnnualInvoicesCount < 0) pastAnnualInvoicesCount = 0;
             
-            if (pastAnnualInvoicesCount < maxAnnualCommPayments) {
+            if (isOngoing || pastAnnualInvoicesCount < maxAnnualCommPayments) {
               for (const inv of invs) {
                 inv._calcComm = Math.round(inv.amount_cents * parseFloat(rc.commission_rate));
                 merchantComm += inv._calcComm;
@@ -239,9 +231,8 @@ module.exports = async (req, res) => {
               }
             }
           } else {
-            // Monthly: standard commission on any invoice within the commission window.
-            // The effectiveEndDate guards merchants whose window closed this period.
-            if (periodEnd <= effectiveEndDate) {
+            // Monthly: standard commission on any invoice within the commission window (or unlimited if ongoing).
+            if (!effectiveEndDate || periodEnd <= effectiveEndDate) {
               for (const inv of invs) {
                 inv._calcComm = Math.round(inv.amount_cents * parseFloat(rc.commission_rate));
                 merchantComm += inv._calcComm;
@@ -259,39 +250,24 @@ module.exports = async (req, res) => {
 
         if (billingCycle === 'annual') {
           // Annual retention bonus fires at each annual renewal (invoice count milestone).
-          // Only check when there is an invoice in this period (the renewal invoice itself).
           if (invs.length > 0) {
             const baseAnnualInvoice = validInvTotal;
             const mosElapsed = calendarMonthsElapsed(msStart, periodEnd);
-            // 1st annual renewal = 2nd paid invoice (year 2 payment)
-            // Time-gated to >= 11 months to prevent duplicate payments triggering it
-            if (totalAnnualInvoicesPaid >= 2 && mosElapsed >= 11 && newRetPaid < 1 && maxRetentionBonuses >= 1) {
+            const targetMilestone = newRetPaid + 1;
+            if (totalAnnualInvoicesPaid >= (targetMilestone + 1) && mosElapsed >= (targetMilestone * 12 - 1) && (isOngoing || newRetPaid < maxRetentionBonuses)) {
               // Retention amount = 1 month's equivalent (rate × annual_invoice / 12)
               merchantRetBonus += Math.round((baseAnnualInvoice / 12) * parseFloat(rc.commission_rate));
-              newRetPaid = 1;
-            }
-            // 2nd annual renewal = 3rd paid invoice (year 3 payment) — 24-month plan only
-            // Time-gated to >= 23 months to prevent duplicate payments triggering it
-            if (totalAnnualInvoicesPaid >= 3 && mosElapsed >= 23 && newRetPaid < 2 && maxRetentionBonuses >= 2) {
-              merchantRetBonus += Math.round((baseAnnualInvoice / 12) * parseFloat(rc.commission_rate));
-              newRetPaid = 2;
+              newRetPaid = targetMilestone;
             }
           }
         } else if (billingCycle === 'monthly') {
-          // Monthly: retention bonus fires at exactly 12 and 24 *calendar* months.
-          // Uses year/month component math — not a 30-day approximation.
+          // Monthly: retention bonus fires at every 12 calendar months (12, 24, 36, 48...).
           const mosElapsed = calendarMonthsElapsed(msStart, periodEnd);
-
           if (invs.length > 0) {
-            // 1st retention bonus — at 12 calendar months
-            if (mosElapsed >= 12 && newRetPaid < 1 && maxRetentionBonuses >= 1) {
+            const targetMilestone = newRetPaid + 1;
+            if (mosElapsed >= targetMilestone * 12 && (isOngoing || newRetPaid < maxRetentionBonuses)) {
               merchantRetBonus += Math.round(validInvTotal * parseFloat(rc.commission_rate));
-              newRetPaid = 1;
-            }
-            // 2nd retention bonus — at 24 calendar months (24-month plan only)
-            if (mosElapsed >= 24 && newRetPaid < 2 && maxRetentionBonuses >= 2) {
-              merchantRetBonus += Math.round(validInvTotal * parseFloat(rc.commission_rate));
-              newRetPaid = 2;
+              newRetPaid = targetMilestone;
             }
           }
         }

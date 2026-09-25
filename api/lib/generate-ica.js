@@ -173,34 +173,56 @@ function generateICAPdf(p) {
     divider();
 
     // ── 4. TERRITORY ────────────────────────────────────────────────────────
-    h2('4. Territory');
-    body(`4.1 Assignment. Subject to this Section, the Company assigns to the Contractor the exclusive sales territory consisting of the following ZIP codes ("Territory"): ${zips}.`);
-    body('4.2 Initial Exclusivity. From the Effective Date through the end of the Quota Period (Section 5), the Territory is assigned exclusively to the Contractor. No other contractor will be assigned to the same ZIP codes during this period, provided the Contractor is actively performing Services.');
-    body('4.3 Ongoing Exclusivity Upon Initial Quota Met. If the Contractor meets the Initial Quota (Section 5.1) by the end of the Initial Quota Period, the Territory remains exclusive to the Contractor subject to the Ongoing Maintenance Quota (Section 5.2). The Company will not assign another contractor to the same Territory as long as the Contractor meets all ongoing performance requirements.');
-    body('4.4 Quota Failure — Company Rights. If the Contractor fails to meet any Quota by the end of the respective Quota Period, the Territory\'s exclusive status expires automatically. The Company may, at its sole discretion: (a) Add one or more additional contractors to the same Territory; (b) Revoke the Contractor\'s Territory assignment entirely and assign it to a new contractor; or (c) Extend the Quota Period by a defined grace period and notify the Contractor in writing. The Company will notify the Contractor of its election in writing. The Contractor\'s right to commission on merchants already attributed prior to the quota deadline is not affected by this election.');
-    body('4.5 No Property Right. The Territory is a business management designation only. The Contractor acknowledges that the Territory does not constitute property, and the Company\'s rights under Section 4.4 are absolute upon quota failure.');
-    body('4.6 Attribution. Merchant attribution is determined by the referral code used during signup, not by Territory. If a Merchant in the Contractor\'s Territory signs up using another contractor\'s referral code, attribution follows the referral code.');
-    divider();
+    const hasTerritory = Array.isArray(p.territoryZips) && p.territoryZips.length > 0;
+    
+    if (hasTerritory) {
+      h2('4. Territory');
+      body(`4.1 Assignment. Subject to this Section, the Company assigns to the Contractor the exclusive sales territory consisting of the following ZIP codes ("Territory"): ${zips}.`);
+      body('4.2 Initial Exclusivity. From the Effective Date through the end of the Quota Period (Section 5), the Territory is assigned exclusively to the Contractor. No other contractor will be assigned to the same ZIP codes during this period, provided the Contractor is actively performing Services.');
+      body('4.3 Ongoing Exclusivity Upon Initial Quota Met. If the Contractor meets the Initial Quota (Section 5.1) by the end of the Initial Quota Period, the Territory remains exclusive to the Contractor subject to the Ongoing Maintenance Quota (Section 5.2). The Company will not assign another contractor to the same Territory as long as the Contractor meets all ongoing performance requirements.');
+      body('4.4 Quota Failure — Company Rights. If the Contractor fails to meet any Quota by the end of the respective Quota Period, the Territory\'s exclusive status expires automatically. The Company may, at its sole discretion: (a) Add one or more additional contractors to the same Territory; (b) Revoke the Contractor\'s Territory assignment entirely and assign it to a new contractor; or (c) Extend the Quota Period by a defined grace period and notify the Contractor in writing. The Company will notify the Contractor of its election in writing. The Contractor\'s right to commission on merchants already attributed prior to the quota deadline is not affected by this election.');
+      body('4.5 No Property Right. The Territory is a business management designation only. The Contractor acknowledges that the Territory does not constitute property, and the Company\'s rights under Section 4.4 are absolute upon quota failure.');
+      body('4.6 Attribution. Merchant attribution is determined by the referral code used during signup, not by Territory. If a Merchant in the Contractor\'s Territory signs up using another contractor\'s referral code, attribution follows the referral code.');
+      divider();
 
-    // ── 5. QUOTA ────────────────────────────────────────────────────────────
-    h2('5. Quota');
-    body(`5.1 Initial Quota Requirement. To earn ongoing exclusive rights to the Territory, the Contractor must onboard a minimum of ${initialQuota} active Merchants to the Perkfinity platform within the first 3 months following the Effective Date ("Initial Quota Period"). The Initial Quota Period begins on the Effective Date (${fmtDate(aggDate)}) and ends 3 calendar months later (${fmtDate(quotaEnd)}).`);
-    body(`5.2 Ongoing Maintenance Quota. Following the successful completion of the Initial Quota Period, the Contractor must maintain territory exclusivity by achieving a net increase of ${ongoingQuota} active Merchants in their portfolio every subsequent 3-month calendar period ("Ongoing Quota Period"). For example, if the Contractor finishes the Initial Quota Period with ${initialQuota} active Merchants, they must reach ${initialQuota + ongoingQuota} active Merchants by the end of month 6, ${initialQuota + ongoingQuota * 2} by month 9, and so forth.`);
-    body('5.3 "Active Merchant" means a Merchant that has completed signup on the Perkfinity platform, passed any applicable review, and holds an active, paying subscription as of the last day of the respective Quota Period.');
-    body('5.4 Quota Tracking. The Company will provide the Contractor with access to a dashboard showing their attributed Merchant count, the current target, and days remaining in the current Quota Period at any time.');
-    body(`5.5 Success — Rolling Lock-In. If the Contractor reaches the active Merchant target before or on the last day of any Quota Period, the Territory remains exclusive to them, and the target automatically rolls forward to the next 3-month milestone (+${ongoingQuota} Merchants).`);
-    body('5.6 Failure — Revocation of Exclusivity. If the Contractor fails to meet either the Initial Quota or any subsequent Ongoing Maintenance Quota by the end of the respective Quota Period, the Territory\'s exclusive status expires automatically and immediately. The Company may, at its sole discretion, revoke the Territory assignment entirely or assign additional contractors to the Territory. The Contractor will be notified in writing of the failure.');
-    body('5.7 Commissions Unaffected. Quota failure does not affect the Contractor\'s right to commission on Merchants attributed prior to the deadline. Commission continues to be paid per Section 6 for all attributed Merchants during their respective Commission Periods, even if territory exclusivity is revoked.');
-    divider();
+      // ── 5. QUOTA ────────────────────────────────────────────────────────────
+      h2('5. Quota');
+      body(`5.1 Initial Quota Requirement. To earn ongoing exclusive rights to the Territory, the Contractor must onboard a minimum of ${initialQuota} active Merchants to the Perkfinity platform within the first 3 months following the Effective Date ("Initial Quota Period"). The Initial Quota Period begins on the Effective Date (${fmtDate(aggDate)}) and ends 3 calendar months later (${fmtDate(quotaEnd)}).`);
+      body(`5.2 Ongoing Maintenance Quota. Following the successful completion of the Initial Quota Period, the Contractor must maintain territory exclusivity by achieving a net increase of ${ongoingQuota} active Merchants in their portfolio every subsequent 3-month calendar period ("Ongoing Quota Period"). For example, if the Contractor finishes the Initial Quota Period with ${initialQuota} active Merchants, they must reach ${initialQuota + ongoingQuota} active Merchants by the end of month 6, ${initialQuota + ongoingQuota * 2} by month 9, and so forth.`);
+      body('5.3 "Active Merchant" means a Merchant that has completed signup on the Perkfinity platform, passed any applicable review, and holds an active, paying subscription as of the last day of the respective Quota Period.');
+      body('5.4 Quota Tracking. The Company will provide the Contractor with access to a dashboard showing their attributed Merchant count, the current target, and days remaining in the current Quota Period at any time.');
+      body(`5.5 Success — Rolling Lock-In. If the Contractor reaches the active Merchant target before or on the last day of any Quota Period, the Territory remains exclusive to them, and the target automatically rolls forward to the next 3-month milestone (+${ongoingQuota} Merchants).`);
+      body('5.6 Failure — Revocation of Exclusivity. If the Contractor fails to meet either the Initial Quota or any subsequent Ongoing Maintenance Quota by the end of the respective Quota Period, the Territory\'s exclusive status expires automatically and immediately. The Company may, at its sole discretion, revoke the Territory assignment entirely or assign additional contractors to the Territory. The Contractor will be notified in writing of the failure.');
+      body('5.7 Commissions Unaffected. Quota failure does not affect the Contractor\'s right to commission on Merchants attributed prior to the deadline. Commission continues to be paid per Section 6 for all attributed Merchants during their respective Commission Periods, even if territory exclusivity is revoked.');
+      divider();
+    } else {
+      h2('4. Territory (Non-Exclusive)');
+      body('4.1 Non-Exclusive Engagement. The Company engages the Contractor on a non-exclusive, open-market basis. The Contractor is authorized to solicit, market to, and onboard prospective Merchants in any open geographical market using their designated unique Referral Code.');
+      body('4.2 Open Market. The Contractor acknowledges that they hold no exclusive claim or rights over any specific geographical area, city, or ZIP code. The Company may engage other contractors, partners, or internal marketing channels in any region.');
+      body('4.3 Attribution. Merchant attribution is determined solely by the unique referral code used during merchant registration, in accordance with Section 2 and Section 6.');
+      divider();
+
+      h2('5. Quotas and Performance');
+      body('5.1 No Minimum Quota. As a non-exclusive sales representative, the Contractor is not subject to a minimum merchant onboarding quota to maintain active contractor status. Compensation is determined strictly by performance and actual revenues collected from attributed Merchants pursuant to Section 6.');
+      divider();
+    }
 
     // ── 6. COMPENSATION ─────────────────────────────────────────────────────
     h2('6. Compensation');
     
     const rateVal = Number(p.commissionRate) || 0;
     const displayRate = (rateVal <= 1 ? rateVal * 100 : rateVal).toFixed(2).replace(/\.00$/, '');
-    body(`6.1 Commission. The Company will pay the Contractor a commission of ${displayRate}% of all net revenues—including core platform subscription fees and recurring add-on services (such as Carousel Ad Sponsorships, VIP Takeovers, and promotional upgrades)—collected from each attributed Merchant for a period of ${p.commissionDurationMonths} months from the date of the Merchant's first successful payment ("Commission Period").`);
+    const isOngoing = p.commissionDurationMonths === null || p.commissionDurationMonths === undefined || p.commissionDurationMonths === '' || p.commissionDurationMonths === 'ongoing';
+
+    if (isOngoing) {
+      body(`6.1 Commission. The Company will pay the Contractor a commission of ${displayRate}% of all net revenues—including core platform subscription fees and recurring add-on services (such as Carousel Ad Sponsorships, VIP Takeovers, and promotional upgrades)—collected from each attributed Merchant for as long as the Contractor remains active and in good standing under this Agreement and the attributed Merchant maintains an active, paying subscription on the platform ("Commission Period").`);
+    } else {
+      body(`6.1 Commission. The Company will pay the Contractor a commission of ${displayRate}% of all net revenues—including core platform subscription fees and recurring add-on services (such as Carousel Ad Sponsorships, VIP Takeovers, and promotional upgrades)—collected from each attributed Merchant for a period of ${p.commissionDurationMonths} months from the date of the Merchant's first successful payment ("Commission Period").`);
+    }
     
-    let sec6Num = 2;
+    body(`6.2 Active Service Accrual Condition. Commissions accrue on a monthly basis solely upon the Company's actual receipt and settlement of collected subscription revenues from attributed Merchants, and only during periods in which the Contractor is actively under contract with the Company and in full compliance with this Agreement.`);
+
+    let sec6Num = 3;
     if (Number(retainer) > 0) {
       body(`6.${sec6Num++} Monthly Retainer. The Company will pay the Contractor a monthly retainer of $${retainer} ("Retainer"), payable on or around the 1st of each calendar month, subject to the Contractor being in good standing under this Agreement.`);
     }
@@ -255,8 +277,8 @@ function generateICAPdf(p) {
     body('10.3 Effect of Termination. Upon termination:');
     bullet([
       'The Contractor will cease performing Services and representing Perkfinity immediately',
-      'Commissions earned prior to termination on existing attributed Merchants will continue to be paid for the remainder of each Merchant\'s active Commission Period, provided the Contractor has a verified W-9 on file',
-      'The Contractor\'s Territory assignment ends immediately',
+      'All rights to future, trailing, or unaccrued commissions, ongoing commissions, retention bonuses, and milestone bonuses on attributed Merchants immediately cease as of the effective date of termination. Only commissions on revenues collected and fully settled by the Company prior to the effective date of termination will be paid, subject to verified W-9 compliance',
+      'The Contractor\'s Territory assignment (if any) ends immediately',
       'All Confidential Information must be returned or destroyed',
     ]);
     body('10.4 Survival. Sections 7 (Confidentiality), 8 (Non-Solicitation), 9 (Intellectual Property), and 14 (Governing Law) survive termination.');

@@ -275,6 +275,45 @@ model ContractorMerchantAttribution {
   @@schema("public")
 }
 
+model ContractorCompensationRule {
+  id                         String    @id @default(uuid())
+  contractor_id              String    @unique
+  commission_rate            Decimal   @default(0.25) @db.Decimal(5, 4)
+  commission_duration_months Int?      @default(12)
+  retainer_cents             Int       @default(0)
+  created_at                 DateTime  @default(now())
+  updated_at                 DateTime  @updatedAt
+
+  @@schema("public")
+}
+
+model ContractorTerritory {
+  id            String    @id @default(uuid())
+  contractor_id String
+  label         String
+  zip_codes     String[]  @default([])
+  status        String    @default("active")
+  assigned_at   DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  @@schema("public")
+}
+
+model ContractorQuotaPeriod {
+  id            String    @id @default(uuid())
+  contractor_id String    @unique
+  period_start  DateTime  @db.Date
+  period_end    DateTime  @db.Date
+  quota_target  Int       @default(30)
+  status        String    @default("active")
+  alert_sent    Boolean   @default(false)
+  locked_at     DateTime?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  @@schema("public")
+}
+
 // ─── Enterprise Schema ────────────────────────────────────────────────────────
 // Tables live in the "enterprise" PostgreSQL schema, separate from "public".
 // Inquiry data is captured from enterprise.html before a contract is signed.

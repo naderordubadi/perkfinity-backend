@@ -4028,21 +4028,23 @@ Working this way is harder and more expensive. The actives still have to earn th
             updated_at = NOW()
         WHERE id = ${ctr.id}
       `;
-      // Auto-start quota period if not already running
-      const [qExisting] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${ctr.id} LIMIT 1`;
-      if (!qExisting) {
-        const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${ctr.id} AND status = 'active' LIMIT 1`;
-        const numZips = terr && Array.isArray(terr.zip_codes) && terr.zip_codes.length > 0 ? terr.zip_codes.length : 1;
-        const initialQuota = Math.max(20, numZips * 10);
-        
-        await sql`
-          INSERT INTO "ContractorQuotaPeriod"
-            (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
-          VALUES
-            (gen_random_uuid()::text, ${ctr.id}, CURRENT_DATE,
-             CURRENT_DATE + INTERVAL '3 months', ${initialQuota}, 'active', NOW(), NOW())
-        `;
-        console.log(`[sign-ica] Quota period auto-started for contractor ${ctr.id} with target ${initialQuota}`);
+      // Auto-start quota period ONLY IF contractor has an assigned active territory
+      const [terr] = await sql`SELECT zip_codes FROM "ContractorTerritory" WHERE contractor_id = ${ctr.id} AND status = 'active' LIMIT 1`;
+      if (terr && Array.isArray(terr.zip_codes) && terr.zip_codes.length > 0) {
+        const [qExisting] = await sql`SELECT id FROM "ContractorQuotaPeriod" WHERE contractor_id = ${ctr.id} LIMIT 1`;
+        if (!qExisting) {
+          const numZips = terr.zip_codes.length;
+          const initialQuota = Math.max(20, numZips * 10);
+          
+          await sql`
+            INSERT INTO "ContractorQuotaPeriod"
+              (id, contractor_id, period_start, period_end, quota_target, status, created_at, updated_at)
+            VALUES
+              (gen_random_uuid()::text, ${ctr.id}, CURRENT_DATE,
+               CURRENT_DATE + INTERVAL '3 months', ${initialQuota}, 'active', NOW(), NOW())
+          `;
+          console.log(`[sign-ica] Quota period auto-started for contractor ${ctr.id} with target ${initialQuota}`);
+        }
       }
       // Notify admin
       try {
@@ -4054,7 +4056,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           sender:      { name: 'Perkfinity System', email: 'support@perkfinity.net' },
           to:          [{ email: 'support@perkfinity.net', name: 'Admin' }],
           subject:     `✅ ICA Fully Signed — ${ctr.full_name}`,
-          htmlContent: `<h2>ICA Fully Executed</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) has electronically signed their ICA via the Rep Portal. Their quota period has been automatically started.</p>`,
+          htmlContent: `<h2>ICA Fully Executed</h2><p><strong>${ctr.full_name}</strong> (${ctr.email}) has electronically signed their ICA via the Rep Portal.</p>`,
         });
       } catch (emailErr) {
         console.error('[sign-ica] Admin notification email failed:', emailErr.message);
@@ -4099,8 +4101,8 @@ Working this way is harder and more expensive. The actives still have to earn th
         stripeBusinessType: stripeBusinessType,
         agreementDate: ctr.ica_status === 'signed' ? ctr.updated_at : new Date(),
         territoryZips: terr && terr.zip_codes ? terr.zip_codes : [], 
-        commissionRate: ctr.commission_rate || 15,
-        commissionDurationMonths: ctr.commission_duration_months || 12,
+        commissionRate: ctr.commission_rate != null ? ctr.commission_rate : 25,
+        commissionDurationMonths: ctr.commission_duration_months !== undefined ? ctr.commission_duration_months : null,
         retainerAmount: (ctr.retainer_cents || 0) / 100,
         isSigned: ctr.ica_status === 'signed',
         signatureName: ctr.full_name,
@@ -7709,11 +7711,12 @@ Working this way is harder and more expensive. The actives still have to earn th
         id                         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
         contractor_id              TEXT NOT NULL UNIQUE REFERENCES "Contractor"(id),
         commission_rate            NUMERIC(5,4) NOT NULL DEFAULT 0.25,
-        commission_duration_months INT          NOT NULL DEFAULT 12,
+        commission_duration_months INT          DEFAULT 12,
         retainer_cents             INT          NOT NULL DEFAULT 0,
         created_at                 TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
         updated_at                 TIMESTAMPTZ  NOT NULL DEFAULT NOW()
       )`;
+      await sql`ALTER TABLE "ContractorCompensationRule" ALTER COLUMN commission_duration_months DROP NOT NULL;`.catch(() => {});
       await sql`CREATE TABLE IF NOT EXISTS "ContractorMerchantAttribution" (
         id                     TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
         contractor_id          TEXT NOT NULL REFERENCES "Contractor"(id),
@@ -7832,7 +7835,11 @@ Working this way is harder and more expensive. The actives still have to earn th
         created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
-      return send(res, 200, { success: true, message: 'All 10 contractor tables up to date: password_hash, entity_type, ContractorTerritory, ContractorQuotaPeriod added.' });
+      // Idempotent: allow NULL commission_duration_months for ongoing agreements
+      try {
+        await sql`ALTER TABLE "ContractorCompensationRule" ALTER COLUMN commission_duration_months DROP NOT NULL`;
+      } catch (_) {}
+      return send(res, 200, { success: true, message: 'All contractor tables up to date: password_hash, entity_type, ContractorTerritory, ContractorQuotaPeriod, nullable duration added.' });
     }
 
     // ── GET /api/v1/contractors/validate-code?code=REP-XXXXX ──────────
@@ -8025,13 +8032,28 @@ Working this way is harder and more expensive. The actives still have to earn th
       `;
       if (ncData.commission_rate !== undefined || ncData.commission_duration_months !== undefined || ncData.retainer_cents !== undefined) {
         const ncRate = Math.min(Math.max(parseFloat(ncData.commission_rate) || 0.25, 0), 0.50);
-        const ncDur = Math.min(Math.max(parseInt(ncData.commission_duration_months) || 12, 1), 24);
+        const isOngoing = ncData.commission_duration_months === null || ncData.commission_duration_months === undefined || ncData.commission_duration_months === '' || ncData.commission_duration_months === 'ongoing';
+        const ncDur = isOngoing ? null : Math.max(parseInt(ncData.commission_duration_months) || 1, 1);
         const ncRet = Math.max(parseInt(ncData.retainer_cents) || 0, 0);
         await sql`
           INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, created_at, updated_at)
           VALUES (gen_random_uuid()::text, ${ncContractor.id}, ${ncRate}, ${ncDur}, ${ncRet}, NOW(), NOW())
           ON CONFLICT (contractor_id) DO UPDATE SET commission_rate=${ncRate}, commission_duration_months=${ncDur}, retainer_cents=${ncRet}, updated_at=NOW()
         `;
+      }
+      // If territory was specified upon creation, assign it
+      if (ncData.territory_label && Array.isArray(ncData.territory_zips) && ncData.territory_zips.length > 0) {
+        const cleanZips = ncData.territory_zips.map(z => String(z).trim()).filter(Boolean);
+        if (cleanZips.length > 0) {
+          try {
+            await sql`
+              INSERT INTO "ContractorTerritory" (id, contractor_id, label, zip_codes, status, assigned_at, updated_at)
+              VALUES (gen_random_uuid()::text, ${ncContractor.id}, ${ncData.territory_label.trim()}, ${cleanZips}, 'active', NOW(), NOW())
+            `;
+          } catch (terrErr) {
+            console.error('[admin/contractors] Territory assignment error on create:', terrErr.message);
+          }
+        }
       }
       return send(res, 201, { success: true, data: ncContractor });
     }
@@ -8275,7 +8297,8 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
         const compData = req.body || {};
         const compRate = Math.min(Math.max(parseFloat(compData.commission_rate) || 0.25, 0), 0.50);
-        const compDur  = Math.min(Math.max(parseInt(compData.commission_duration_months) || 12, 1), 24);
+        const isOngoing = compData.commission_duration_months === null || compData.commission_duration_months === undefined || compData.commission_duration_months === '' || compData.commission_duration_months === 'ongoing';
+        const compDur  = isOngoing ? null : Math.max(parseInt(compData.commission_duration_months) || 1, 1);
         const compRet  = Math.max(parseInt(compData.retainer_cents) || 0, 0);
         const [compRule] = await sql`
           INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, created_at, updated_at)
@@ -8737,8 +8760,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           contractorEmail: ctr.email,
           agreementDate: ctr.ica_status === 'signed' ? ctr.updated_at : new Date(),
           territoryZips: terr && terr.zip_codes ? terr.zip_codes : [], 
-          commissionRate: ctr.commission_rate || 15,
-          commissionDurationMonths: ctr.commission_duration_months || 12,
+          commissionRate: ctr.commission_rate != null ? ctr.commission_rate : 25,
+          commissionDurationMonths: ctr.commission_duration_months !== undefined ? ctr.commission_duration_months : null,
           retainerAmount: (ctr.retainer_cents || 0) / 100,
           isSigned: ctr.ica_status === 'signed',
           signatureName: ctr.full_name,
