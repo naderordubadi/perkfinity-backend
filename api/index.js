@@ -879,20 +879,34 @@ module.exports = async function handler(req, res) {
     // with application_status='in_progress'. Auto-logs the merchant in.
     if (method === 'POST' && url.endsWith('/merchants/apply-create-account')) {
       const data = req.body || {};
-      const applyPresence = (data.business_presence || 'online').toLowerCase();
-      if (!['online', 'hybrid'].includes(applyPresence)) {
-        return send(res, 400, { success: false, error: 'business_presence must be online or hybrid.' });
+      const rawPresence = (data.business_presence || 'hybrid').toLowerCase();
+      if (!['physical', 'mobile', 'online', 'hybrid', 'multiloc'].includes(rawPresence)) {
+        return send(res, 400, { success: false, error: 'Invalid business_presence. Must be physical, mobile, online, hybrid, or multiloc.' });
       }
-      const isHybridApply = applyPresence === 'hybrid';
-      const isMultiLocation = data.is_multi_location === true;
 
-      const required = ['name', 'website', 'category', 'welcome_offer_text', 'tier', 'email', 'password', 'contactName'];
+      const isMultiLocation = rawPresence === 'multiloc' || data.is_multi_location === true;
+      let applyPresence = rawPresence === 'multiloc' ? 'hybrid' : rawPresence;
+
+      // Auto-hybrid promotion: if physical or mobile business provides a website, promote to hybrid
+      if (['physical', 'mobile'].includes(rawPresence) && data.website && data.website.trim().length > 3) {
+        applyPresence = 'hybrid';
+      }
+
+      const isHybridApply = applyPresence === 'hybrid';
+
+      // Core required fields for all business types
+      const required = ['name', 'category', 'welcome_offer_text', 'tier', 'email', 'password', 'contactName'];
+      if (['online', 'hybrid'].includes(applyPresence)) {
+        required.push('website');
+      }
       for (const f of required) {
         if (!data[f]) return send(res, 400, { success: false, error: `${f} is required` });
       }
-      if (isHybridApply && !isMultiLocation) {
+
+      // Address validation: required for storefront locations (physical only or storefront hybrid)
+      if ((rawPresence === 'physical' || rawPresence === 'hybrid') && !isMultiLocation) {
         if (!data.address || !data.city || !data.state || !data.zip) {
-          return send(res, 400, { success: false, error: 'Address fields are required for single-location hybrid.' });
+          return send(res, 400, { success: false, error: 'Address fields are required for storefront locations.' });
         }
       }
 
@@ -940,14 +954,14 @@ module.exports = async function handler(req, res) {
         customer = await stripeClient.customers.create({
           name: data.name,
           email: email,
-          metadata: { source: isHybridApply ? 'hybrid_application' : 'online_brand_application' }
+          metadata: { source: `${applyPresence}_application` }
         });
       }
 
       const billingCycleValue2 = data.billing_cycle === 'annual' ? 'annual' : 'monthly';
 
       let coverPhotoUrl2 = null;
-      if (data.website && ['online', 'hybrid'].includes(applyPresence)) {
+      if (data.website && data.website.trim().length > 3) {
         coverPhotoUrl2 = await fetchOpenGraphImage(data.website);
       }
 
@@ -962,7 +976,7 @@ module.exports = async function handler(req, res) {
         ) VALUES (
           gen_random_uuid()::text, ${data.name}, ${data.contactName || ''}, ${data.phone || ''},
           ${data.public_phone ? data.public_phone.trim() : null}, ${data.public_email ? data.public_email.trim().toLowerCase() : null},
-          ${data.website}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
+          ${data.website || null}, ${applyPresence}, ${welcomePromoCode}, ${data.welcome_offer_text},
           ${data.tier}, ${memberLimit}, ${promoCode}, 'active', null,
           'in_progress', ${data.category},
           ${billingStartsAt}, ${isMultiLocation},
@@ -978,9 +992,12 @@ module.exports = async function handler(req, res) {
         RETURNING id
       `;
 
-      if (isHybridApply && !isMultiLocation) {
+      if ((applyPresence === 'physical' || isHybridApply) && !isMultiLocation) {
         await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
           VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})`;
+      } else if (rawPresence === 'mobile') {
+        await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', ${data.city || null}, ${data.state || 'CA'}, ${data.zip || null}, 'US', true, ${now})`;
       } else {
         await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
           VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', NULL, NULL, NULL, 'US', true, ${now})`;
@@ -5552,7 +5569,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
           FROM "Merchant" m
           LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
-          WHERE m.business_presence IN ('online', 'hybrid') AND m.application_status IS NOT NULL
+          WHERE m.application_status IS NOT NULL
           ORDER BY m.created_at DESC
         `;
       } else {
@@ -5567,8 +5584,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
           FROM "Merchant" m
           LEFT JOIN "MerchantUser" mu ON mu.merchant_id = m.id AND mu.role = 'owner'
-          WHERE m.business_presence IN ('online', 'hybrid')
-            AND m.application_status = ${statusFilter}
+          WHERE m.application_status = ${statusFilter}
           ORDER BY m.created_at DESC
         `;
       }

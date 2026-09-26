@@ -44,6 +44,24 @@ model Merchant {
   business_presence String?            @default("in_person")
   business_category String?
   welcome_offer_text String?
+  welcome_promo_code String?
+  promo_code        String?
+  pos_system        String?
+  onboarding_complete Boolean          @default(false)
+  account_blocked   Boolean            @default(false)
+  promo_banner_url  String?
+  rating_score      String?
+  rating_count      String?
+  rating_platform   String?
+  application_notes String?
+  member_cap_notified Boolean          @default(false)
+  cap_block_count   Int                @default(0)
+  payment_failed_at DateTime?
+  payment_failure_reminder_count Int   @default(0)
+  cancelled_at      DateTime?
+  declined_at       DateTime?
+  subscription_started_at DateTime?
+  next_billing_date DateTime?
   is_multi_location Boolean            @default(false)
   status            String             @default("active")
   is_hidden         Boolean            @default(false)
@@ -95,6 +113,7 @@ model MerchantLocation {
   merchant      Merchant   @relation(fields: [merchant_id], references: [id])
   location_name String?
   address       String?
+  suite         String?
   city          String?
   state         String?
   postal_code   String?
