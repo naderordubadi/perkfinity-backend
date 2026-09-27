@@ -4797,6 +4797,33 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
     }
 
+    // ── GET /api/v1/admin/merchants/:id/members ───────────────────
+    // Returns the list of members who joined a specific merchant program.
+    {
+      const merchMembersMatch = url.match(/\/admin\/merchants\/([^/]+)\/members$/);
+      if (method === 'GET' && merchMembersMatch) {
+        if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
+        const merchantId = merchMembersMatch[1];
+        const members = await sql`
+          SELECT 
+            u.id, 
+            u.full_name, 
+            u.email, 
+            u.phone_number as phone, 
+            u.city, 
+            u.zip_code as zip, 
+            u.device_platform,
+            mm.created_at as joined_at,
+            mm.join_source
+          FROM "MerchantMember" mm
+          JOIN "User" u ON u.id = mm.user_id
+          WHERE mm.merchant_id = ${merchantId}
+          ORDER BY mm.created_at DESC
+        `;
+        return send(res, 200, { success: true, data: members });
+      }
+    }
+
     // ── GET /api/v1/admin/campaigns ──────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/campaigns')) {
       const campaigns = await sql`
