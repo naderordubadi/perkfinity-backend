@@ -2053,7 +2053,7 @@ Working this way is harder and more expensive. The actives still have to earn th
 
           let joinSource = 'qr_scan';
           try {
-            const urlObj = new URL(url, 'http://localhost');
+            const urlObj = new URL(req.url || '', 'http://localhost');
             if (urlObj.searchParams.get('source') === 'app_discovery') {
               joinSource = 'app_discovery';
             }
