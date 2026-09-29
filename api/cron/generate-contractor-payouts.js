@@ -114,7 +114,8 @@ module.exports = async (req, res) => {
     // Stripe onboarding status is checked later — we calculate first, then gate payout creation.
     const contractors = await sql`
       SELECT c.id, c.full_name, c.stripe_onboarding_status,
-             r.commission_rate, r.commission_duration_months, r.retainer_cents
+             r.commission_rate, r.commission_duration_months, r.retainer_cents,
+             COALESCE(r.signup_bonus_cents, 0)::int AS signup_bonus_cents
       FROM "Contractor" c
       JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
       WHERE c.status = 'active'
@@ -142,7 +143,9 @@ module.exports = async (req, res) => {
                a.commission_start_date,
                a.commission_end_date,
                a.retention_bonuses_paid,
-               m.billing_cycle
+               COALESCE(a.signup_bonus_paid, false) AS signup_bonus_paid,
+               m.billing_cycle,
+               m.business_name
         FROM "ContractorMerchantAttribution" a
         JOIN "Merchant" m ON m.id = a.merchant_id
         WHERE a.contractor_id = ${rc.id}
@@ -152,12 +155,12 @@ module.exports = async (req, res) => {
             a.commission_end_date IS NULL
             OR a.commission_end_date::date >= ${psDate}
           )
-          AND m.subscription_tier NOT IN ('free_for_life', 'trial', 'free')
       `;
 
-      let commCents    = 0;
-      let retBonusCents = 0;
-      const mBreakdown = [];
+      let commCents        = 0;
+      let retBonusCents    = 0;
+      let signupBonusCents = 0;
+      const mBreakdown     = [];
 
       for (const ra of attrs) {
         const billingCycle = ra.billing_cycle || 'monthly';
@@ -244,6 +247,20 @@ module.exports = async (req, res) => {
 
         commCents += merchantComm;
 
+        // ── Fast-Start Signup Bonus (Triggers on first paid invoice: core plan or add-on upgrade) ──
+        let merchantSignupBonus = 0;
+        let newSignupPaid       = ra.signup_bonus_paid;
+        if (!newSignupPaid && rc.signup_bonus_cents > 0 && invs.length > 0) {
+          merchantSignupBonus = parseInt(rc.signup_bonus_cents) || 0;
+          signupBonusCents   += merchantSignupBonus;
+          newSignupPaid       = true;
+          await sql`
+            UPDATE "ContractorMerchantAttribution"
+            SET signup_bonus_paid = true, updated_at = NOW()
+            WHERE id = ${ra.id}
+          `;
+        }
+
         // ── Retention bonus ────────────────────────────────────────────────
         let merchantRetBonus = 0;
         let newRetPaid       = parseInt(ra.retention_bonuses_paid) || 0;
@@ -283,30 +300,35 @@ module.exports = async (req, res) => {
           `;
         }
 
-        if (invs.length > 0 && (merchantComm > 0 || merchantRetBonus > 0)) {
+        if (invs.length > 0 && (merchantComm > 0 || merchantRetBonus > 0 || merchantSignupBonus > 0)) {
           for (let i = 0; i < invs.length; i++) {
             const inv = invs[i];
-            const hasComm = inv._calcComm && inv._calcComm > 0;
-            const hasRet  = i === 0 && merchantRetBonus > 0;
-            if (hasComm || hasRet) {
+            const hasComm   = inv._calcComm && inv._calcComm > 0;
+            const hasRet    = i === 0 && merchantRetBonus > 0;
+            const hasSignup = i === 0 && merchantSignupBonus > 0;
+            if (hasComm || hasRet || hasSignup) {
               mBreakdown.push({
                 merchant_id:      ra.merchant_id,
+                merchant_name:    ra.business_name,
                 invoice_id:       inv.id,
                 billing_cycle:    billingCycle,
                 invoice_total:    inv.amount_cents,
                 commission:       inv._calcComm || 0,
                 retention_bonus:  hasRet ? merchantRetBonus : 0,
+                signup_bonus:     hasSignup ? merchantSignupBonus : 0,
               });
             }
           }
-        } else if (merchantRetBonus > 0) {
+        } else if (merchantRetBonus > 0 || merchantSignupBonus > 0) {
           mBreakdown.push({
             merchant_id:      ra.merchant_id,
+            merchant_name:    ra.business_name,
             invoice_id:       null,
             billing_cycle:    billingCycle,
             invoice_total:    0,
             commission:       0,
             retention_bonus:  merchantRetBonus,
+            signup_bonus:     merchantSignupBonus,
           });
         }
       }
@@ -348,7 +370,7 @@ module.exports = async (req, res) => {
       const specCents = specBonuses.reduce((s, b) => s + b.amount_cents, 0);
 
       const retainerCents = parseInt(rc.retainer_cents) || 0;
-      const totalCents    = commCents + retainerCents + milCents + retBonusCents + specCents;
+      const totalCents    = commCents + retainerCents + milCents + retBonusCents + signupBonusCents + specCents;
 
       // ── Create payout record — only if something is owed AND Stripe KYC is complete ─
       if (totalCents > 0 && rc.stripe_onboarding_status === 'complete') {
@@ -356,12 +378,12 @@ module.exports = async (req, res) => {
           INSERT INTO "ContractorPayout" (
             id, contractor_id, period_start, period_end,
             commission_cents, retainer_cents, milestone_bonus_cents,
-            retention_bonus_cents, special_bonus_cents, total_cents,
+            retention_bonus_cents, signup_bonus_cents, special_bonus_cents, total_cents,
             breakdown, status, created_at, updated_at
           ) VALUES (
             gen_random_uuid()::text, ${rc.id}, ${psDate}, ${peDate},
             ${commCents}, ${retainerCents}, ${milCents},
-            ${retBonusCents}, ${specCents}, ${totalCents},
+            ${retBonusCents}, ${signupBonusCents}, ${specCents}, ${totalCents},
             ${JSON.stringify({
               active_subscribers: subCount,
               merchant_breakdown: mBreakdown,

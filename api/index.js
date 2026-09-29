@@ -4087,7 +4087,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       const repId = verifyRepAuth(req);
       if (!repId) return send(res, 401, { success: false, error: 'Unauthorized' });
       const [ctr] = await sql`
-        SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents
+        SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents, COALESCE(r.signup_bonus_cents, 0)::int AS signup_bonus_cents
         FROM "Contractor" c
         LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
         WHERE c.id = ${repId} LIMIT 1
@@ -4121,6 +4121,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         commissionRate: ctr.commission_rate != null ? ctr.commission_rate : 25,
         commissionDurationMonths: ctr.commission_duration_months !== undefined ? ctr.commission_duration_months : null,
         retainerAmount: (ctr.retainer_cents || 0) / 100,
+        signupBonusAmount: (ctr.signup_bonus_cents || 0) / 100,
         isSigned: ctr.ica_status === 'signed',
         signatureName: ctr.full_name,
         companySignatory: ctr.ica_company_signatory,
@@ -7756,10 +7757,12 @@ Working this way is harder and more expensive. The actives still have to earn th
         commission_rate            NUMERIC(5,4) NOT NULL DEFAULT 0.25,
         commission_duration_months INT          DEFAULT 12,
         retainer_cents             INT          NOT NULL DEFAULT 0,
+        signup_bonus_cents         INT          NOT NULL DEFAULT 0,
         created_at                 TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
         updated_at                 TIMESTAMPTZ  NOT NULL DEFAULT NOW()
       )`;
       await sql`ALTER TABLE "ContractorCompensationRule" ALTER COLUMN commission_duration_months DROP NOT NULL;`.catch(() => {});
+      await sql`ALTER TABLE "ContractorCompensationRule" ADD COLUMN IF NOT EXISTS signup_bonus_cents INT NOT NULL DEFAULT 0;`.catch(() => {});
       await sql`CREATE TABLE IF NOT EXISTS "ContractorMerchantAttribution" (
         id                     TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
         contractor_id          TEXT NOT NULL REFERENCES "Contractor"(id),
@@ -7767,10 +7770,12 @@ Working this way is harder and more expensive. The actives still have to earn th
         commission_start_date  DATE,
         commission_end_date    DATE,
         retention_bonuses_paid INT  NOT NULL DEFAULT 0,
+        signup_bonus_paid      BOOLEAN NOT NULL DEFAULT false,
         source                 TEXT NOT NULL DEFAULT 'self',
         created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
+      await sql`ALTER TABLE "ContractorMerchantAttribution" ADD COLUMN IF NOT EXISTS signup_bonus_paid BOOLEAN NOT NULL DEFAULT false;`.catch(() => {});
       await sql`CREATE TABLE IF NOT EXISTS "ContractorPayout" (
         id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
         contractor_id         TEXT NOT NULL REFERENCES "Contractor"(id),
@@ -7780,6 +7785,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         retainer_cents        INT  NOT NULL DEFAULT 0,
         milestone_bonus_cents INT  NOT NULL DEFAULT 0,
         retention_bonus_cents INT  NOT NULL DEFAULT 0,
+        signup_bonus_cents    INT  NOT NULL DEFAULT 0,
         special_bonus_cents   INT  NOT NULL DEFAULT 0,
         total_cents           INT  NOT NULL DEFAULT 0,
         breakdown             JSONB,
@@ -7792,6 +7798,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
+      await sql`ALTER TABLE "ContractorPayout" ADD COLUMN IF NOT EXISTS signup_bonus_cents INT NOT NULL DEFAULT 0;`.catch(() => {});
       await sql`CREATE TABLE IF NOT EXISTS "ContractorEarningsSummary" (
         id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
         contractor_id        TEXT NOT NULL REFERENCES "Contractor"(id),
@@ -8073,15 +8080,16 @@ Working this way is harder and more expensive. The actives still have to earn th
           NOW(), NOW()
         ) RETURNING id, full_name, legal_name, email, phone, address, referral_code, status, ica_status, stripe_onboarding_status, payment_method, notes, entity_type, created_at, updated_at
       `;
-      if (ncData.commission_rate !== undefined || ncData.commission_duration_months !== undefined || ncData.retainer_cents !== undefined) {
+      if (ncData.commission_rate !== undefined || ncData.commission_duration_months !== undefined || ncData.retainer_cents !== undefined || ncData.signup_bonus_cents !== undefined || ncData.signup_bonus_dollars !== undefined) {
         const ncRate = Math.min(Math.max(parseFloat(ncData.commission_rate) || 0.25, 0), 0.50);
         const isOngoing = ncData.commission_duration_months === null || ncData.commission_duration_months === undefined || ncData.commission_duration_months === '' || ncData.commission_duration_months === 'ongoing';
         const ncDur = isOngoing ? null : Math.max(parseInt(ncData.commission_duration_months) || 1, 1);
         const ncRet = Math.max(parseInt(ncData.retainer_cents) || 0, 0);
+        const ncSignupBonus = Math.max(parseInt(ncData.signup_bonus_cents) || (parseInt(ncData.signup_bonus_dollars) * 100) || 0, 0);
         await sql`
-          INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, created_at, updated_at)
-          VALUES (gen_random_uuid()::text, ${ncContractor.id}, ${ncRate}, ${ncDur}, ${ncRet}, NOW(), NOW())
-          ON CONFLICT (contractor_id) DO UPDATE SET commission_rate=${ncRate}, commission_duration_months=${ncDur}, retainer_cents=${ncRet}, updated_at=NOW()
+          INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, signup_bonus_cents, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${ncContractor.id}, ${ncRate}, ${ncDur}, ${ncRet}, ${ncSignupBonus}, NOW(), NOW())
+          ON CONFLICT (contractor_id) DO UPDATE SET commission_rate=${ncRate}, commission_duration_months=${ncDur}, retainer_cents=${ncRet}, signup_bonus_cents=${ncSignupBonus}, updated_at=NOW()
         `;
       }
       // If territory was specified upon creation, assign it
@@ -8105,7 +8113,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       if (method === 'GET' && url === '/api/v1/admin/contractors') {
         if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
         const lcList = await sql`
-          SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents,
+          SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents, COALESCE(r.signup_bonus_cents, 0)::int AS signup_bonus_cents,
             COUNT(DISTINCT me.id)::int AS attributed_merchants,
             COUNT(DISTINCT CASE WHEN a.commission_start_date IS NOT NULL AND me.id IS NOT NULL THEN a.merchant_id END)::int AS active_attributed,
             COALESCE(SUM(CASE WHEN p.status='paid' THEN p.total_cents ELSE 0 END)::int, 0) AS total_paid_cents
@@ -8114,7 +8122,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           LEFT JOIN "ContractorMerchantAttribution" a ON a.contractor_id = c.id
           LEFT JOIN "Merchant" me ON me.id = a.merchant_id AND me.business_name != '[Deleted]'
           LEFT JOIN "ContractorPayout" p ON p.contractor_id = c.id
-          GROUP BY c.id, r.commission_rate, r.commission_duration_months, r.retainer_cents
+          GROUP BY c.id, r.commission_rate, r.commission_duration_months, r.retainer_cents, r.signup_bonus_cents
           ORDER BY c.created_at DESC
         `;
         return send(res, 200, { success: true, data: lcList });
@@ -8126,7 +8134,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (m && method === 'GET') {
           if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
           const [gcRow] = await sql`
-            SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents
+            SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents, COALESCE(r.signup_bonus_cents, 0)::int AS signup_bonus_cents
             FROM "Contractor" c
             LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
             WHERE c.id = ${m[1]}
@@ -8135,7 +8143,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           // Fetch related data in parallel
           const [gcMerchants, gcBonuses, gcPayouts] = await Promise.all([
             sql`SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
-                       a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
+                       a.retention_bonuses_paid, COALESCE(a.signup_bonus_paid, false) AS signup_bonus_paid, a.source, a.created_at AS attributed_at,
                        me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
                        me.billing_status, me.contact_name, me.stripe_subscription_id, me.stripe_payment_method_id, me.member_limit, me.billing_cycle,
                        (SELECT COUNT(*) FROM "MerchantMember" WHERE merchant_id = me.id) AS member_count
@@ -8275,7 +8283,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (!mpPayout[0]) return send(res, 400, { success: false, error: 'Payout not approved or contractor Stripe KYC incomplete.' });
         const mp = mpPayout[0];
         const mpYear = new Date().getFullYear();
-        const mpBonusCents = mp.milestone_bonus_cents + mp.retention_bonus_cents + mp.special_bonus_cents;
+        const mpBonusCents = mp.milestone_bonus_cents + mp.retention_bonus_cents + (mp.signup_bonus_cents || 0) + mp.special_bonus_cents;
         await sql`
           INSERT INTO "ContractorEarningsSummary" (id, contractor_id, year, commission_ytd_cents, retainer_ytd_cents, bonus_ytd_cents, total_ytd_cents, updated_at)
           VALUES (gen_random_uuid()::text, ${mp.contractor_id}, ${mpYear}, ${mp.commission_cents}, ${mp.retainer_cents}, ${mpBonusCents}, ${mp.total_cents}, NOW())
@@ -8343,13 +8351,15 @@ Working this way is harder and more expensive. The actives still have to earn th
         const isOngoing = compData.commission_duration_months === null || compData.commission_duration_months === undefined || compData.commission_duration_months === '' || compData.commission_duration_months === 'ongoing';
         const compDur  = isOngoing ? null : Math.max(parseInt(compData.commission_duration_months) || 1, 1);
         const compRet  = Math.max(parseInt(compData.retainer_cents) || 0, 0);
+        const compSignupBonus = Math.max(parseInt(compData.signup_bonus_cents) || (parseInt(compData.signup_bonus_dollars) * 100) || 0, 0);
         const [compRule] = await sql`
-          INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, created_at, updated_at)
-          VALUES (gen_random_uuid()::text, ${m[1]}, ${compRate}, ${compDur}, ${compRet}, NOW(), NOW())
+          INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, signup_bonus_cents, created_at, updated_at)
+          VALUES (gen_random_uuid()::text, ${m[1]}, ${compRate}, ${compDur}, ${compRet}, ${compSignupBonus}, NOW(), NOW())
           ON CONFLICT (contractor_id) DO UPDATE SET
             commission_rate = ${compRate},
             commission_duration_months = ${compDur},
             retainer_cents = ${compRet},
+            signup_bonus_cents = ${compSignupBonus},
             updated_at = NOW()
           RETURNING *
         `;
@@ -8788,7 +8798,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (!verifyAdminAuth(req)) return send(res, 401, { success: false, error: 'Unauthorized' });
         const contractorId = m[1];
         const [ctr] = await sql`
-          SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents
+          SELECT c.*, r.commission_rate, r.commission_duration_months, r.retainer_cents, r.signup_bonus_cents
           FROM "Contractor" c
           LEFT JOIN "ContractorCompensationRule" r ON r.contractor_id = c.id
           WHERE c.id = ${contractorId} LIMIT 1
@@ -8806,6 +8816,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           commissionRate: ctr.commission_rate != null ? ctr.commission_rate : 25,
           commissionDurationMonths: ctr.commission_duration_months !== undefined ? ctr.commission_duration_months : null,
           retainerAmount: (ctr.retainer_cents || 0) / 100,
+          signupBonusAmount: (ctr.signup_bonus_cents || 0) / 100,
           isSigned: ctr.ica_status === 'signed',
           signatureName: ctr.full_name,
           companySignatory: ctr.ica_company_signatory,

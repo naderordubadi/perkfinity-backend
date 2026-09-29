@@ -288,6 +288,7 @@ model ContractorMerchantAttribution {
   commission_start_date  DateTime?
   commission_end_date    DateTime?
   retention_bonuses_paid Int       @default(0)
+  signup_bonus_paid      Boolean   @default(false)
   created_at             DateTime  @default(now())
   updated_at             DateTime  @updatedAt
 
@@ -300,6 +301,7 @@ model ContractorCompensationRule {
   commission_rate            Decimal   @default(0.25) @db.Decimal(5, 4)
   commission_duration_months Int?      @default(12)
   retainer_cents             Int       @default(0)
+  signup_bonus_cents         Int       @default(0)
   created_at                 DateTime  @default(now())
   updated_at                 DateTime  @updatedAt
 
@@ -329,6 +331,31 @@ model ContractorQuotaPeriod {
   locked_at     DateTime?
   created_at    DateTime  @default(now())
   updated_at    DateTime  @updatedAt
+
+  @@schema("public")
+}
+
+model ContractorPayout {
+  id                    String    @id @default(uuid())
+  contractor_id         String
+  period_start          DateTime  @db.Date
+  period_end            DateTime  @db.Date
+  commission_cents      Int       @default(0)
+  retainer_cents        Int       @default(0)
+  milestone_bonus_cents Int       @default(0)
+  retention_bonus_cents Int       @default(0)
+  signup_bonus_cents    Int       @default(0)
+  special_bonus_cents   Int       @default(0)
+  total_cents           Int       @default(0)
+  breakdown             Json?
+  status                String    @default("pending")
+  approved_by           String?
+  approved_at           DateTime?
+  payment_method        String?
+  payment_reference     String?
+  paid_at               DateTime?
+  created_at            DateTime  @default(now())
+  updated_at            DateTime  @updatedAt
 
   @@schema("public")
 }

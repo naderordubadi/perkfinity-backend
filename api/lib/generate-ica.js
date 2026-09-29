@@ -223,6 +223,11 @@ function generateICAPdf(p) {
     body(`6.2 Active Service Accrual Condition. Commissions accrue on a monthly basis solely upon the Company's actual receipt and settlement of collected subscription revenues from attributed Merchants, and only during periods in which the Contractor is actively under contract with the Company and in full compliance with this Agreement.`);
 
     let sec6Num = 3;
+    const signupBonus = Number(p.signupBonusAmount) || 0;
+    if (signupBonus > 0) {
+      body(`6.${sec6Num++} Fast-Start Signup Bonus. The Company will pay the Contractor a one-time Fast-Start Bonus of $${signupBonus.toFixed(2)} for each attributed Merchant upon the Merchant's first successful paid transaction (including core platform subscriptions or paid service upgrades), payable in accordance with the standard payment schedule in Section 6.`);
+    }
+
     if (Number(retainer) > 0) {
       body(`6.${sec6Num++} Monthly Retainer. The Company will pay the Contractor a monthly retainer of $${retainer} ("Retainer"), payable on or around the 1st of each calendar month, subject to the Contractor being in good standing under this Agreement.`);
     }
