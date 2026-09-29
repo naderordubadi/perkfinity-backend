@@ -2050,10 +2050,19 @@ Working this way is harder and more expensive. The actives still have to earn th
           const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
           const userId = decoded.userId;
           resolvedUserId = userId; // mark as successfully authenticated
+
+          let joinSource = 'qr_scan';
+          try {
+            const urlObj = new URL(url, 'http://localhost');
+            if (urlObj.searchParams.get('source') === 'app_discovery') {
+              joinSource = 'app_discovery';
+            }
+          } catch (_) {}
+
           // Auto-enroll the user into the merchant's member list if they aren't already
           await sql`
             INSERT INTO "MerchantMember" (id, merchant_id, user_id, join_source, created_at)
-            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, 'qr_scan', NOW())
+            VALUES (gen_random_uuid()::text, ${qrCode.merchant_id}, ${userId}, ${joinSource}, NOW())
             ON CONFLICT DO NOTHING
           `;
 
