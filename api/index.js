@@ -368,6 +368,53 @@ function send(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+function getBackendBaseUrl(req) {
+  const host = req?.headers?.['x-forwarded-host'] || req?.headers?.host;
+  const proto = req?.headers?.['x-forwarded-proto'] || 'https';
+  if (host && !host.includes('localhost')) {
+    return `${proto}://${host}`;
+  }
+  return 'https://perkfinity-backend.vercel.app';
+}
+
+function formatMerchantImages(merchant, req) {
+  if (!merchant || typeof merchant !== 'object') return merchant;
+  const baseUrl = getBackendBaseUrl(req);
+  const m = { ...merchant };
+  const merchantId = m.id || m.merchant_id;
+
+  if (merchantId) {
+    if (m.logo_url && typeof m.logo_url === 'string') {
+      const trimmed = m.logo_url.trim();
+      if (trimmed.startsWith('data:image/') || (!trimmed.startsWith('http://') && !trimmed.startsWith('https://'))) {
+        m.logo_url = `${baseUrl}/api/v1/merchants/${merchantId}/logo`;
+      } else {
+        m.logo_url = trimmed.replace('http://', 'https://');
+      }
+    }
+
+    if (m.cover_photo_url && typeof m.cover_photo_url === 'string') {
+      const trimmed = m.cover_photo_url.trim();
+      if (trimmed.startsWith('data:image/') || (!trimmed.startsWith('http://') && !trimmed.startsWith('https://'))) {
+        m.cover_photo_url = `${baseUrl}/api/v1/merchants/${merchantId}/cover`;
+      } else {
+        m.cover_photo_url = trimmed.replace('http://', 'https://');
+      }
+    }
+
+    if (m.promo_banner_url && typeof m.promo_banner_url === 'string') {
+      const trimmed = m.promo_banner_url.trim();
+      if (trimmed.startsWith('data:image/') || (!trimmed.startsWith('http://') && !trimmed.startsWith('https://'))) {
+        m.promo_banner_url = `${baseUrl}/api/v1/merchants/${merchantId}/banner`;
+      } else {
+        m.promo_banner_url = trimmed.replace('http://', 'https://');
+      }
+    }
+  }
+
+  return m;
+}
+
 async function fetchOpenGraphImage(targetUrl) {
   if (!targetUrl) return null;
   try {
@@ -1573,6 +1620,71 @@ Working this way is harder and more expensive. The actives still have to earn th
       return send(res, 200, { success: true, message: "DB table migrations strictly applied!" });
     }
 
+    // ── GET /api/v1/merchants/:id/(cover|banner|logo) ─────────────
+    const merchantImgMatch = url.match(/^\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/(cover|banner|logo)$/);
+    if (method === 'GET' && merchantImgMatch) {
+      const merchantId = merchantImgMatch[1];
+      const imgType = merchantImgMatch[2];
+
+      try {
+        let row;
+        if (imgType === 'cover') {
+          [row] = await sql`SELECT cover_photo_url as img_data FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+        } else if (imgType === 'banner') {
+          [row] = await sql`SELECT promo_banner_url as img_data FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+        } else {
+          [row] = await sql`SELECT logo_url as img_data FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
+        }
+
+        if (!row || !row.img_data) {
+          res.statusCode = 404;
+          res.setHeader('Cache-Control', 'public, max-age=60');
+          return res.end('Image not found');
+        }
+
+        const rawVal = row.img_data.trim();
+
+        // If it's an external URL (http/https), redirect
+        if (rawVal.startsWith('http://') || rawVal.startsWith('https://')) {
+          res.writeHead(302, {
+            'Location': rawVal,
+            'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400'
+          });
+          return res.end();
+        }
+
+        // Base64 data URI or raw base64 string
+        let mimeType = 'image/jpeg';
+        let base64Payload = rawVal;
+
+        const dataUriMatch = rawVal.match(/^data:([^;]+);base64,(.*)$/s);
+        if (dataUriMatch) {
+          mimeType = dataUriMatch[1];
+          base64Payload = dataUriMatch[2];
+        }
+
+        const imgBuffer = Buffer.from(base64Payload, 'base64');
+        const etag = `"${crypto.createHash('md5').update(imgBuffer).digest('hex')}"`;
+
+        if (req.headers['if-none-match'] === etag) {
+          res.statusCode = 304;
+          return res.end();
+        }
+
+        res.statusCode = 200;
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Content-Length', imgBuffer.length);
+        res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400');
+        res.setHeader('ETag', etag);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        return res.end(imgBuffer);
+      } catch (imgErr) {
+        console.error('Image streaming error:', imgErr);
+        res.statusCode = 500;
+        return res.end('Internal server error');
+      }
+    }
+
     // ── GET /api/v1/merchants/sponsored ──────────────────────────────
     if (method === 'GET' && url.startsWith('/api/v1/merchants/sponsored')) {
       const qs = (req.url || '').split('?')[1] || '';
@@ -1626,7 +1738,9 @@ Working this way is harder and more expensive. The actives still have to earn th
           [sponsors[i], sponsors[j]] = [sponsors[j], sponsors[i]];
         }
 
-        return send(res, 200, { success: true, data: sponsors.slice(0, 8) });
+        res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+        const formattedSponsors = sponsors.slice(0, 8).map(s => formatMerchantImages(s, req));
+        return send(res, 200, { success: true, data: formattedSponsors });
       } catch (err) {
         console.error('Fetch sponsored merchants error:', err);
         return send(res, 500, { success: false, error: err.message });
@@ -1677,7 +1791,9 @@ Working this way is harder and more expensive. The actives still have to earn th
         ORDER BY m.business_name ASC
       `;
 
-      return send(res, 200, { success: true, zip, count: merchants.length, data: merchants });
+      res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+      const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
+      return send(res, 200, { success: true, zip, count: formattedMerchants.length, data: formattedMerchants });
     }
 
     // ── GET /api/v1/public/online-merchants — for /codes page ─────
@@ -1723,7 +1839,10 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC
         `;
       }
-      return send(res, 200, { success: true, count: merchants.length, data: merchants });
+
+      res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+      const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
+      return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
 
     // ── GET /api/v1/public/local-merchants — for /localperks page ─
@@ -1861,7 +1980,9 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       }
 
-      return send(res, 200, { success: true, count: merchants.length, data: merchants });
+      res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+      const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
+      return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
 
     // ── GET /api/v1/qr/resolve/:code ──────────────────────────────
@@ -2019,7 +2140,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         allRedeemed = !!redeemedCheck;
       }
 
-      return send(res, 200, { success: true, data: { qrCode, merchant, location, campaigns, all_redeemed: allRedeemed } });
+      return send(res, 200, { success: true, data: { qrCode, merchant: formatMerchantImages(merchant, req), location, campaigns, all_redeemed: allRedeemed } });
     }
 
 
@@ -2192,7 +2313,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       merchantData.is_web_sponsored = merchantData.is_web_sponsored && (!merchantData.web_sponsored_until || new Date(merchantData.web_sponsored_until) >= new Date()) ? true : false;
       merchantData.is_app_sponsored = merchantData.is_app_sponsored && (!merchantData.app_sponsored_until || new Date(merchantData.app_sponsored_until) >= new Date()) ? true : false;
 
-      return send(res, 200, { success: true, data: merchantData });
+      return send(res, 200, { success: true, data: formatMerchantImages(merchantData, req) });
     }
 
     // ── POST /api/v1/merchants/:id/promotions ──────────────────────
@@ -2796,12 +2917,12 @@ Working this way is harder and more expensive. The actives still have to earn th
          ORDER BY m.id, c.created_at ASC
        `;
 
-      const result = campaigns.map(c => ({
+      const result = campaigns.map(c => formatMerchantImages({
         ...c,
         is_member: memberMerchantIds.has(c.id),
         is_claimed: claimedMerchantMap.has(c.id),
         claimed_at: claimedMerchantMap.get(c.id) || null,
-      }));
+      }, req));
 
       return send(res, 200, { success: true, data: result });
     }
@@ -4283,7 +4404,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         success: true,
         data: {
           merchants: merchants.map(m => ({
-            ...m,
+            ...formatMerchantImages(m, req),
             password_hash: undefined,
             tier: m.subscription_tier || 'free',
             status: m.status || 'active',
@@ -5617,7 +5738,8 @@ Working this way is harder and more expensive. The actives still have to earn th
         `;
       }
       const pendingCount = applications.filter(a => a.application_status === 'pending').length;
-      return send(res, 200, { success: true, data: applications, pending_count: pendingCount });
+      const formattedApplications = applications.map(a => formatMerchantImages(a, req));
+      return send(res, 200, { success: true, data: formattedApplications, pending_count: pendingCount });
     }
 
     // ── PUT /api/v1/admin/online-applications/:id/approve ─────────
@@ -6735,8 +6857,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           web_sponsored_until: merchant.web_sponsored_until || null,
           app_sponsored_until: merchant.app_sponsored_until || null,
           fullpage_sponsored_until: merchant.fullpage_sponsored_until || null,
-          cover_photo_url: merchant.cover_photo_url || null,
-          promo_banner_url: merchant.promo_banner_url || null,
+          cover_photo_url: formatMerchantImages({ id: merchantId, cover_photo_url: merchant.cover_photo_url }, req).cover_photo_url || null,
+          promo_banner_url: formatMerchantImages({ id: merchantId, promo_banner_url: merchant.promo_banner_url }, req).promo_banner_url || null,
           rating_score: merchant.rating_score || null,
           rating_count: merchant.rating_count || null,
           rating_platform: merchant.rating_platform || null,
