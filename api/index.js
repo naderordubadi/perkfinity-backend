@@ -384,10 +384,12 @@ function formatMerchantImages(merchant, req) {
   const merchantId = m.id || m.merchant_id;
 
   if (merchantId) {
+    const v = m.updated_at ? `?v=${new Date(m.updated_at).getTime()}` : '';
+
     if (m.logo_url && typeof m.logo_url === 'string') {
       const trimmed = m.logo_url.trim();
       if (trimmed.startsWith('data:image/') || (!trimmed.startsWith('http://') && !trimmed.startsWith('https://'))) {
-        m.logo_url = `${baseUrl}/api/v1/merchants/${merchantId}/logo`;
+        m.logo_url = `${baseUrl}/api/v1/merchants/${merchantId}/logo${v}`;
       } else {
         m.logo_url = trimmed.replace('http://', 'https://');
       }
@@ -396,7 +398,7 @@ function formatMerchantImages(merchant, req) {
     if (m.cover_photo_url && typeof m.cover_photo_url === 'string') {
       const trimmed = m.cover_photo_url.trim();
       if (trimmed.startsWith('data:image/') || (!trimmed.startsWith('http://') && !trimmed.startsWith('https://'))) {
-        m.cover_photo_url = `${baseUrl}/api/v1/merchants/${merchantId}/cover`;
+        m.cover_photo_url = `${baseUrl}/api/v1/merchants/${merchantId}/cover${v}`;
       } else {
         m.cover_photo_url = trimmed.replace('http://', 'https://');
       }
@@ -405,7 +407,7 @@ function formatMerchantImages(merchant, req) {
     if (m.promo_banner_url && typeof m.promo_banner_url === 'string') {
       const trimmed = m.promo_banner_url.trim();
       if (trimmed.startsWith('data:image/') || (!trimmed.startsWith('http://') && !trimmed.startsWith('https://'))) {
-        m.promo_banner_url = `${baseUrl}/api/v1/merchants/${merchantId}/banner`;
+        m.promo_banner_url = `${baseUrl}/api/v1/merchants/${merchantId}/banner${v}`;
       } else {
         m.promo_banner_url = trimmed.replace('http://', 'https://');
       }
@@ -1674,7 +1676,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         res.statusCode = 200;
         res.setHeader('Content-Type', mimeType);
         res.setHeader('Content-Length', imgBuffer.length);
-        res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400');
+        res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
         res.setHeader('ETag', etag);
         res.setHeader('Access-Control-Allow-Origin', '*');
         return res.end(imgBuffer);
@@ -1695,7 +1697,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (platform === 'app') {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, m.updated_at, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
               m.public_phone, m.public_email,
               m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
               l.address, l.city, l.state, l.postal_code,
@@ -1714,7 +1716,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         } else {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, m.updated_at, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
               m.public_phone, m.public_email,
               m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
               l.address, l.city, l.state, l.postal_code,
@@ -1738,7 +1740,6 @@ Working this way is harder and more expensive. The actives still have to earn th
           [sponsors[i], sponsors[j]] = [sponsors[j], sponsors[i]];
         }
 
-        res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
         const formattedSponsors = sponsors.slice(0, 8).map(s => formatMerchantImages(s, req));
         return send(res, 200, { success: true, data: formattedSponsors });
       } catch (err) {
@@ -1763,6 +1764,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         SELECT
           m.id,
           m.business_name,
+          m.updated_at,
           REPLACE(m.logo_url, 'http://', 'https://') as logo_url,
           l.address,
           l.city,
@@ -1791,7 +1793,6 @@ Working this way is harder and more expensive. The actives still have to earn th
         ORDER BY m.business_name ASC
       `;
 
-      res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, zip, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -1805,7 +1806,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       let merchants;
       if (category && category !== 'all') {
         merchants = await sql`
-          SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
+          SELECT m.id, m.business_name, m.updated_at, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
                  m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
@@ -1823,7 +1824,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         `;
       } else {
         merchants = await sql`
-          SELECT m.id, m.business_name, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
+          SELECT m.id, m.business_name, m.updated_at, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
                  m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
@@ -1840,7 +1841,6 @@ Working this way is harder and more expensive. The actives still have to earn th
         `;
       }
 
-      res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -1860,7 +1860,7 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       if (q && cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1875,7 +1875,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1890,7 +1890,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1905,7 +1905,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1920,7 +1920,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1935,7 +1935,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1950,7 +1950,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1966,7 +1966,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       } else {
         // No filters — return all local/mobile merchants
         merchants = await sql`
-          SELECT m.id,m.business_name,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
+          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
                  m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
@@ -1980,7 +1980,6 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       }
 
-      res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -1993,7 +1992,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
 
-      const [merchant] = await sql`SELECT id, business_name, logo_url, welcome_offer_text, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified, cap_block_count FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`SELECT id, business_name, logo_url, welcome_offer_text, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified, cap_block_count, updated_at FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
       if (merchant.billing_status === 'deleted') return send(res, 403, { success: false, error: 'This store is no longer available' });
       if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is currently inactive' });
@@ -2269,7 +2268,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
-        SELECT m.business_name, m.contact_name, m.phone, m.public_phone, m.public_email, m.website, m.logo_url, m.cover_photo_url, m.promo_banner_url, m.promo_description, m.subscription_tier,
+        SELECT m.id, m.updated_at, m.business_name, m.contact_name, m.phone, m.public_phone, m.public_email, m.website, m.logo_url, m.cover_photo_url, m.promo_banner_url, m.promo_description, m.subscription_tier,
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
                m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location, m.onboarding_complete,
                m.is_web_sponsored, m.web_sponsored_until, m.is_app_sponsored, m.app_sponsored_until,
@@ -2869,6 +2868,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       const campaigns = await sql`
          SELECT DISTINCT ON (m.id)
            m.id as id,
+           m.updated_at,
            c.id as campaign_id,
            m.business_name as merchant_name,
            m.logo_url,
@@ -5721,7 +5721,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.business_presence, m.subscription_tier, m.application_status, m.application_notes,
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
-                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
+                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at, m.updated_at,
                  m.member_limit, m.billing_cycle,
                  mu.email as contact_email,
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
@@ -5736,7 +5736,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.business_presence, m.subscription_tier, m.application_status, m.application_notes,
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
-                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at,
+                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at, m.updated_at,
                  m.member_limit, m.billing_cycle,
                  mu.email as contact_email,
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
@@ -6819,7 +6819,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                stripe_customer_id, stripe_subscription_id, stripe_sponsor_subscription_id, 
                stripe_web_sponsor_subscription_id, stripe_app_sponsor_subscription_id, stripe_bundle_sponsor_subscription_id,
                stripe_fullpage_sponsor_subscription_id, subscription_started_at,
-               next_billing_date, member_limit, promo_code, created_at,
+               next_billing_date, member_limit, promo_code, created_at, updated_at,
                payment_failed_at, payment_failure_reminder_count,
                billing_starts_at_member_count, application_status, business_presence,
                billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until, promo_banner_url, cover_photo_url,
@@ -6866,8 +6866,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           web_sponsored_until: merchant.web_sponsored_until || null,
           app_sponsored_until: merchant.app_sponsored_until || null,
           fullpage_sponsored_until: merchant.fullpage_sponsored_until || null,
-          cover_photo_url: formatMerchantImages({ id: merchantId, cover_photo_url: merchant.cover_photo_url }, req).cover_photo_url || null,
-          promo_banner_url: formatMerchantImages({ id: merchantId, promo_banner_url: merchant.promo_banner_url }, req).promo_banner_url || null,
+          cover_photo_url: formatMerchantImages({ id: merchantId, cover_photo_url: merchant.cover_photo_url, updated_at: merchant.updated_at }, req).cover_photo_url || null,
+          promo_banner_url: formatMerchantImages({ id: merchantId, promo_banner_url: merchant.promo_banner_url, updated_at: merchant.updated_at }, req).promo_banner_url || null,
           rating_score: merchant.rating_score || null,
           rating_count: merchant.rating_count || null,
           rating_platform: merchant.rating_platform || null,
