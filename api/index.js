@@ -369,12 +369,15 @@ function send(res, status, data) {
 }
 
 function getBackendBaseUrl(req) {
-  const host = req?.headers?.['x-forwarded-host'] || req?.headers?.host;
-  const proto = req?.headers?.['x-forwarded-proto'] || 'https';
-  if (host && !host.includes('localhost')) {
-    return `${proto}://${host}`;
+  if (req) {
+    const host = req.headers?.['x-forwarded-host'] || req.headers?.host;
+    if (host) {
+      const isLocal = host.includes('localhost') || host.includes('127.0.0.1');
+      const proto = isLocal ? 'http' : (req.headers?.['x-forwarded-proto'] || 'https');
+      return `${proto}://${host}`;
+    }
   }
-  return 'https://perkfinity-backend.vercel.app';
+  return process.env.BACKEND_URL || 'https://perkfinity-backend.vercel.app';
 }
 
 function formatMerchantImages(merchant, req) {
@@ -1624,7 +1627,7 @@ Working this way is harder and more expensive. The actives still have to earn th
 
     // ── GET /api/v1/merchants/:id/(cover|banner|logo) ─────────────
     const merchantImgMatch = url.match(/^\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/(cover|banner|logo)$/);
-    if (method === 'GET' && merchantImgMatch) {
+    if ((method === 'GET' || method === 'HEAD') && merchantImgMatch) {
       const merchantId = merchantImgMatch[1];
       const imgType = merchantImgMatch[2];
 
@@ -1679,6 +1682,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
         res.setHeader('ETag', etag);
         res.setHeader('Access-Control-Allow-Origin', '*');
+        if (method === 'HEAD') return res.end();
         return res.end(imgBuffer);
       } catch (imgErr) {
         console.error('Image streaming error:', imgErr);
