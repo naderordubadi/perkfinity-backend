@@ -5372,6 +5372,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         recipients = recipients.concat(filtered.map(r => r.contact_email));
       }
 
+      let memberPushTokens = [];
       if (aud.type === 'members' || aud.type === 'both') {
         const rows = await sql`
           SELECT u.id, u.email, u.city, u.zip_code, u.created_at,
@@ -5393,6 +5394,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (aud.has_redeemed === 'yes') filtered = filtered.filter(r => parseInt(r.redemption_count) > 0);
         if (aud.has_redeemed === 'no') filtered = filtered.filter(r => !(parseInt(r.redemption_count) > 0));
         recipients = recipients.concat(filtered.map(r => r.email));
+        memberPushTokens = filtered.map(r => r.push_token).filter(Boolean);
       }
 
       // Add external emails
@@ -5442,6 +5444,53 @@ Working this way is harder and more expensive. The actives still have to earn th
         }
       }
 
+      // Send Push Notifications if enabled
+      let pushSuccessCount = 0;
+      let pushFailCount = 0;
+      const uniquePushTokens = [...new Set(memberPushTokens)];
+      if (data.send_push && uniquePushTokens.length > 0 && firebaseInitialized) {
+        const pTitle = (data.push_title || subject || 'Perkfinity Announcement').slice(0, 65);
+        const pBody = (data.push_body || 'Discover our newest partner and tap to unlock your exclusive member perk today.').slice(0, 180);
+        const merchantCode = data.merchant_code || '';
+        const pushUrl = merchantCode ? `/qr/${merchantCode}` : '/history?tab=notifications';
+
+        const fcmBatchSize = 500;
+        for (let i = 0; i < uniquePushTokens.length; i += fcmBatchSize) {
+          const batch = uniquePushTokens.slice(i, i + fcmBatchSize);
+          try {
+            const fcmRes = await admin.messaging().sendEachForMulticast({
+              tokens: batch,
+              notification: {
+                title: pTitle,
+                body: pBody,
+              },
+              data: {
+                title: pTitle,
+                body: pBody,
+                type: 'announcement',
+                merchant_code: merchantCode,
+                url: pushUrl
+              },
+              apns: {
+                headers: { 'apns-priority': '10' },
+                payload: {
+                  aps: {
+                    alert: { title: pTitle, body: pBody },
+                    sound: 'default',
+                    badge: 1
+                  }
+                }
+              }
+            });
+            pushSuccessCount += fcmRes.successCount;
+            pushFailCount += fcmRes.failureCount;
+          } catch (fcmErr) {
+            console.error('FCM Multicast broadcast error:', fcmErr.message || fcmErr);
+            pushFailCount += batch.length;
+          }
+        }
+      }
+
       // Log to AnnouncementLog
       const logStatus = isScheduled ? 'scheduled' : (failCount > 0 && sentCount === 0 ? 'failed' : failCount > 0 ? 'partial' : 'sent');
       try {
@@ -5466,7 +5515,14 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       return send(res, 200, {
         success: true,
-        data: { sent: sentCount, failed: failCount, total_recipients: recipients.length, scheduled: isScheduled }
+        data: {
+          sent: sentCount,
+          failed: failCount,
+          total_recipients: recipients.length,
+          scheduled: isScheduled,
+          pushed_count: pushSuccessCount,
+          push_failed: pushFailCount
+        }
       });
     }
 
