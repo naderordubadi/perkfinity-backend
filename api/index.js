@@ -2590,7 +2590,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         await sql`UPDATE "User" SET last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${user.id}`;
       }
 
-      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '180d' });
       await autoEnrollUser(sql, user.id, data.qrCode);
       const { password_hash: _pw, ...safeUser } = user;
       return send(res, 200, { success: true, data: { user: safeUser, accessToken: token } });
@@ -2641,7 +2641,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         await sql`UPDATE "User" SET last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${user.id}`;
       }
 
-      const gtoken = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      const gtoken = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '180d' });
       await autoEnrollUser(sql, user.id, data.qrCode);
       const { password_hash: _gpw, ...safeGUser } = user;
       return send(res, 200, { success: true, data: { user: safeGUser, accessToken: gtoken } });
@@ -2673,7 +2673,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         const hash = await bcrypt.hash(data.password, 12);
         await sql`UPDATE "User" SET password_hash = ${hash}, last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${existing.id}`;
         const JWT_SECRET = process.env.JWT_SECRET;
-        const token = jwt.sign({ userId: existing.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+        const token = jwt.sign({ userId: existing.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '180d' });
         await autoEnrollUser(sql, existing.id, data.qrCode);
         return send(res, 200, { success: true, data: { user: { id: existing.id, email: data.email.toLowerCase() }, accessToken: token } });
       }
@@ -2688,7 +2688,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       `;
 
       const JWT_SECRET = process.env.JWT_SECRET;
-      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '180d' });
 
       await autoEnrollUser(sql, user.id, data.qrCode);
 
@@ -2709,7 +2709,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       const platform = ua.includes('android') ? 'android' : (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') ? 'ios' : 'web');
       await sql`UPDATE "User" SET last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${user.id}`;
       const JWT_SECRET = process.env.JWT_SECRET;
-      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '30d' });
+      const token = jwt.sign({ userId: user.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '180d' });
 
       await autoEnrollUser(sql, user.id, data.qrCode);
 
@@ -8277,11 +8277,16 @@ Working this way is harder and more expensive. The actives still have to earn th
         const ncDur = isOngoing ? null : Math.max(parseInt(ncData.commission_duration_months) || 1, 1);
         const ncRet = Math.max(parseInt(ncData.retainer_cents) || 0, 0);
         const ncSignupBonus = Math.max(parseInt(ncData.signup_bonus_cents) || (parseInt(ncData.signup_bonus_dollars) * 100) || 0, 0);
-        await sql`
-          INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, signup_bonus_cents, created_at, updated_at)
-          VALUES (gen_random_uuid()::text, ${ncContractor.id}, ${ncRate}, ${ncDur}, ${ncRet}, ${ncSignupBonus}, NOW(), NOW())
-          ON CONFLICT (contractor_id) DO UPDATE SET commission_rate=${ncRate}, commission_duration_months=${ncDur}, retainer_cents=${ncRet}, signup_bonus_cents=${ncSignupBonus}, updated_at=NOW()
-        `;
+        try {
+          await sql`
+            INSERT INTO "ContractorCompensationRule" (id, contractor_id, commission_rate, commission_duration_months, retainer_cents, signup_bonus_cents, created_at, updated_at)
+            VALUES (gen_random_uuid()::text, ${ncContractor.id}, ${ncRate}, ${ncDur}, ${ncRet}, ${ncSignupBonus}, NOW(), NOW())
+            ON CONFLICT (contractor_id) DO UPDATE SET commission_rate=${ncRate}, commission_duration_months=${ncDur}, retainer_cents=${ncRet}, signup_bonus_cents=${ncSignupBonus}, updated_at=NOW()
+          `;
+        } catch (ruleErr) {
+          await sql`DELETE FROM "Contractor" WHERE id = ${ncContractor.id}`.catch(() => {});
+          throw ruleErr;
+        }
       }
       // If territory was specified upon creation, assign it
       if (ncData.territory_label && Array.isArray(ncData.territory_zips) && ncData.territory_zips.length > 0) {
