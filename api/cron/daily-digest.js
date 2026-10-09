@@ -177,19 +177,14 @@ module.exports = async (req, res) => {
               <div style="margin-bottom:14px;">
                 <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto;">
                   <tr>
-                    <td style="padding:0 6px;">
-                      <a href="https://www.instagram.com/perkfinity" target="_blank" style="display:inline-block;padding:5px 12px;background:#ffffff;border:1px solid #e2e8f0;border-radius:20px;text-decoration:none;color:#475569;font-size:12px;font-weight:600;line-height:1.2;">
-                        <span style="display:inline-block;margin-right:4px;">📸</span> Instagram
+                    <td style="padding:0 8px; vertical-align:middle;">
+                      <a href="https://www.instagram.com/perkfinity" target="_blank" style="text-decoration:none; display:inline-block;">
+                        <img src="https://perkfinity.net/assets/icon-instagram.png" alt="Instagram" width="28" height="28" style="width:28px; height:28px; display:block; border:0; border-radius:7px;" />
                       </a>
                     </td>
-                    <td style="padding:0 6px;">
-                      <a href="https://www.tiktok.com/@perkfinity" target="_blank" style="display:inline-block;padding:5px 12px;background:#ffffff;border:1px solid #e2e8f0;border-radius:20px;text-decoration:none;color:#475569;font-size:12px;font-weight:600;line-height:1.2;">
-                        <span style="display:inline-block;margin-right:4px;">🎵</span> TikTok
-                      </a>
-                    </td>
-                    <td style="padding:0 6px;">
-                      <a href="https://perkfinity.net" target="_blank" style="display:inline-block;padding:5px 12px;background:#ffffff;border:1px solid #e2e8f0;border-radius:20px;text-decoration:none;color:#475569;font-size:12px;font-weight:600;line-height:1.2;">
-                        <span style="display:inline-block;margin-right:4px;">🌐</span> Website
+                    <td style="padding:0 8px; vertical-align:middle;">
+                      <a href="https://www.tiktok.com/@perkfinity" target="_blank" style="text-decoration:none; display:inline-block;">
+                        <img src="https://perkfinity.net/assets/icon-tiktok.png" alt="TikTok" width="28" height="28" style="width:28px; height:28px; display:block; border:0; border-radius:7px;" />
                       </a>
                     </td>
                   </tr>
