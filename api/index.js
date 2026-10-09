@@ -5260,6 +5260,7 @@ Working this way is harder and more expensive. The actives still have to earn th
               u.push_token, u.device_platform,
               (SELECT COUNT(*) FROM "Redemption" r WHERE r.user_id = u.id AND r.status IN ('redeemed','claimed')) as redemption_count
             FROM "User" u
+            WHERE COALESCE(u.email_unsubscribed, false) = false
             ORDER BY u.created_at DESC
           `;
           let filtered = rows.filter(r => r.email);
@@ -7674,9 +7675,13 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
 
       try {
-        await sql`UPDATE "User" SET email_unsubscribed = true WHERE id = ${uid}`;
+        if (uid.includes('@')) {
+          await sql`UPDATE "User" SET email_unsubscribed = true WHERE lower(email) = lower(${uid})`;
+        } else {
+          await sql`UPDATE "User" SET email_unsubscribed = true WHERE id = ${uid}`;
+        }
         res.setHeader('Content-Type', 'text/html');
-        return res.status(200).end(unsubPage(true, "You've been successfully removed from Perkfinity's Daily Digest emails. You won't receive any more marketing emails from us. You can still use the app and manage your account normally."));
+        return res.status(200).end(unsubPage(true, "You've been successfully unsubscribed from Perkfinity's promotional and marketing emails. You won't receive any more announcements or updates from us. You can still use the app and access your account normally."));
       } catch (err) {
         console.error('Unsubscribe error:', err);
         res.setHeader('Content-Type', 'text/html');

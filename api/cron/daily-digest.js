@@ -173,10 +173,36 @@ module.exports = async (req, res) => {
               <div style="font-size:14px; color:#666; margin-bottom:16px;">Hi ${userName} 👋, here's what's new today:</div>
               ${offerCards}
             </div>
-            <div style="padding:16px 24px; border-top:1px solid #f0f0f0; text-align:center;">
-              <div style="font-size:11px; color:#bbb;">Powered by <strong style="color:#5B3FA5;">Perkfinity</strong></div>
-              <div style="margin-top:10px; font-size:11px; color:#ccc;">
-                <a href="${unsubUrl}" style="color:#bbb; text-decoration:underline; font-size:11px;">Unsubscribe from Daily Digest</a>
+            <div style="padding:22px 24px 20px; border-top:1px solid #f0f0f0; text-align:center; background:#fafafa;">
+              <div style="margin-bottom:14px;">
+                <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto;">
+                  <tr>
+                    <td style="padding:0 6px;">
+                      <a href="https://www.instagram.com/perkfinity" target="_blank" style="display:inline-block;padding:5px 12px;background:#ffffff;border:1px solid #e2e8f0;border-radius:20px;text-decoration:none;color:#475569;font-size:12px;font-weight:600;line-height:1.2;">
+                        <span style="display:inline-block;margin-right:4px;">📸</span> Instagram
+                      </a>
+                    </td>
+                    <td style="padding:0 6px;">
+                      <a href="https://www.tiktok.com/@perkfinity" target="_blank" style="display:inline-block;padding:5px 12px;background:#ffffff;border:1px solid #e2e8f0;border-radius:20px;text-decoration:none;color:#475569;font-size:12px;font-weight:600;line-height:1.2;">
+                        <span style="display:inline-block;margin-right:4px;">🎵</span> TikTok
+                      </a>
+                    </td>
+                    <td style="padding:0 6px;">
+                      <a href="https://perkfinity.net" target="_blank" style="display:inline-block;padding:5px 12px;background:#ffffff;border:1px solid #e2e8f0;border-radius:20px;text-decoration:none;color:#475569;font-size:12px;font-weight:600;line-height:1.2;">
+                        <span style="display:inline-block;margin-right:4px;">🌐</span> Website
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:6px;">Powered by <strong style="color:#5B3FA5;">Perkfinity</strong> — Your Local Guide, with Perks</div>
+              <div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-bottom:8px;">
+                Safe Box Financial Technologies and Education LLC<br>
+                Mission Viejo, CA
+              </div>
+              <div style="font-size:11px;color:#94a3b8;line-height:1.5;">
+                You received this email because you are a registered Perkfinity member.<br>
+                <a href="${unsubUrl}" style="color:#5B3FA5;text-decoration:underline;font-weight:600;">Unsubscribe from Daily Digest</a>
               </div>
             </div>
           </div>
