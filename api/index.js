@@ -1216,7 +1216,14 @@ module.exports = async function handler(req, res) {
       }
 
       const [user] = await sql`
-        SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status, m.logo_url,
+        SELECT u.*, m.business_name, m.subscription_tier, m.status as merchant_status,
+               m.updated_at as merchant_updated_at,
+               CASE
+                 WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                 WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                 WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                 ELSE '__custom__'
+               END AS logo_url,
                m.stripe_payment_method_id, m.stripe_subscription_id, m.billing_status, m.billing_cycle,
                m.business_presence, m.onboarding_complete, m.application_status, m.is_presetup, m.is_claimed
         FROM "MerchantUser" u
@@ -1313,6 +1320,9 @@ module.exports = async function handler(req, res) {
       );
 
       const { password_hash: _pw, ...safeUser } = user;
+      const formattedUserLogo = formatMerchantImages({ id: user.merchant_id, logo_url: safeUser.logo_url, updated_at: user.merchant_updated_at }, req).logo_url;
+      safeUser.logo_url = formattedUserLogo || null;
+      delete safeUser.merchant_updated_at;
       return send(res, 200, {
         success: true,
         data: {
@@ -2765,7 +2775,14 @@ Working this way is harder and more expensive. The actives still have to earn th
         try {
           // Fetch merchant info for the queue — include presence, website, and campaign promo_code
           const [merchantInfo] = await sql`
-            SELECT m.business_name, m.logo_url, m.business_presence, m.website,
+            SELECT m.business_name,
+                   CASE
+                     WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                     WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                     WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                     ELSE '__custom__'
+                   END AS logo_url,
+                   m.business_presence, m.website, m.updated_at,
                    l.address, l.city, l.state, l.postal_code
             FROM "Merchant" m
             LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
@@ -2773,7 +2790,8 @@ Working this way is harder and more expensive. The actives still have to earn th
             LIMIT 1
           `;
           const storeName = merchantInfo?.business_name || 'Your Local Store';
-          const logoUrl = merchantInfo?.logo_url || '';
+          const formattedInfo = merchantInfo ? formatMerchantImages({ id: targetMerchantId, logo_url: merchantInfo.logo_url, updated_at: merchantInfo.updated_at }, req) : null;
+          const logoUrl = formattedInfo?.logo_url || '';
           const presence = merchantInfo?.business_presence || 'physical';
           const isOnline = presence === 'online';
           const merchantWebsite = merchantInfo?.website || '';
@@ -5288,7 +5306,13 @@ Working this way is harder and more expensive. The actives still have to earn th
             m.business_presence, 
             m.subscription_tier, 
             m.billing_status,
-            m.logo_url,
+            m.updated_at,
+            CASE
+              WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+              WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+              WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+              ELSE '__custom__'
+            END AS logo_url,
             (SELECT ml.city FROM "MerchantLocation" ml WHERE ml.merchant_id = m.id AND ml.is_active = true LIMIT 1) as location_city,
             (SELECT ml.postal_code FROM "MerchantLocation" ml WHERE ml.merchant_id = m.id AND ml.is_active = true LIMIT 1) as location_zip,
             mm.created_at as joined_at,
@@ -5298,7 +5322,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           WHERE mm.user_id = ${memberId}
           ORDER BY mm.created_at DESC
         `;
-        return send(res, 200, { success: true, data: merchants });
+        const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
+        return send(res, 200, { success: true, data: formattedMerchants });
       }
     }
 
