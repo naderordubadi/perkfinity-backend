@@ -151,6 +151,168 @@ function getPriceId(tier, billingCycle) {
   return map[tier]?.() || null;
 }
 
+async function checkAndTriggerAutoTierUpgrade(sql, merchantId) {
+  if (!merchantId) return;
+  try {
+    const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status, billing_starts_at_member_count, billing_cycle FROM "Merchant" WHERE id = ${merchantId}`;
+    if (!merchant) return;
+
+    // Check online promo billing trigger FIRST (separate from trial→tier1 logic)
+    const onlinePromoTiers = ['online_starter', 'online_growth', 'online_scale'];
+    if (onlinePromoTiers.includes(merchant.subscription_tier) && merchant.billing_starts_at_member_count) {
+      const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${merchantId}`;
+      if (countRow && countRow.cnt >= merchant.billing_starts_at_member_count) {
+        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+        const priceId = getPriceId(merchant.subscription_tier, merchant.billing_cycle || 'monthly');
+        if (STRIPE_KEY && priceId && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
+          try {
+            const stripeClient = Stripe(STRIPE_KEY);
+            const subscription = await stripeClient.subscriptions.create({
+              customer: merchant.stripe_customer_id,
+              items: [{ price: priceId }],
+              default_payment_method: merchant.stripe_payment_method_id,
+              metadata: { merchant_id: merchant.id, trigger: 'promo_member_limit' }
+            });
+            // Reset member_limit to the correct tier cap now that billing has started.
+            // During the promo period, member_limit was set to the promo threshold (e.g. 25 or 200).
+            // Once billing is active, it must reflect the actual plan cap (500 for starter).
+            const tierCapAfterPromo = merchant.subscription_tier === 'online_starter' ? 500
+              : merchant.subscription_tier === 'online_growth' ? 2500 : null;
+            // Use Stripe's period_end for the next billing date — always accurate for monthly and annual
+            const promoNextBillingDate = subscription.current_period_end
+              ? new Date(subscription.current_period_end * 1000)
+              : null;
+            await sql`
+              UPDATE "Merchant"
+              SET billing_starts_at_member_count = NULL,
+                  member_limit = ${tierCapAfterPromo},
+                  member_cap_notified = false,
+                  stripe_subscription_id = ${subscription.id},
+                  billing_status = 'active',
+                  subscription_started_at = NOW(),
+                  next_billing_date = ${promoNextBillingDate},
+                  updated_at = NOW()
+              WHERE id = ${merchantId}
+            `;
+            // Send billing-started email
+            try {
+              const [mu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${merchantId} LIMIT 1`;
+              const BREVO_KEY = process.env.BREVO_API_KEY;
+              if (BREVO_KEY && mu?.email) {
+                const brevoClient = SibApiV3Sdk.ApiClient.instance;
+                brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+                const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+                const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+                emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
+                emailObj.to = [{ email: mu.email }];
+                emailObj.subject = `🎉 You've reached ${merchant.billing_starts_at_member_count} members — billing has started!`;
+                emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#5b3fa5;margin-bottom:16px;">🎉 Congratulations, ${merchant.business_name}!</div><p style="font-size:15px;color:#555;line-height:1.6;">You've reached your promo member threshold. Your subscription is now active and your card on file will be billed monthly going forward.</p><p style="font-size:15px;color:#555;">Thank you for growing with Perkfinity!</p></div></div>`;
+                await emailApi.sendTransacEmail(emailObj);
+              }
+            } catch (emailErr) { console.error('Billing-started email failed:', emailErr.message); }
+            console.log(`Online promo billing triggered for merchant ${merchantId} at ${countRow.cnt} members`);
+          } catch (stripeErr) {
+            console.error(`Online promo Stripe charge failed for ${merchantId}:`, stripeErr.message);
+          }
+        }
+      }
+    } else if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
+      const limit = merchant.member_limit || 100;
+      const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${merchantId}`;
+      if (countRow && countRow.cnt >= limit) {
+        // If merchant has a saved payment method, create a Stripe subscription automatically
+        const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+        const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
+        if (STRIPE_KEY && PRICE_ID && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
+          try {
+            const stripeClient = Stripe(STRIPE_KEY);
+            const subscription = await stripeClient.subscriptions.create({
+              customer: merchant.stripe_customer_id,
+              items: [{ price: PRICE_ID }],
+              // Omit default_payment_method so Stripe safely falls back to the customer's portal-managed default card
+              metadata: { merchant_id: merchant.id }
+            });
+            // Use Stripe's period_end for the next billing date (correct for both monthly and annual)
+            const trialNextBillingDate = subscription.current_period_end
+              ? new Date(subscription.current_period_end * 1000)
+              : null;
+            await sql`
+              UPDATE "Merchant" 
+              SET subscription_tier = 'tier1', 
+                  stripe_subscription_id = ${subscription.id},
+                  billing_status = 'active',
+                  subscription_started_at = NOW(),
+                  next_billing_date = ${trialNextBillingDate},
+                  updated_at = NOW() 
+              WHERE id = ${merchantId}
+            `;
+            console.log(`Auto-upgraded merchant ${merchantId} to tier1 via Stripe (${countRow.cnt} members, limit was ${limit})`);
+          } catch (stripeErr) {
+            console.error(`Stripe auto-charge failed for merchant ${merchantId}:`, stripeErr.message);
+            // Block account and record failure timestamp for the reminder job
+            await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', account_blocked = true, payment_failed_at = NOW(), payment_failure_reminder_count = 0, updated_at = NOW() WHERE id = ${merchantId}`;
+            await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchantId} AND status = 'active'`;
+            // Send Day-0 notification email to merchant immediately
+            try {
+              const [mu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${merchantId} LIMIT 1`;
+              const BREVO_KEY = process.env.BREVO_API_KEY;
+              if (BREVO_KEY && mu?.email) {
+                const brevoClient = SibApiV3Sdk.ApiClient.instance;
+                brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+                const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+                const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+                emailObj.sender = { name: 'Perkfinity Support', email: 'support@perkfinity.net' };
+                emailObj.to = [{ email: mu.email }];
+                emailObj.subject = 'Action Required: Payment Failed — Your Perkfinity Account Is Paused';
+                const bizName = merchant?.business_name ? ` ${merchant.business_name}` : '';
+                emailObj.htmlContent = `
+                  <div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee;">
+                    <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;">
+                      <div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div>
+                    </div>
+                    <div style="padding:28px 24px;">
+                      <div style="font-size:20px;font-weight:700;color:#dc2626;margin-bottom:16px;">⚠️ Payment Failed — Action Required</div>
+                      <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">
+                        Hi${bizName},<br><br>
+                        Your account has reached the free member limit and we attempted to automatically upgrade you to <strong>Perkfinity Connect</strong>. Unfortunately, your payment method was declined.
+                      </p>
+                      <div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+                        <div style="font-size:13px;font-weight:700;color:#dc2626;margin-bottom:8px;">Your account is currently paused:</div>
+                        <ul style="margin:0;padding-left:18px;font-size:13px;color:#991b1b;line-height:2;">
+                          <li>Members cannot redeem perks by scanning your QR code</li>
+                          <li>Campaigns and promotions are frozen</li>
+                          <li>Your member data is fully preserved</li>
+                        </ul>
+                      </div>
+                      <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:24px;">
+                        To restore full access, log in to your dashboard, update your payment method, and reactivate your account. The process takes less than a minute.
+                      </p>
+                      <div style="text-align:center;margin-bottom:24px;">
+                        <a href="https://perkfinity.net/dashboard.html" style="display:inline-block;background:#5b3fa5;color:#fff;font-weight:700;text-decoration:none;padding:14px 32px;border-radius:10px;font-size:15px;">Update Payment &amp; Restore Access</a>
+                      </div>
+                      <p style="font-size:13px;color:#aaa;text-align:center;">Need help? Reply to this email and our team will assist you right away.</p>
+                    </div>
+                  </div>
+                `;
+                await emailApi.sendTransacEmail(emailObj);
+                console.log(`[PaymentFailed] Day-0 email sent to ${mu.email} for merchant ${merchantId}`);
+              }
+            } catch (emailErr) {
+              console.error('[PaymentFailed] Day-0 email send failed:', emailErr.message);
+            }
+          }
+        } else {
+          // No Stripe setup — just upgrade tier (legacy behavior)
+          await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', updated_at = NOW() WHERE id = ${merchantId}`;
+          console.log(`Auto-upgraded merchant ${merchantId} to tier1 (no Stripe — legacy) (${countRow.cnt} members, limit was ${limit})`);
+        }
+      }
+    }
+  } catch (upgradeErr) {
+    console.error(`[AutoTierUpgrade] Error for merchant ${merchantId}:`, upgradeErr);
+  }
+}
+
 async function autoEnrollUser(sql, userId, publicCode) {
   if (!publicCode || !userId) return;
   try {
@@ -177,164 +339,7 @@ async function autoEnrollUser(sql, userId, publicCode) {
     `;
 
     // 2. Auto-tier upgrade: check if merchant hit their free member limit
-    //    If they have a saved payment method, auto-charge via Stripe.
-    try {
-      const [merchant] = await sql`SELECT id, business_name, subscription_tier, member_limit, stripe_customer_id, stripe_payment_method_id, billing_status, billing_starts_at_member_count, billing_cycle FROM "Merchant" WHERE id = ${qrData.merchant_id}`;
-      // Check online promo billing trigger FIRST (separate from trial→tier1 logic)
-      const onlinePromoTiers = ['online_starter', 'online_growth', 'online_scale'];
-      if (merchant && onlinePromoTiers.includes(merchant.subscription_tier) && merchant.billing_starts_at_member_count) {
-        const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
-        if (countRow && countRow.cnt >= merchant.billing_starts_at_member_count) {
-          const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-          const priceId = getPriceId(merchant.subscription_tier, merchant.billing_cycle || 'monthly');
-          if (STRIPE_KEY && priceId && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
-            try {
-              const stripeClient = Stripe(STRIPE_KEY);
-              const subscription = await stripeClient.subscriptions.create({
-                customer: merchant.stripe_customer_id,
-                items: [{ price: priceId }],
-                default_payment_method: merchant.stripe_payment_method_id,
-                metadata: { merchant_id: merchant.id, trigger: 'promo_member_limit' }
-              });
-              // Fix C: reset member_limit to the correct tier cap now that billing has started.
-              // During the promo period, member_limit was set to the promo threshold (e.g. 200).
-              // Once billing is active, it must reflect the actual plan cap.
-              const tierCapAfterPromo = merchant.subscription_tier === 'online_starter' ? 500
-                : merchant.subscription_tier === 'online_growth' ? 2500 : null;
-              // Use Stripe's period_end for the next billing date — always accurate for monthly and annual
-              const promoNextBillingDate = subscription.current_period_end
-                ? new Date(subscription.current_period_end * 1000)
-                : null;
-              await sql`
-                UPDATE "Merchant"
-                SET billing_starts_at_member_count = NULL,
-                    member_limit = ${tierCapAfterPromo},
-                    member_cap_notified = false,
-                    stripe_subscription_id = ${subscription.id},
-                    billing_status = 'active',
-                    subscription_started_at = NOW(),
-                    next_billing_date = ${promoNextBillingDate},
-                    updated_at = NOW()
-                WHERE id = ${qrData.merchant_id}
-              `;
-              // Send billing-started email
-              try {
-                const [mu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${qrData.merchant_id} LIMIT 1`;
-                const BREVO_KEY = process.env.BREVO_API_KEY;
-                if (BREVO_KEY && mu?.email) {
-                  const brevoClient = SibApiV3Sdk.ApiClient.instance;
-                  brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
-                  const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-                  const emailObj = new SibApiV3Sdk.SendSmtpEmail();
-                  emailObj.sender = { name: 'Perkfinity', email: 'support@perkfinity.net' };
-                  emailObj.to = [{ email: mu.email }];
-                  emailObj.subject = `🎉 You've reached ${merchant.billing_starts_at_member_count} members — billing has started!`;
-                  emailObj.htmlContent = `<div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;"><div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;"><div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div></div><div style="padding:28px 24px;"><div style="font-size:20px;font-weight:700;color:#5b3fa5;margin-bottom:16px;">🎉 Congratulations, ${merchant.business_name}!</div><p style="font-size:15px;color:#555;line-height:1.6;">You've reached your promo member threshold. Your subscription is now active and your card on file will be billed monthly going forward.</p><p style="font-size:15px;color:#555;">Thank you for growing with Perkfinity!</p></div></div>`;
-                  await emailApi.sendTransacEmail(emailObj);
-                }
-              } catch (emailErr) { console.error('Billing-started email failed:', emailErr.message); }
-              console.log(`Online promo billing triggered for merchant ${qrData.merchant_id} at ${countRow.cnt} members`);
-            } catch (stripeErr) {
-              console.error(`Online promo Stripe charge failed for ${qrData.merchant_id}:`, stripeErr.message);
-            }
-          }
-        }
-      } else if (merchant && (merchant.subscription_tier === 'trial' || merchant.subscription_tier === 'free')) {
-        const limit = merchant.member_limit || 100;
-        const [countRow] = await sql`SELECT COUNT(*)::int as cnt FROM "MerchantMember" WHERE merchant_id = ${qrData.merchant_id}`;
-        if (countRow && countRow.cnt >= limit) {
-          // If merchant has a saved payment method, create a Stripe subscription automatically
-          const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
-          const PRICE_ID = process.env.STRIPE_TIER1_PRICE_ID;
-          if (STRIPE_KEY && PRICE_ID && merchant.stripe_customer_id && merchant.stripe_payment_method_id) {
-            try {
-              const stripeClient = Stripe(STRIPE_KEY);
-              const subscription = await stripeClient.subscriptions.create({
-                customer: merchant.stripe_customer_id,
-                items: [{ price: PRICE_ID }],
-                // Omit default_payment_method so Stripe safely falls back to the customer's portal-managed default card
-                metadata: { merchant_id: merchant.id }
-              });
-              // Use Stripe's period_end for the next billing date (correct for both monthly and annual)
-              const trialNextBillingDate = subscription.current_period_end
-                ? new Date(subscription.current_period_end * 1000)
-                : null;
-              await sql`
-                UPDATE "Merchant" 
-                SET subscription_tier = 'tier1', 
-                    stripe_subscription_id = ${subscription.id},
-                    billing_status = 'active',
-                    subscription_started_at = NOW(),
-                    next_billing_date = ${trialNextBillingDate},
-                    updated_at = NOW() 
-                WHERE id = ${qrData.merchant_id}
-              `;
-              console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 via Stripe (${countRow.cnt} members, limit was ${limit})`);
-            } catch (stripeErr) {
-              console.error(`Stripe auto-charge failed for merchant ${qrData.merchant_id}:`, stripeErr.message);
-              // Block account and record failure timestamp for the reminder job
-              await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', billing_status = 'payment_failed', account_blocked = true, payment_failed_at = NOW(), payment_failure_reminder_count = 0, updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
-              await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${qrData.merchant_id} AND status = 'active'`;
-              // NOTE: billing_starts_at_member_count trigger (online promo) is checked separately below
-              // Send Day-0 notification email to merchant immediately
-              try {
-                const [mu] = await sql`SELECT email FROM "MerchantUser" WHERE merchant_id = ${qrData.merchant_id} LIMIT 1`;
-                const BREVO_KEY = process.env.BREVO_API_KEY;
-                if (BREVO_KEY && mu?.email) {
-                  const brevoClient = SibApiV3Sdk.ApiClient.instance;
-                  brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
-                  const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-                  const emailObj = new SibApiV3Sdk.SendSmtpEmail();
-                  emailObj.sender = { name: 'Perkfinity Support', email: 'support@perkfinity.net' };
-                  emailObj.to = [{ email: mu.email }];
-                  emailObj.subject = 'Action Required: Payment Failed — Your Perkfinity Account Is Paused';
-                  const bizName = merchant?.business_name ? ` ${merchant.business_name}` : '';
-                  emailObj.htmlContent = `
-                    <div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #eee;">
-                      <div style="background:linear-gradient(135deg,#5b3fa5,#7c5cbf);padding:28px 24px;text-align:center;">
-                        <div style="color:#fff;font-size:24px;font-weight:800;">Perkfinity</div>
-                      </div>
-                      <div style="padding:28px 24px;">
-                        <div style="font-size:20px;font-weight:700;color:#dc2626;margin-bottom:16px;">⚠️ Payment Failed — Action Required</div>
-                        <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:16px;">
-                          Hi${bizName},<br><br>
-                          Your account has reached the free member limit and we attempted to automatically upgrade you to <strong>Perkfinity Connect</strong>. Unfortunately, your payment method was declined.
-                        </p>
-                        <div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
-                          <div style="font-size:13px;font-weight:700;color:#dc2626;margin-bottom:8px;">Your account is currently paused:</div>
-                          <ul style="margin:0;padding-left:18px;font-size:13px;color:#991b1b;line-height:2;">
-                            <li>Members cannot redeem perks by scanning your QR code</li>
-                            <li>Campaigns and promotions are frozen</li>
-                            <li>Your member data is fully preserved</li>
-                          </ul>
-                        </div>
-                        <p style="font-size:15px;color:#555;line-height:1.6;margin-bottom:24px;">
-                          To restore full access, log in to your dashboard, update your payment method, and reactivate your account. The process takes less than a minute.
-                        </p>
-                        <div style="text-align:center;margin-bottom:24px;">
-                          <a href="https://perkfinity.net/dashboard.html" style="display:inline-block;background:#5b3fa5;color:#fff;font-weight:700;text-decoration:none;padding:14px 32px;border-radius:10px;font-size:15px;">Update Payment &amp; Restore Access</a>
-                        </div>
-                        <p style="font-size:13px;color:#aaa;text-align:center;">Need help? Reply to this email and our team will assist you right away.</p>
-                      </div>
-                    </div>
-                  `;
-                  await emailApi.sendTransacEmail(emailObj);
-                  console.log(`[PaymentFailed] Day-0 email sent to ${mu.email} for merchant ${qrData.merchant_id}`);
-                }
-              } catch (emailErr) {
-                console.error('[PaymentFailed] Day-0 email send failed:', emailErr.message);
-              }
-            }
-          } else {
-            // No Stripe setup — just upgrade tier (legacy behavior)
-            await sql`UPDATE "Merchant" SET subscription_tier = 'tier1', updated_at = NOW() WHERE id = ${qrData.merchant_id}`;
-            console.log(`Auto-upgraded merchant ${qrData.merchant_id} to tier1 (no Stripe — legacy) (${countRow.cnt} members, limit was ${limit})`);
-          }
-        }
-      }
-    } catch (upgradeErr) {
-      console.error('Auto-tier upgrade check failed:', upgradeErr);
-    }
+    await checkAndTriggerAutoTierUpgrade(sql, qrData.merchant_id);
 
     // 3. Assign only welcome campaigns (not merchant-targeted promotions) to new members.
     //    Targeted promotions have an AuditLog entry (action='promotion_created');
@@ -2333,6 +2338,9 @@ Working this way is harder and more expensive. The actives still have to earn th
             ON CONFLICT DO NOTHING
           `;
 
+          // Check if merchant reached promo/free member limit for auto-upgrade
+          await checkAndTriggerAutoTierUpgrade(sql, qrCode.merchant_id);
+
           // Auto-assign only welcome campaigns (not merchant-targeted promotions) to new members.
           // Targeted promotions have an AuditLog entry; welcome campaigns do not.
           await sql`
@@ -3468,6 +3476,7 @@ Working this way is harder and more expensive. The actives still have to earn th
          VALUES (gen_random_uuid()::text, ${campaign.merchant_id}, ${payload.userId}, 'app_discovery', NOW())
          ON CONFLICT DO NOTHING
       `;
+      await checkAndTriggerAutoTierUpgrade(sql, campaign.merchant_id);
 
       // UPDATE the most-recent non-redeemed Redemption row → 'pending'
       // Use CTE + LIMIT 1 to guarantee only ONE row is touched (avoids @unique token violation)
