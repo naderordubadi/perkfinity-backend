@@ -85,6 +85,48 @@ async function run() {
       console.log(`✅ PASSED: ${merchItems.length} merchants found for zip 92691.`);
     }
 
+    // 5. Check online merchants endpoint
+    console.log('Testing GET /api/v1/public/online-merchants...');
+    const onlineRes = await getJson('/api/v1/public/online-merchants');
+    const onlineItems = onlineRes.data && (Array.isArray(onlineRes.data) ? onlineRes.data : onlineRes.data.data);
+    if (onlineRes.status !== 200) {
+      console.error(`❌ FAILED: Expected 200, got ${onlineRes.status}.`);
+      passed = false;
+    } else if (!Array.isArray(onlineItems)) {
+      console.error('❌ FAILED: Response data is not an array:', onlineRes.data);
+      passed = false;
+    } else {
+      console.log(`✅ PASSED: ${onlineItems.length} online merchants returned.`);
+    }
+
+    // 6. Check local merchants endpoint
+    console.log('Testing GET /api/v1/public/local-merchants...');
+    const localRes = await getJson('/api/v1/public/local-merchants');
+    const localItems = localRes.data && (Array.isArray(localRes.data) ? localRes.data : localRes.data.data);
+    if (localRes.status !== 200) {
+      console.error(`❌ FAILED: Expected 200, got ${localRes.status}.`);
+      passed = false;
+    } else if (!Array.isArray(localItems)) {
+      console.error('❌ FAILED: Response data is not an array:', localRes.data);
+      passed = false;
+    } else {
+      console.log(`✅ PASSED: ${localItems.length} local merchants returned.`);
+    }
+
+    // 7. Check consumers campaigns feed
+    console.log('Testing GET /api/v1/consumers/campaigns...');
+    const camRes = await getJson('/api/v1/consumers/campaigns');
+    const camItems = camRes.data && (Array.isArray(camRes.data) ? camRes.data : camRes.data.data);
+    if (camRes.status !== 200) {
+      console.error(`❌ FAILED: Expected 200, got ${camRes.status}.`);
+      passed = false;
+    } else if (!Array.isArray(camItems)) {
+      console.error('❌ FAILED: Response data is not an array:', camRes.data);
+      passed = false;
+    } else {
+      console.log(`✅ PASSED: ${camItems.length} consumer campaign items returned.`);
+    }
+
   } catch (err) {
     console.error('❌ Network error during smoke test:', err.message);
     passed = false;

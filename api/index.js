@@ -1701,7 +1701,26 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (platform === 'app') {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, m.updated_at, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, m.updated_at,
+              CASE
+                WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                ELSE '__custom__'
+              END AS logo_url,
+              CASE
+                WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                ELSE '__custom__'
+              END AS cover_photo_url,
+              CASE
+                WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                ELSE '__custom__'
+              END AS promo_banner_url,
+              m.website, m.review_url, m.order_url, m.business_presence,
               m.public_phone, m.public_email,
               m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
               l.address, l.city, l.state, l.postal_code,
@@ -1720,7 +1739,26 @@ Working this way is harder and more expensive. The actives still have to earn th
         } else {
           sponsors = await sql`
             SELECT DISTINCT ON (m.id)
-              m.id, m.business_name, m.business_name as merchant_name, m.updated_at, REPLACE(m.logo_url, 'http://', 'https://') as logo_url, REPLACE(m.cover_photo_url, 'http://', 'https://') as cover_photo_url, REPLACE(m.promo_banner_url, 'http://', 'https://') as promo_banner_url, m.website, m.review_url, m.order_url, m.business_presence,
+              m.id, m.business_name, m.business_name as merchant_name, m.updated_at,
+              CASE
+                WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                ELSE '__custom__'
+              END AS logo_url,
+              CASE
+                WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                ELSE '__custom__'
+              END AS cover_photo_url,
+              CASE
+                WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                ELSE '__custom__'
+              END AS promo_banner_url,
+              m.website, m.review_url, m.order_url, m.business_presence,
               m.public_phone, m.public_email,
               m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_description, m.rating_score, m.rating_count, m.rating_platform,
               l.address, l.city, l.state, l.postal_code,
@@ -1744,6 +1782,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           [sponsors[i], sponsors[j]] = [sponsors[j], sponsors[i]];
         }
 
+        res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
         const formattedSponsors = sponsors.slice(0, 8).map(s => formatMerchantImages(s, req));
         return send(res, 200, { success: true, data: formattedSponsors });
       } catch (err) {
@@ -1769,7 +1808,12 @@ Working this way is harder and more expensive. The actives still have to earn th
           m.id,
           m.business_name,
           m.updated_at,
-          REPLACE(m.logo_url, 'http://', 'https://') as logo_url,
+          CASE
+            WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+            WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+            WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+            ELSE '__custom__'
+          END AS logo_url,
           l.address,
           l.city,
           l.state,
@@ -1797,6 +1841,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         ORDER BY m.business_name ASC
       `;
 
+      res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, zip, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -1810,9 +1855,29 @@ Working this way is harder and more expensive. The actives still have to earn th
       let merchants;
       if (category && category !== 'all') {
         merchants = await sql`
-          SELECT m.id, m.business_name, m.updated_at, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
+          SELECT m.id, m.business_name, m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
-                 m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
+                 m.is_fullpage_sponsored, m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
                  l.address, l.city, l.state, l.postal_code,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
@@ -1828,9 +1893,29 @@ Working this way is harder and more expensive. The actives still have to earn th
         `;
       } else {
         merchants = await sql`
-          SELECT m.id, m.business_name, m.updated_at, m.logo_url, m.cover_photo_url, m.website, m.welcome_offer_text,
+          SELECT m.id, m.business_name, m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.website, m.welcome_offer_text,
                  m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
-                 m.is_fullpage_sponsored, m.fullpage_sponsored_until, m.promo_banner_url, m.promo_description,
+                 m.is_fullpage_sponsored, m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score, m.rating_count, m.rating_platform, m.order_url, m.review_url,
                  l.address, l.city, l.state, l.postal_code,
                  (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) AS qr_public_code,
@@ -1845,6 +1930,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         `;
       }
 
+      res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -1864,8 +1950,28 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       if (q && cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1879,8 +1985,28 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1894,8 +2020,28 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1909,8 +2055,28 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1924,8 +2090,28 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (q) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1939,8 +2125,28 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (cities.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1954,8 +2160,28 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       } else if (zips.length > 0) {
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1970,8 +2196,28 @@ Working this way is harder and more expensive. The actives still have to earn th
       } else {
         // No filters — return all local/mobile merchants
         merchants = await sql`
-          SELECT m.id,m.business_name,m.updated_at,m.logo_url,m.cover_photo_url,m.business_presence,m.business_category,
-                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,m.promo_banner_url,m.promo_description,
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  l.address,l.city,l.state,l.postal_code,
@@ -1984,6 +2230,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       }
 
+      res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -1996,7 +2243,17 @@ Working this way is harder and more expensive. The actives still have to earn th
       const [qrCode] = await sql`SELECT * FROM "QrCode" WHERE public_code = ${public_code} AND status = 'active' LIMIT 1`;
       if (!qrCode) return send(res, 404, { success: false, error: 'QR code not found or inactive' });
 
-      const [merchant] = await sql`SELECT id, business_name, logo_url, welcome_offer_text, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified, cap_block_count, updated_at FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1`;
+      const [merchant] = await sql`
+        SELECT id, business_name,
+          CASE
+            WHEN logo_url IS NULL OR logo_url = '' THEN NULL
+            WHEN logo_url LIKE 'http://%' THEN REPLACE(logo_url, 'http://', 'https://')
+            WHEN logo_url LIKE 'https://%' THEN logo_url
+            ELSE '__custom__'
+          END AS logo_url,
+          welcome_offer_text, account_blocked, billing_status, subscription_tier, member_limit, member_cap_notified, cap_block_count, updated_at
+        FROM "Merchant" WHERE id = ${qrCode.merchant_id} LIMIT 1
+      `;
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
       if (merchant.billing_status === 'deleted') return send(res, 403, { success: false, error: 'This store is no longer available' });
       if (merchant.account_blocked) return send(res, 403, { success: false, error: 'This merchant is currently inactive' });
@@ -2272,7 +2529,26 @@ Working this way is harder and more expensive. The actives still have to earn th
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
       const [merchantData] = await sql`
-        SELECT m.id, m.updated_at, m.business_name, m.contact_name, m.phone, m.public_phone, m.public_email, m.website, m.logo_url, m.cover_photo_url, m.promo_banner_url, m.promo_description, m.subscription_tier,
+        SELECT m.id, m.updated_at, m.business_name, m.contact_name, m.phone, m.public_phone, m.public_email, m.website,
+               CASE
+                 WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                 WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                 WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                 ELSE '__custom__'
+               END AS logo_url,
+               CASE
+                 WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                 WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                 WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                 ELSE '__custom__'
+               END AS cover_photo_url,
+               CASE
+                 WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                 WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                 WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                 ELSE '__custom__'
+               END AS promo_banner_url,
+               m.promo_description, m.subscription_tier,
                m.stripe_payment_method_id, m.billing_status, m.business_presence, m.welcome_promo_code,
                m.welcome_offer_text, m.review_url, m.order_url, m.is_multi_location, m.onboarding_complete,
                m.is_web_sponsored, m.web_sponsored_until, m.is_app_sponsored, m.app_sponsored_until,
@@ -2875,8 +3151,18 @@ Working this way is harder and more expensive. The actives still have to earn th
            m.updated_at,
            c.id as campaign_id,
            m.business_name as merchant_name,
-           m.logo_url,
-           m.cover_photo_url,
+           CASE
+             WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+             WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+             WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+             ELSE '__custom__'
+           END AS logo_url,
+           CASE
+             WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+             WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+             WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+             ELSE '__custom__'
+           END AS cover_photo_url,
            m.business_presence,
            m.business_category,
            m.website,
@@ -2888,7 +3174,12 @@ Working this way is harder and more expensive. The actives still have to earn th
            m.public_email,
            m.is_fullpage_sponsored,
            m.fullpage_sponsored_until,
-           m.promo_banner_url,
+           CASE
+             WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+             WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+             WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+             ELSE '__custom__'
+           END AS promo_banner_url,
            m.promo_description,
            m.rating_score,
            m.rating_count,
@@ -4394,7 +4685,40 @@ Working this way is harder and more expensive. The actives still have to earn th
     // ── GET /api/v1/admin/merchants ─────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/merchants')) {
       const merchants = await sql`
-        SELECT m.*,
+        SELECT
+          m.id, m.business_name, m.legal_name, m.contact_name, m.phone, m.public_phone, m.public_email,
+          m.website, m.review_url, m.order_url,
+          CASE
+            WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+            WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+            WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+            ELSE '__custom__'
+          END AS logo_url,
+          CASE
+            WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+            WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+            WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+            ELSE '__custom__'
+          END AS cover_photo_url,
+          CASE
+            WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+            WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+            WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+            ELSE '__custom__'
+          END AS promo_banner_url,
+          m.promo_description, m.business_presence, m.business_category, m.welcome_offer_text,
+          m.welcome_promo_code, m.promo_code, m.pos_system, m.onboarding_complete, m.account_blocked,
+          m.rating_score, m.rating_count, m.rating_platform, m.application_notes, m.member_cap_notified,
+          m.cap_block_count, m.payment_failed_at, m.payment_failure_reminder_count, m.cancelled_at,
+          m.declined_at, m.subscription_started_at, m.next_billing_date, m.is_multi_location,
+          m.status, m.is_hidden, m.subscription_tier, m.member_limit, m.billing_cycle, m.billing_status,
+          m.application_status, m.stripe_customer_id, m.stripe_payment_method_id, m.stripe_subscription_id,
+          m.billing_starts_at_member_count, m.created_at, m.updated_at, m.is_presetup, m.is_claimed,
+          m.temp_password_plain, m.presetup_claimed_at, m.is_app_sponsored, m.app_sponsored_until,
+          m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until,
+          m.stripe_web_sponsor_subscription_id, m.stripe_app_sponsor_subscription_id,
+          m.stripe_fullpage_sponsor_subscription_id, m.stripe_bundle_sponsor_subscription_id,
+          m.stripe_sponsor_subscription_id,
           (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) as public_code,
           (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.merchant_id = m.id) as member_count,
           (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id) as campaign_count,
@@ -4479,21 +4803,30 @@ Working this way is harder and more expensive. The actives still have to earn th
       const merchantId = creativeAdminMatch[1];
       try {
         const body = req.body || {};
+        const isSelfProxy = (u) => {
+          if (!u || typeof u !== 'string') return false;
+          return u.includes('/api/v1/merchants/');
+        };
         const sanitizeImg = (u) => {
           if (!u || typeof u !== 'string') return null;
           const trimmed = u.trim();
           if (!trimmed) return null;
+          if (isSelfProxy(trimmed)) return undefined; // Don't overwrite with proxy URL
           if (trimmed.startsWith('http://')) return trimmed.replace(/^http:\/\//i, 'https://');
           return trimmed;
         };
 
         if (body.cover_photo_url !== undefined) {
           const coverVal = sanitizeImg(body.cover_photo_url);
-          await sql`UPDATE "Merchant" SET cover_photo_url = ${coverVal}, updated_at = NOW() WHERE id = ${merchantId}`;
+          if (coverVal !== undefined) {
+            await sql`UPDATE "Merchant" SET cover_photo_url = ${coverVal}, updated_at = NOW() WHERE id = ${merchantId}`;
+          }
         }
         if (body.logo_url !== undefined) {
           const logoVal = sanitizeImg(body.logo_url);
-          await sql`UPDATE "Merchant" SET logo_url = ${logoVal}, updated_at = NOW() WHERE id = ${merchantId}`;
+          if (logoVal !== undefined) {
+            await sql`UPDATE "Merchant" SET logo_url = ${logoVal}, updated_at = NOW() WHERE id = ${merchantId}`;
+          }
         }
         if (body.promo_description !== undefined) {
           const promoDesc = body.promo_description ? body.promo_description.trim().slice(0, 1000) : null;
@@ -4689,7 +5022,40 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       try {
         const rows = await sql`
-          SELECT m.*,
+          SELECT
+            m.id, m.business_name, m.legal_name, m.contact_name, m.phone, m.public_phone, m.public_email,
+            m.website, m.review_url, m.order_url,
+            CASE
+              WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+              WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+              WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+              ELSE '__custom__'
+            END AS logo_url,
+            CASE
+              WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+              WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+              WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+              ELSE '__custom__'
+            END AS cover_photo_url,
+            CASE
+              WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+              WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+              WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+              ELSE '__custom__'
+            END AS promo_banner_url,
+            m.promo_description, m.business_presence, m.business_category, m.welcome_offer_text,
+            m.welcome_promo_code, m.promo_code, m.pos_system, m.onboarding_complete, m.account_blocked,
+            m.rating_score, m.rating_count, m.rating_platform, m.application_notes, m.member_cap_notified,
+            m.cap_block_count, m.payment_failed_at, m.payment_failure_reminder_count, m.cancelled_at,
+            m.declined_at, m.subscription_started_at, m.next_billing_date, m.is_multi_location,
+            m.status, m.is_hidden, m.subscription_tier, m.member_limit, m.billing_cycle, m.billing_status,
+            m.application_status, m.stripe_customer_id, m.stripe_payment_method_id, m.stripe_subscription_id,
+            m.billing_starts_at_member_count, m.created_at, m.updated_at, m.is_presetup, m.is_claimed,
+            m.temp_password_plain, m.presetup_claimed_at, m.is_app_sponsored, m.app_sponsored_until,
+            m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until,
+            m.stripe_web_sponsor_subscription_id, m.stripe_app_sponsor_subscription_id,
+            m.stripe_fullpage_sponsor_subscription_id, m.stripe_bundle_sponsor_subscription_id,
+            m.stripe_sponsor_subscription_id,
             mu.email as temp_email,
             (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) as public_code,
             (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
@@ -4761,10 +5127,15 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
         if (!merchant.is_presetup) return send(res, 400, { success: false, error: 'Not a pre-setup merchant' });
 
+        const isSelfProxy = (u) => {
+          if (!u || typeof u !== 'string') return false;
+          return u.includes('/api/v1/merchants/');
+        };
         const sanitizeImgUrl = (u) => {
           if (!u || typeof u !== 'string') return null;
           const trimmed = u.trim();
           if (!trimmed) return null;
+          if (isSelfProxy(trimmed)) return undefined; // Don't overwrite with proxy URL
           if (trimmed.startsWith('http://')) return trimmed.replace(/^http:\/\//i, 'https://');
           return trimmed;
         };
@@ -4798,6 +5169,8 @@ Working this way is harder and more expensive. The actives still have to earn th
         const isWebSponsor = data.is_web_sponsored !== undefined ? !!data.is_web_sponsored : undefined;
         const isAppSponsor = data.is_app_sponsored !== undefined ? !!data.is_app_sponsored : undefined;
         const isFullpageSponsor = data.is_fullpage_sponsored !== undefined ? !!data.is_fullpage_sponsored : undefined;
+        const sanitizedLogo = sanitizeImgUrl(data.logo_url);
+        const sanitizedCover = sanitizeImgUrl(data.cover_photo_url);
 
         // 1. Update Merchant
         await sql`
@@ -4813,8 +5186,8 @@ Working this way is harder and more expensive. The actives still have to earn th
             review_url = ${data.review_url ? data.review_url.trim() : null},
             rating_platform = ${detectedPlatform},
             order_url = ${data.order_url ? data.order_url.trim() : null},
-            logo_url = ${sanitizeImgUrl(data.logo_url)},
-            cover_photo_url = ${sanitizeImgUrl(data.cover_photo_url)},
+            logo_url = CASE WHEN ${sanitizedLogo !== undefined} THEN ${sanitizedLogo} ELSE logo_url END,
+            cover_photo_url = CASE WHEN ${sanitizedCover !== undefined} THEN ${sanitizedCover} ELSE cover_photo_url END,
             promo_description = ${data.promo_description || null},
             is_multi_location = ${isMultiLoc},
             member_limit = COALESCE(${memberLimit}, member_limit),
@@ -5782,7 +6155,14 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.business_presence, m.subscription_tier, m.application_status, m.application_notes,
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
-                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at, m.updated_at,
+                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 m.created_at, m.updated_at,
                  m.member_limit, m.billing_cycle,
                  mu.email as contact_email,
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
@@ -5797,7 +6177,14 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.business_presence, m.subscription_tier, m.application_status, m.application_notes,
                  m.billing_status, m.stripe_subscription_id,
                  m.billing_starts_at_member_count, m.stripe_customer_id, m.stripe_payment_method_id,
-                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code, m.logo_url, m.created_at, m.updated_at,
+                 m.welcome_offer_text, m.welcome_promo_code, m.promo_code,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 m.created_at, m.updated_at,
                  m.member_limit, m.billing_cycle,
                  mu.email as contact_email,
                  (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count
@@ -6883,7 +7270,19 @@ Working this way is harder and more expensive. The actives still have to earn th
                next_billing_date, member_limit, promo_code, created_at, updated_at,
                payment_failed_at, payment_failure_reminder_count,
                billing_starts_at_member_count, application_status, business_presence,
-               billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until, promo_banner_url, cover_photo_url,
+               billing_cycle, is_web_sponsored, is_app_sponsored, web_sponsored_until, app_sponsored_until,
+               CASE
+                 WHEN promo_banner_url IS NULL OR promo_banner_url = '' THEN NULL
+                 WHEN promo_banner_url LIKE 'http://%' THEN REPLACE(promo_banner_url, 'http://', 'https://')
+                 WHEN promo_banner_url LIKE 'https://%' THEN promo_banner_url
+                 ELSE '__custom__'
+               END AS promo_banner_url,
+               CASE
+                 WHEN cover_photo_url IS NULL OR cover_photo_url = '' THEN NULL
+                 WHEN cover_photo_url LIKE 'http://%' THEN REPLACE(cover_photo_url, 'http://', 'https://')
+                 WHEN cover_photo_url LIKE 'https://%' THEN cover_photo_url
+                 ELSE '__custom__'
+               END AS cover_photo_url,
                is_fullpage_sponsored, fullpage_sponsored_until, rating_score, rating_count, rating_platform, promo_description
         FROM "Merchant"
         WHERE id = ${merchantId}
