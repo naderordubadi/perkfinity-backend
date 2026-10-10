@@ -78,13 +78,13 @@ const ALLOWED_ORIGINS = [
 
 function setCors(req, res) {
   const origin = req.headers.origin;
-  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:'));
-  // Only echo back the origin if it is explicitly allowed.
-  // Unknown origins get no Access-Control-Allow-Origin header — browser blocks them.
-  // Note: this does not stop curl/Postman (CORS is browser-only); rate limiting handles that.
+  res.setHeader('Vary', 'Origin');
+  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (origin && origin.startsWith('http://localhost:')) || (origin && origin.endsWith('.vercel.app'));
   if (isAllowed) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, x-admin-secret');
@@ -1782,7 +1782,6 @@ Working this way is harder and more expensive. The actives still have to earn th
           [sponsors[i], sponsors[j]] = [sponsors[j], sponsors[i]];
         }
 
-        res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
         const formattedSponsors = sponsors.slice(0, 8).map(s => formatMerchantImages(s, req));
         return send(res, 200, { success: true, data: formattedSponsors });
       } catch (err) {
@@ -1841,7 +1840,6 @@ Working this way is harder and more expensive. The actives still have to earn th
         ORDER BY m.business_name ASC
       `;
 
-      res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, zip, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -1930,7 +1928,6 @@ Working this way is harder and more expensive. The actives still have to earn th
         `;
       }
 
-      res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
@@ -2230,7 +2227,6 @@ Working this way is harder and more expensive. The actives still have to earn th
           ORDER BY m.business_name ASC LIMIT 100`;
       }
 
-      res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
       return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
