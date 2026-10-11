@@ -83,6 +83,7 @@ model Merchant {
   subscriptions     Subscription[]
   events            Event[]
   audit_logs        AuditLog[]
+  outbound_clicks   MerchantOutboundClick[]
   // merchant_logos    MerchantLogo?
   // members           MerchantMember[]
 
@@ -103,6 +104,8 @@ model Merchant {
   stripe_fullpage_sponsor_subscription_id String?
   stripe_bundle_sponsor_subscription_id   String?
   stripe_sponsor_subscription_id          String?
+
+  monthly_roi_email_enabled               Boolean   @default(false)
 
   @@schema("public")
 }
@@ -356,6 +359,33 @@ model ContractorPayout {
   paid_at               DateTime?
   created_at            DateTime  @default(now())
   updated_at            DateTime  @updatedAt
+
+  @@schema("public")
+}
+
+model MerchantOutboundClick {
+  id          String   @id @default(uuid())
+  merchant_id String
+  merchant    Merchant @relation(fields: [merchant_id], references: [id], onDelete: Cascade)
+  user_id     String?
+  platform    String   // 'ios' | 'android' | 'web'
+  source      String   // 'app_feed' | 'app_sponsored' | 'web_localperks' | 'web_vip_takeover' | 'web_join' | 'daily_digest'
+  action_type String   // 'website' | 'order' | 'review_social' | 'phone' | 'email' | 'map_directions' | 'vip_takeover'
+  target_url  String?
+  ip_hash     String?
+  created_at  DateTime @default(now())
+
+  @@index([merchant_id, created_at])
+  @@index([platform, action_type])
+  @@schema("public")
+}
+
+model SystemSetting {
+  key         String   @id
+  value       String
+  description String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
 
   @@schema("public")
 }

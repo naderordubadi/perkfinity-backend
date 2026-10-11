@@ -4016,6 +4016,924 @@ Working this way is harder and more expensive. The actives still have to earn th
       return send(res, 200, { success: true, data: history });
     }
 
+    // ── POST /api/v1/analytics/outbound-click ─────────────────────
+    if (method === 'POST' && url.endsWith('/analytics/outbound-click')) {
+      const data = req.body || {};
+      const { merchant_id, platform, source, action_type, target_url, user_id } = data;
+
+      if (!merchant_id || !action_type) {
+        return send(res, 400, { success: false, error: 'merchant_id and action_type are required' });
+      }
+
+      // Bot filter
+      const userAgent = req.headers['user-agent'] || '';
+      if (/bot|googlebot|crawler|spider|robot|crawling/i.test(userAgent)) {
+        return send(res, 200, { success: true, ignored: true });
+      }
+
+      // Anonymized IP hash
+      const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
+      const ipHash = clientIp ? crypto.createHash('sha256').update(clientIp + 'perkfinity_telemetry_2026').digest('hex').substring(0, 16) : null;
+
+      try {
+        await sql`
+          INSERT INTO "MerchantOutboundClick" (
+            "id", "merchant_id", "user_id", "platform", "source", "action_type", "target_url", "ip_hash", "created_at"
+          ) VALUES (
+            gen_random_uuid()::text,
+            ${merchant_id},
+            ${user_id || null},
+            ${platform || 'web'},
+            ${source || 'web_localperks'},
+            ${action_type},
+            ${target_url || null},
+            ${ipHash},
+            NOW()
+          )
+        `;
+        return send(res, 200, { success: true });
+      } catch (err) {
+        console.error('Error logging outbound click:', err.message);
+        return send(res, 500, { success: false, error: 'Database logging error' });
+      }
+    }
+
+    // ── GET /api/v1/features/public ──────────────────────────────
+    if (method === 'GET' && (url.endsWith('/features/public') || url === '/api/v1/features/public' || url.endsWith('/analytics/merchant-roi/status') || url === '/api/v1/analytics/merchant-roi/status')) {
+      try {
+        const settings = await sql`
+          SELECT key, value FROM "SystemSetting"
+          WHERE key IN ('roi_feature_merchants_enabled', 'roi_feature_reps_enabled');
+        `;
+        const map = {
+          roi_feature_merchants_enabled: false,
+          roi_feature_reps_enabled: false
+        };
+        for (const s of settings) {
+          map[s.key] = s.value === 'true';
+        }
+        return send(res, 200, {
+          success: true,
+          roi_merchants_enabled: map.roi_feature_merchants_enabled,
+          roi_reps_enabled: map.roi_feature_reps_enabled
+        });
+      } catch (err) {
+        console.error('Error fetching public features:', err.message);
+        return send(res, 200, {
+          success: true,
+          roi_merchants_enabled: false,
+          roi_reps_enabled: false
+        });
+      }
+    }
+
+    // ── GET /api/v1/admin/settings/roi-toggles ─────────────────────
+    if (method === 'GET' && (url.endsWith('/admin/settings/roi-toggles') || url === '/api/v1/admin/settings/roi-toggles')) {
+      const authHeader = req.headers.authorization;
+      const adminSecret = req.headers['x-admin-secret'];
+      const host = req.headers.host || '';
+      const isLocalHost = process.env.NODE_ENV !== 'production' && (host.includes('localhost') || host.includes('127.0.0.1'));
+      let isAdmin = isLocalHost || (adminSecret && adminSecret === process.env.ADMIN_SECRET);
+      if (!isAdmin && authHeader) {
+        try {
+          const token = authHeader.replace('Bearer ', '');
+          const payload = jwt.verify(token, process.env.JWT_SECRET);
+          if (payload.role === 'admin' || payload.isAdmin) isAdmin = true;
+        } catch (e) {}
+      }
+      if (!isAdmin) {
+        return send(res, 401, { success: false, error: 'Unauthorized admin access required' });
+      }
+
+      try {
+        const settings = await sql`
+          SELECT key, value FROM "SystemSetting"
+          WHERE key IN ('roi_feature_merchants_enabled', 'roi_feature_reps_enabled');
+        `;
+        const map = {
+          roi_feature_merchants_enabled: false,
+          roi_feature_reps_enabled: false
+        };
+        for (const s of settings) {
+          map[s.key] = s.value === 'true';
+        }
+        return send(res, 200, {
+          success: true,
+          roi_merchants_enabled: map.roi_feature_merchants_enabled,
+          roi_reps_enabled: map.roi_feature_reps_enabled
+        });
+      } catch (err) {
+        console.error('Error fetching admin roi toggles:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
+    // ── PUT /api/v1/admin/settings/roi-toggles ─────────────────────
+    if (method === 'PUT' && (url.endsWith('/admin/settings/roi-toggles') || url === '/api/v1/admin/settings/roi-toggles')) {
+      const authHeader = req.headers.authorization;
+      const adminSecret = req.headers['x-admin-secret'];
+      const host = req.headers.host || '';
+      const isLocalHost = process.env.NODE_ENV !== 'production' && (host.includes('localhost') || host.includes('127.0.0.1'));
+      let isAdmin = isLocalHost || (adminSecret && adminSecret === process.env.ADMIN_SECRET);
+      if (!isAdmin && authHeader) {
+        try {
+          const token = authHeader.replace('Bearer ', '');
+          const payload = jwt.verify(token, process.env.JWT_SECRET);
+          if (payload.role === 'admin' || payload.isAdmin) isAdmin = true;
+        } catch (e) {}
+      }
+      if (!isAdmin) {
+        return send(res, 401, { success: false, error: 'Unauthorized admin access required' });
+      }
+
+      const body = req.body || {};
+      const merchantsVal = body.roi_merchants_enabled !== undefined ? String(!!body.roi_merchants_enabled) : null;
+      const repsVal = body.roi_reps_enabled !== undefined ? String(!!body.roi_reps_enabled) : null;
+
+      try {
+        if (merchantsVal !== null) {
+          await sql`
+            INSERT INTO "SystemSetting" ("key", "value", "updated_at")
+            VALUES ('roi_feature_merchants_enabled', ${merchantsVal}, NOW())
+            ON CONFLICT ("key") DO UPDATE SET "value" = ${merchantsVal}, "updated_at" = NOW();
+          `;
+        }
+        if (repsVal !== null) {
+          await sql`
+            INSERT INTO "SystemSetting" ("key", "value", "updated_at")
+            VALUES ('roi_feature_reps_enabled', ${repsVal}, NOW())
+            ON CONFLICT ("key") DO UPDATE SET "value" = ${repsVal}, "updated_at" = NOW();
+          `;
+        }
+
+        const settings = await sql`
+          SELECT key, value FROM "SystemSetting"
+          WHERE key IN ('roi_feature_merchants_enabled', 'roi_feature_reps_enabled');
+        `;
+        const map = {
+          roi_feature_merchants_enabled: false,
+          roi_feature_reps_enabled: false
+        };
+        for (const s of settings) {
+          map[s.key] = s.value === 'true';
+        }
+        return send(res, 200, {
+          success: true,
+          roi_merchants_enabled: map.roi_feature_merchants_enabled,
+          roi_reps_enabled: map.roi_feature_reps_enabled
+        });
+      } catch (err) {
+        console.error('Error saving admin roi toggles:', err);
+        return send(res, 500, { success: false, error: err.message });
+      }
+    }
+
+    // ── GET /api/v1/analytics/merchant-roi ────────────────────────
+    if (method === 'GET' && (url.endsWith('/analytics/merchant-roi') || url === '/api/v1/analytics/merchant-roi')) {
+      const fullUrl = new URL(req.url, 'http://localhost');
+      const qMerchantId = fullUrl.searchParams.get('merchant_id') || fullUrl.searchParams.get('merchantId');
+      const startDateStr = fullUrl.searchParams.get('startDate') || fullUrl.searchParams.get('start_date');
+      const endDateStr = fullUrl.searchParams.get('endDate') || fullUrl.searchParams.get('end_date');
+
+      const authHeader = req.headers.authorization;
+      const adminSecret = req.headers['x-admin-secret'];
+      let targetMerchantId = qMerchantId;
+      let userRole = 'public';
+
+      if (adminSecret && adminSecret === process.env.ADMIN_SECRET) {
+        userRole = 'admin';
+      } else if (authHeader) {
+        try {
+          const token = authHeader.replace('Bearer ', '');
+          const payload = jwt.verify(token, process.env.JWT_SECRET);
+          if (payload.role === 'admin' || payload.isAdmin) {
+            userRole = 'admin';
+          } else if (payload.repId || payload.contractorId || payload.role === 'rep') {
+            userRole = 'rep';
+          } else if (payload.merchantId) {
+            userRole = 'merchant';
+            targetMerchantId = payload.merchantId;
+          }
+        } catch (e) {}
+      }
+
+      if (userRole !== 'admin') {
+        try {
+          const settings = await sql`
+            SELECT key, value FROM "SystemSetting"
+            WHERE key IN ('roi_feature_merchants_enabled', 'roi_feature_reps_enabled');
+          `;
+          const settingsMap = {};
+          for (const s of settings) settingsMap[s.key] = s.value === 'true';
+
+          if (userRole === 'rep' && !settingsMap['roi_feature_reps_enabled']) {
+            return send(res, 403, {
+              success: false,
+              error: 'Traffic & ROI reporting is currently disabled for sales representatives by administrator.'
+            });
+          }
+          if ((userRole === 'merchant' || userRole === 'public') && !settingsMap['roi_feature_merchants_enabled']) {
+            return send(res, 403, {
+              success: false,
+              error: 'Traffic & ROI reporting is currently disabled for merchants by administrator.'
+            });
+          }
+        } catch (e) {
+          console.error('[merchant-roi] feature check error:', e);
+        }
+      }
+
+      if (!targetMerchantId) {
+        return send(res, 400, { success: false, error: 'merchant_id is required' });
+      }
+
+      const [merchant] = await sql`
+        SELECT id, business_name, subscription_tier, business_presence, monthly_roi_email_enabled, is_app_sponsored, is_web_sponsored, is_fullpage_sponsored, fullpage_sponsored_until, app_sponsored_until, web_sponsored_until
+        FROM "Merchant"
+        WHERE id = ${targetMerchantId}
+      `;
+
+      if (!merchant) {
+        return send(res, 404, { success: false, error: 'Merchant not found' });
+      }
+
+      const start = startDateStr ? new Date(startDateStr + 'T00:00:00.000Z') : new Date('2020-01-01T00:00:00.000Z');
+      const end = endDateStr ? new Date(endDateStr + 'T23:59:59.999Z') : new Date();
+
+      const tier = merchant.subscription_tier || 'free';
+      const isDetailedTier = ['growth', 'scale', 'online_growth', 'online_scale', 'hybrid_growth', 'hybrid_scale', 'enterprise', 'premium'].includes(tier.toLowerCase()) || userRole === 'admin' || userRole === 'rep';
+      const reportingLevel = isDetailedTier ? 'detailed' : 'basic';
+
+      const clicks = await sql`
+        SELECT platform, source, action_type, created_at
+        FROM "MerchantOutboundClick"
+        WHERE merchant_id = ${targetMerchantId}
+          AND created_at >= ${start}
+          AND created_at <= ${end}
+      `;
+
+      let membersCountRow = { count: 0 };
+      try {
+        const [mRow] = await sql`
+          SELECT COUNT(*)::int as count
+          FROM "MerchantMember"
+          WHERE merchant_id = ${targetMerchantId}
+            AND created_at >= ${start}
+            AND created_at <= ${end}
+        `;
+        if (mRow) membersCountRow = mRow;
+      } catch (e) {}
+
+      let redemptionsCountRow = { count: 0 };
+      try {
+        const [rRow] = await sql`
+          SELECT COUNT(*)::int as count
+          FROM "Redemption" r
+          JOIN "Campaign" c ON r.campaign_id = c.id
+          WHERE c.merchant_id = ${targetMerchantId}
+            AND (r.status = 'redeemed' OR r.redeemed = true)
+            AND COALESCE(r.redeemed_at, r.issued_at) >= ${start}
+            AND COALESCE(r.redeemed_at, r.issued_at) <= ${end}
+        `;
+        if (rRow) redemptionsCountRow = rRow;
+      } catch (e) {}
+
+      let totalViews = 0;
+      let totalActions = 0;
+      const actionCounts = {
+        website: 0,
+        order: 0,
+        map_directions: 0,
+        phone: 0,
+        review_social: 0,
+        email: 0,
+        vip_takeover: 0
+      };
+      const platformCounts = {
+        ios: 0,
+        android: 0,
+        web: 0
+      };
+      let takeoverClicks = 0;
+      let carouselClicks = 0;
+
+      for (const row of clicks) {
+        if (row.action_type === 'view') {
+          totalViews++;
+        } else {
+          totalActions++;
+          if (actionCounts[row.action_type] !== undefined) {
+            actionCounts[row.action_type]++;
+          }
+        }
+
+        if (platformCounts[row.platform] !== undefined) {
+          platformCounts[row.platform]++;
+        }
+
+        if (row.action_type === 'vip_takeover' || row.source === 'web_vip_takeover' || row.source === 'app_vip_takeover') {
+          takeoverClicks++;
+        }
+        if (row.source === 'web_sponsored' || row.source === 'app_sponsored' || row.action_type === 'carousel_click') {
+          carouselClicks++;
+        }
+      }
+
+      const isAppActive = !!(merchant.is_app_sponsored && (!merchant.app_sponsored_until || new Date(merchant.app_sponsored_until) >= new Date()));
+      const isWebActive = !!(merchant.is_web_sponsored && (!merchant.web_sponsored_until || new Date(merchant.web_sponsored_until) >= new Date()));
+      const isFullpageActive = !!(merchant.is_fullpage_sponsored && (!merchant.fullpage_sponsored_until || new Date(merchant.fullpage_sponsored_until) >= new Date()));
+      const isCurrentlySponsored = isAppActive || isWebActive || isFullpageActive;
+      const hasHistoricalAdActivity = takeoverClicks > 0 || carouselClicks > 0 || isCurrentlySponsored || merchant.is_app_sponsored || merchant.is_web_sponsored || merchant.is_fullpage_sponsored;
+
+      const responsePayload = {
+        success: true,
+        merchant_id: merchant.id,
+        merchant_name: merchant.business_name,
+        business_name: merchant.business_name,
+        tier: tier,
+        subscription_tier: tier,
+        business_presence: merchant.business_presence || 'physical',
+        reporting_level: reportingLevel,
+        reportingLevel: reportingLevel,
+        monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
+        period: {
+          startDate: startDateStr || null,
+          start_date: startDateStr || null,
+          endDate: endDateStr || end.toISOString().split('T')[0],
+          end_date: endDateStr || end.toISOString().split('T')[0]
+        },
+        metrics: {
+          total_reach: totalViews + totalActions,
+          total_actions: totalActions,
+          in_store_redemptions: redemptionsCountRow?.count || 0,
+          in_store_members_joined: membersCountRow?.count || 0,
+          monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
+          channels: {
+            app: (platformCounts.ios || 0) + (platformCounts.android || 0),
+            web: platformCounts.web || 0
+          },
+          actions_breakdown: actionCounts,
+          sponsorship: {
+            hasActiveAds: !!isCurrentlySponsored,
+            hasHistoricalAdActivity: !!hasHistoricalAdActivity,
+            metrics: {
+              takeoverClicks,
+              carouselClicks,
+              is_app_sponsored: isAppActive,
+              is_web_sponsored: isWebActive,
+              is_fullpage_sponsored: isFullpageActive
+            }
+          }
+        },
+        summary: {
+          totalReach: totalViews + totalActions,
+          totalActions: totalActions,
+          inStoreRedemptions: redemptionsCountRow?.count || 0,
+          inStoreMembersJoined: membersCountRow?.count || 0
+        },
+        sponsorship: {
+          hasActiveAds: !!isCurrentlySponsored,
+          hasHistoricalAdActivity: !!hasHistoricalAdActivity,
+          metrics: {
+            takeoverClicks,
+            carouselClicks,
+            is_app_sponsored: !!merchant.is_app_sponsored,
+            is_web_sponsored: !!merchant.is_web_sponsored,
+            is_fullpage_sponsored: !!merchant.is_fullpage_sponsored
+          }
+        },
+        actionsBreakdown: actionCounts,
+        channelBreakdown: {
+          app: (platformCounts.ios || 0) + (platformCounts.android || 0),
+          web: platformCounts.web || 0
+        },
+        data: {
+          merchant_name: merchant.business_name,
+          tier: tier,
+          reporting_level: reportingLevel,
+          monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
+          metrics: {
+            total_reach: totalViews + totalActions,
+            total_actions: totalActions,
+            in_store_redemptions: redemptionsCountRow?.count || 0,
+            in_store_members_joined: membersCountRow?.count || 0,
+            monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
+            channels: {
+              app: (platformCounts.ios || 0) + (platformCounts.android || 0),
+              web: platformCounts.web || 0
+            },
+            actions_breakdown: actionCounts,
+            sponsorship: {
+              hasActiveAds: !!isCurrentlySponsored,
+              hasHistoricalAdActivity: !!hasHistoricalAdActivity,
+              metrics: {
+                takeoverClicks,
+                carouselClicks,
+                is_app_sponsored: !!merchant.is_app_sponsored,
+                is_web_sponsored: !!merchant.is_web_sponsored,
+                is_fullpage_sponsored: !!merchant.is_fullpage_sponsored
+              }
+            }
+          }
+        }
+      };
+
+      return send(res, 200, responsePayload);
+    }
+
+    // ── PUT /api/v1/analytics/merchant-roi/preferences ─────────────
+    if (method === 'PUT' && (url.endsWith('/analytics/merchant-roi/preferences') || url === '/api/v1/analytics/merchant-roi/preferences')) {
+      const authHeader = req.headers.authorization;
+      const adminSecret = req.headers['x-admin-secret'];
+      let authedMerchantId = null;
+      let isAdmin = (adminSecret && adminSecret === process.env.ADMIN_SECRET);
+
+      if (authHeader) {
+        try {
+          const token = authHeader.replace('Bearer ', '');
+          const payload = jwt.verify(token, process.env.JWT_SECRET);
+          if (payload.role === 'admin' || payload.isAdmin) isAdmin = true;
+          if (payload.merchantId) authedMerchantId = payload.merchantId;
+        } catch (e) {}
+      }
+
+      const body = req.body || {};
+      const targetMerchantId = body.merchant_id || body.merchantId || authedMerchantId;
+      if (!targetMerchantId) {
+        return send(res, 400, { success: false, error: 'merchant_id is required' });
+      }
+
+      if (!isAdmin && authedMerchantId !== targetMerchantId) {
+        return send(res, 403, { success: false, error: 'Unauthorized to update this merchant preference' });
+      }
+
+      const enabled = !!body.monthly_roi_email_enabled;
+      await sql`
+        UPDATE "Merchant"
+        SET monthly_roi_email_enabled = ${enabled}, updated_at = NOW()
+        WHERE id = ${targetMerchantId}
+      `;
+
+      return send(res, 200, { success: true, monthly_roi_email_enabled: enabled });
+    }
+
+    // ── POST /api/v1/analytics/merchant-roi/send-email ───────────
+    if (method === 'POST' && (url.endsWith('/analytics/merchant-roi/send-email') || url === '/api/v1/analytics/merchant-roi/send-email')) {
+      const authHeader = req.headers.authorization;
+      const adminSecret = req.headers['x-admin-secret'];
+      let authedMerchantId = null;
+      let repContractor = null;
+      let isAdmin = (adminSecret && adminSecret === process.env.ADMIN_SECRET);
+
+      if (authHeader) {
+        try {
+          const token = authHeader.replace('Bearer ', '');
+          const payload = jwt.verify(token, process.env.JWT_SECRET);
+          if (payload.role === 'admin' || payload.isAdmin) isAdmin = true;
+          if (payload.merchantId) authedMerchantId = payload.merchantId;
+          if (payload.contractorId || payload.repId || payload.role === 'rep') {
+            const cid = payload.contractorId || payload.repId;
+            if (cid) {
+              const [cRow] = await sql`SELECT id, full_name, email, phone FROM "Contractor" WHERE id = ${cid} LIMIT 1`;
+              if (cRow) repContractor = cRow;
+            }
+          }
+        } catch (e) {}
+      }
+
+      const body = req.body || {};
+      const targetMerchantId = body.merchant_id || body.merchantId || authedMerchantId;
+      if (!targetMerchantId) {
+        return send(res, 400, { success: false, error: 'merchant_id is required' });
+      }
+
+      if (!isAdmin && !repContractor && authedMerchantId !== targetMerchantId) {
+        return send(res, 403, { success: false, error: 'Unauthorized to send performance report for this merchant' });
+      }
+
+      if (!isAdmin) {
+        try {
+          const settings = await sql`
+            SELECT key, value FROM "SystemSetting"
+            WHERE key IN ('roi_feature_merchants_enabled', 'roi_feature_reps_enabled');
+          `;
+          const settingsMap = {};
+          for (const s of settings) settingsMap[s.key] = s.value === 'true';
+
+          if (repContractor && !settingsMap['roi_feature_reps_enabled']) {
+            return send(res, 403, {
+              success: false,
+              error: 'Performance report emailing is currently disabled for sales representatives by administrator.'
+            });
+          }
+          if (!repContractor && !settingsMap['roi_feature_merchants_enabled']) {
+            return send(res, 403, {
+              success: false,
+              error: 'Performance report emailing is currently disabled for merchants by administrator.'
+            });
+          }
+        } catch (e) {
+          console.error('[send-email] feature check error:', e);
+        }
+      }
+
+      const [merchant] = await sql`
+        SELECT m.id, m.business_name, m.subscription_tier, m.business_presence, m.public_email,
+               (SELECT email FROM "MerchantUser" WHERE merchant_id = m.id LIMIT 1) AS owner_email
+        FROM "Merchant" m
+        WHERE m.id = ${targetMerchantId}
+      `;
+
+      if (!merchant) {
+        return send(res, 404, { success: false, error: 'Merchant not found' });
+      }
+
+      const recipientEmail = (body.recipient_email || merchant.owner_email || merchant.public_email || '').trim().toLowerCase();
+      if (!recipientEmail || !recipientEmail.includes('@')) {
+        return send(res, 400, { success: false, error: 'A valid recipient email address is required.' });
+      }
+
+      // Default to last 30 days or specified period
+      let start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      let end = new Date();
+      if (body.start_date) start = new Date(body.start_date + 'T00:00:00.000Z');
+      if (body.end_date) end = new Date(body.end_date + 'T23:59:59.999Z');
+
+      const clicks = await sql`
+        SELECT platform, source, action_type, created_at
+        FROM "MerchantOutboundClick"
+        WHERE merchant_id = ${targetMerchantId}
+          AND created_at >= ${start}
+          AND created_at <= ${end}
+      `;
+
+      let membersCountRow = { count: 0 };
+      try {
+        const [mRow] = await sql`
+          SELECT COUNT(*)::int as count
+          FROM "MerchantMember"
+          WHERE merchant_id = ${targetMerchantId}
+            AND created_at >= ${start}
+            AND created_at <= ${end}
+        `;
+        if (mRow) membersCountRow = mRow;
+      } catch (e) {}
+
+      let redemptionsCountRow = { count: 0 };
+      try {
+        const [rRow] = await sql`
+          SELECT COUNT(*)::int as count
+          FROM "Redemption" r
+          JOIN "Campaign" c ON r.campaign_id = c.id
+          WHERE c.merchant_id = ${targetMerchantId}
+            AND (r.status = 'redeemed' OR r.redeemed = true)
+            AND COALESCE(r.redeemed_at, r.issued_at) >= ${start}
+            AND COALESCE(r.redeemed_at, r.issued_at) <= ${end}
+        `;
+        if (rRow) redemptionsCountRow = rRow;
+      } catch (e) {}
+
+      let totalViews = 0;
+      let totalActions = 0;
+      const actionCounts = {
+        website: 0,
+        order: 0,
+        map_directions: 0,
+        phone: 0,
+        review_social: 0,
+        email: 0,
+        vip_takeover: 0
+      };
+      const platformCounts = { app: 0, web: 0 };
+
+      let takeoverClicks = 0;
+      let carouselClicks = 0;
+      for (const row of clicks) {
+        if (row.action_type === 'storefront_view') {
+          totalViews++;
+        } else {
+          totalActions++;
+          if (actionCounts[row.action_type] !== undefined) {
+            actionCounts[row.action_type]++;
+          }
+        }
+        if (platformCounts[row.platform] !== undefined) {
+          platformCounts[row.platform]++;
+        }
+        if (row.action_type === 'vip_takeover' || row.source === 'web_vip_takeover' || row.source === 'app_vip_takeover') {
+          takeoverClicks++;
+        }
+        if (row.source === 'web_sponsored' || row.source === 'app_sponsored' || row.action_type === 'carousel_click') {
+          carouselClicks++;
+        }
+      }
+
+      const totalReach = totalViews + totalActions;
+      const totalChannel = (platformCounts.app || 0) + (platformCounts.web || 0);
+      const appPct = totalChannel > 0 ? Math.round(((platformCounts.app || 0) / totalChannel) * 100) : 0;
+      const webPct = totalChannel > 0 ? (100 - appPct) : 0;
+
+      const BREVO_KEY = process.env.BREVO_API_KEY;
+      if (!BREVO_KEY) {
+        return send(res, 500, { success: false, error: 'Email service is not configured (missing BREVO_API_KEY)' });
+      }
+
+      const cleanNote = String(body.personal_note || '').trim().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+      const repName = repContractor?.full_name || 'Perkfinity Partner Rep';
+      const repEmail = repContractor?.email || 'support@perkfinity.net';
+      const repPhone = repContractor?.phone || '';
+
+      const periodLabel = `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+
+      const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Perkfinity Performance Report</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b;">
+  <div style="max-width:620px;margin:30px auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.06);border:1px solid #e2e8f0;">
+    <div style="background:linear-gradient(135deg,#5B3FA5 0%,#7C5CC2 100%);padding:28px 32px;color:#ffffff;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-size:22px;font-weight:900;letter-spacing:-0.5px;color:#ffffff;">Perkfinity</span>
+        <span style="background:rgba(255,255,255,0.18);padding:4px 12px;border-radius:999px;font-size:12px;font-weight:700;color:#ffffff;">ROI Intelligence</span>
+      </div>
+      <h1 style="margin:16px 0 4px;font-size:22px;font-weight:900;color:#ffffff;line-height:1.2;">${merchant.business_name}</h1>
+      <p style="margin:0;font-size:13px;color:rgba(255,255,255,0.85);font-weight:500;">Performance Snapshot: ${periodLabel}</p>
+    </div>
+
+    <div style="padding:32px 32px 24px;">
+      ${cleanNote ? `
+      <div style="background:#f8f7ff;border-left:4px solid #5B3FA5;padding:16px 18px;border-radius:8px;margin-bottom:28px;">
+        <div style="font-size:11px;font-weight:800;color:#5B3FA5;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">Note from ${repName}:</div>
+        <div style="font-size:14.5px;color:#334155;line-height:1.55;font-style:italic;">“${cleanNote}”</div>
+      </div>` : ''}
+
+      <div style="margin-bottom:28px;">
+        <div style="font-size:12px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:12px;">Core Results Driven</div>
+        <table style="width:100%;border-collapse:separate;border-spacing:8px;margin:-8px;">
+          <tr>
+            <td style="width:50%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;vertical-align:top;">
+              <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;">Storefront Views</div>
+              <div style="font-size:26px;font-weight:900;color:#1e293b;margin-top:4px;">${totalReach.toLocaleString()}</div>
+              <div style="font-size:11px;color:#94a3b8;margin-top:2px;">Total consumer reach</div>
+            </td>
+            <td style="width:50%;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:16px;vertical-align:top;">
+              <div style="font-size:11.5px;font-weight:700;color:#166534;text-transform:uppercase;">Customer Actions</div>
+              <div style="font-size:26px;font-weight:900;color:#15803d;margin-top:4px;">${totalActions.toLocaleString()}</div>
+              <div style="font-size:11px;color:#16a34a;margin-top:2px;">Calls, maps, orders, visits</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="width:50%;background:#faf5ff;border:1px solid #e9d5ff;border-radius:12px;padding:16px;vertical-align:top;">
+              <div style="font-size:11.5px;font-weight:700;color:#7e22ce;text-transform:uppercase;">Perks Redeemed</div>
+              <div style="font-size:26px;font-weight:900;color:#6b21a8;margin-top:4px;">${(redemptionsCountRow.count || 0).toLocaleString()}</div>
+              <div style="font-size:11px;color:#9333ea;margin-top:2px;">In-store perk claims</div>
+            </td>
+            <td style="width:50%;background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:16px;vertical-align:top;">
+              <div style="font-size:11.5px;font-weight:700;color:#1e40af;text-transform:uppercase;">VIP Members Joined</div>
+              <div style="font-size:26px;font-weight:900;color:#1d4ed8;margin-top:4px;">${(membersCountRow.count || 0).toLocaleString()}</div>
+              <div style="font-size:11px;color:#2563eb;margin-top:2px;">Captured customer network</div>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      ${(takeoverClicks > 0 || carouselClicks > 0 || merchant.is_app_sponsored || merchant.is_web_sponsored || merchant.is_fullpage_sponsored) ? `
+      <div style="margin-bottom:28px;background:#fffbeb;border:1.5px solid #fde68a;border-radius:12px;padding:16px 20px;">
+        <div style="font-size:12px;font-weight:800;color:#b45309;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:12px;">👑 Sponsorship &amp; Boost Performance</div>
+        <table style="width:100%;border-collapse:separate;border-spacing:8px;margin:-8px;">
+          <tr>
+            <td style="width:50%;background:#ffffff;border:1px solid #fef3c7;border-radius:10px;padding:14px;text-align:center;">
+              <div style="font-size:24px;font-weight:900;color:#92400e;">${takeoverClicks.toLocaleString()}</div>
+              <div style="font-size:11px;color:#78350f;font-weight:600;margin-top:2px;">VIP Takeover Opens</div>
+            </td>
+            <td style="width:50%;background:#ffffff;border:1px solid #fef3c7;border-radius:10px;padding:14px;text-align:center;">
+              <div style="font-size:24px;font-weight:900;color:#92400e;">${carouselClicks.toLocaleString()}</div>
+              <div style="font-size:11px;color:#78350f;font-weight:600;margin-top:2px;">Top Carousel Clicks</div>
+            </td>
+          </tr>
+        </table>
+      </div>` : ''}
+
+      <div style="margin-bottom:28px;">
+        <div style="font-size:12px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:12px;">Itemized Customer Actions</div>
+        <table style="width:100%;border-collapse:collapse;font-size:13.5px;">
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 0;color:#334155;font-weight:600;">🛒 Online Orders &amp; Bookings</td>
+            <td style="padding:10px 0;text-align:right;font-weight:800;color:#1e293b;">${(actionCounts.order || 0).toLocaleString()}</td>
+          </tr>
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 0;color:#334155;font-weight:600;">🌐 Website Direct Visits</td>
+            <td style="padding:10px 0;text-align:right;font-weight:800;color:#1e293b;">${(actionCounts.website || 0).toLocaleString()}</td>
+          </tr>
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 0;color:#334155;font-weight:600;">📍 Map Directions &amp; Navigation</td>
+            <td style="padding:10px 0;text-align:right;font-weight:800;color:#1e293b;">${(actionCounts.map_directions || 0).toLocaleString()}</td>
+          </tr>
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 0;color:#334155;font-weight:600;">📞 Direct Phone Calls</td>
+            <td style="padding:10px 0;text-align:right;font-weight:800;color:#1e293b;">${(actionCounts.phone || 0).toLocaleString()}</td>
+          </tr>
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 0;color:#334155;font-weight:600;">⭐ Review &amp; Social Visits</td>
+            <td style="padding:10px 0;text-align:right;font-weight:800;color:#1e293b;">${(actionCounts.review_social || 0).toLocaleString()}</td>
+          </tr>
+          <tr style="border-bottom:1px solid #f1f5f9;">
+            <td style="padding:10px 0;color:#334155;font-weight:600;">✉️ Email Inquiries</td>
+            <td style="padding:10px 0;text-align:right;font-weight:800;color:#1e293b;">${(actionCounts.email || 0).toLocaleString()}</td>
+          </tr>
+          ${(actionCounts.vip_takeover || takeoverClicks) ? `
+          <tr>
+            <td style="padding:10px 0;color:#334155;font-weight:600;">👑 VIP Takeover Opens</td>
+            <td style="padding:10px 0;text-align:right;font-weight:800;color:#1e293b;">${(actionCounts.vip_takeover || takeoverClicks).toLocaleString()}</td>
+          </tr>` : ''}
+        </table>
+      </div>
+
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px 20px;margin-bottom:28px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;font-weight:700;color:#64748b;">
+          <span>📱 Mobile App: ${(platformCounts.app || 0).toLocaleString()} (${appPct}%)</span>
+          <span>💻 Web &amp; Directory: ${(platformCounts.web || 0).toLocaleString()} (${webPct}%)</span>
+        </div>
+        <div style="height:8px;background:#e2e8f0;border-radius:999px;overflow:hidden;display:flex;">
+          <div style="width:${appPct}%;background:#5B3FA5;"></div>
+          <div style="width:${webPct}%;background:#10b981;"></div>
+        </div>
+      </div>
+
+      <div style="border-top:1.5px solid #f1f5f9;padding-top:20px;margin-top:20px;">
+        <div style="font-size:11px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px;">Your Dedicated Representative</div>
+        <div style="font-size:15px;font-weight:800;color:#1e293b;">${repName}</div>
+        <div style="font-size:13px;color:#5B3FA5;font-weight:600;margin-top:3px;"><a href="mailto:${repEmail}" style="color:#5B3FA5;text-decoration:none;">${repEmail}</a>${repPhone ? ` · ${repPhone}` : ''}</div>
+        <p style="font-size:12px;color:#94a3b8;margin-top:8px;line-height:1.4;">Reply directly to this email to speak with your representative about marketing campaigns or account upgrades.</p>
+      </div>
+    </div>
+
+    <div style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:16px 32px;text-align:center;font-size:11.5px;color:#94a3b8;">
+      Perkfinity Network · Real-Time Customer Acquisition &amp; Retention<br>
+      © ${new Date().getFullYear()} Perkfinity. All rights reserved.
+    </div>
+  </div>
+</body>
+</html>
+      `;
+
+      try {
+        const brevoClient = SibApiV3Sdk.ApiClient.instance;
+        brevoClient.authentications['api-key'].apiKey = BREVO_KEY;
+        const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+        const emailObj = new SibApiV3Sdk.SendSmtpEmail();
+        emailObj.sender = { name: 'Perkfinity Reports', email: 'reports@perkfinity.net' };
+        emailObj.to = [{ email: recipientEmail, name: merchant.business_name }];
+        emailObj.subject = `📊 Perkfinity Performance Snapshot — ${merchant.business_name}`;
+        emailObj.htmlContent = html;
+
+        if (repEmail && repEmail.includes('@')) {
+          emailObj.replyTo = { email: repEmail, name: repName };
+          if (body.cc_rep !== false) {
+            emailObj.cc = [{ email: repEmail, name: repName }];
+          }
+        }
+
+        await emailApi.sendTransacEmail(emailObj);
+        return send(res, 200, { success: true, message: `Performance report sent to ${recipientEmail}` });
+      } catch (err) {
+        console.error('Failed to send ROI report email via Brevo:', err);
+        return send(res, 500, { success: false, error: err.message || 'Failed to send email' });
+      }
+    }
+
+    // ── GET /api/v1/admin/analytics/outbound-summary ──────────────
+    if (method === 'GET' && (url.endsWith('/admin/analytics/outbound-summary') || url === '/api/v1/admin/analytics/outbound-summary')) {
+      const authHeader = req.headers.authorization;
+      const adminSecret = req.headers['x-admin-secret'];
+      const host = req.headers.host || '';
+      const isLocalHost = process.env.NODE_ENV !== 'production' && (host.includes('localhost') || host.includes('127.0.0.1'));
+      let isAdmin = isLocalHost || (adminSecret && adminSecret === process.env.ADMIN_SECRET);
+
+      if (!isAdmin && authHeader) {
+        try {
+          const token = authHeader.replace('Bearer ', '');
+          const payload = jwt.verify(token, process.env.JWT_SECRET);
+          if (payload.role === 'admin' || payload.isAdmin) isAdmin = true;
+        } catch (e) {}
+      }
+
+      if (!isAdmin) return send(res, 403, { success: false, error: 'Admin authorization required' });
+
+      const fullUrl = new URL(req.url, 'http://localhost');
+      const startDateStr = fullUrl.searchParams.get('startDate') || fullUrl.searchParams.get('start_date');
+      const endDateStr = fullUrl.searchParams.get('endDate') || fullUrl.searchParams.get('end_date');
+      const start = startDateStr ? new Date(startDateStr + 'T00:00:00.000Z') : new Date('2020-01-01T00:00:00.000Z');
+      const end = endDateStr ? new Date(endDateStr + 'T23:59:59.999Z') : new Date();
+
+      const summaryRows = await sql`
+        SELECT 
+          m.id as merchant_id,
+          m.business_name,
+          m.subscription_tier,
+          COALESCE(m.business_presence, 'physical') as business_presence,
+          CASE WHEN m.is_app_sponsored = true AND (m.app_sponsored_until IS NULL OR m.app_sponsored_until >= NOW()) THEN true ELSE false END as is_app_sponsored,
+          CASE WHEN m.is_web_sponsored = true AND (m.web_sponsored_until IS NULL OR m.web_sponsored_until >= NOW()) THEN true ELSE false END as is_web_sponsored,
+          CASE WHEN m.is_fullpage_sponsored = true AND (m.fullpage_sponsored_until IS NULL OR m.fullpage_sponsored_until >= NOW()) THEN true ELSE false END as is_fullpage_sponsored,
+          COUNT(CASE WHEN c.id IS NOT NULL AND c.action_type != 'view' THEN 1 END)::int as total_actions,
+          COUNT(CASE WHEN c.platform = 'web' AND c.action_type != 'view' THEN 1 END)::int as web_actions,
+          COUNT(CASE WHEN c.platform IN ('ios', 'android') AND c.action_type != 'view' THEN 1 END)::int as app_actions,
+          COUNT(CASE WHEN c.action_type = 'website' THEN 1 END)::int as website_clicks,
+          COUNT(CASE WHEN c.action_type = 'order' THEN 1 END)::int as order_clicks,
+          COUNT(CASE WHEN c.action_type = 'map_directions' THEN 1 END)::int as map_clicks,
+          COUNT(CASE WHEN c.action_type = 'phone' THEN 1 END)::int as phone_clicks,
+          COUNT(CASE WHEN c.action_type = 'review_social' THEN 1 END)::int as review_clicks,
+          COUNT(CASE WHEN c.action_type = 'email' THEN 1 END)::int as email_clicks,
+          COUNT(CASE WHEN c.action_type = 'vip_takeover' THEN 1 END)::int as takeover_clicks
+        FROM "Merchant" m
+        LEFT JOIN "MerchantOutboundClick" c 
+          ON m.id = c.merchant_id 
+          AND c.created_at >= ${start} 
+          AND c.created_at <= ${end}
+        WHERE m.business_name != '[Deleted]'
+          AND (m.account_blocked = false OR m.account_blocked IS NULL)
+        GROUP BY m.id, m.business_name, m.subscription_tier, m.business_presence, m.is_app_sponsored, m.app_sponsored_until, m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until
+        ORDER BY total_actions DESC, m.business_name ASC
+      `;
+
+      let networkTotalActions = 0;
+      let networkWebActions = 0;
+      let networkAppActions = 0;
+      let merchantsWithActionsCount = 0;
+      const networkActionBreakdown = {
+        website: 0,
+        order: 0,
+        review_social: 0,
+        phone: 0,
+        email: 0,
+        map_directions: 0,
+        vip_takeover: 0
+      };
+
+      const formattedMerchants = summaryRows.map(m => {
+        const total = m.total_actions || 0;
+        if (total > 0) merchantsWithActionsCount++;
+        networkTotalActions += total;
+        networkWebActions += (m.web_actions || 0);
+        networkAppActions += (m.app_actions || 0);
+
+        networkActionBreakdown.website += (m.website_clicks || 0);
+        networkActionBreakdown.order += (m.order_clicks || 0);
+        networkActionBreakdown.map_directions += (m.map_clicks || 0);
+        networkActionBreakdown.phone += (m.phone_clicks || 0);
+        networkActionBreakdown.review_social += (m.review_clicks || 0);
+        networkActionBreakdown.email += (m.email_clicks || 0);
+        networkActionBreakdown.vip_takeover += (m.takeover_clicks || 0);
+
+        return {
+          merchant_id: m.merchant_id,
+          merchant_name: m.business_name || 'Store',
+          business_name: m.business_name || 'Store',
+          subscription_tier: m.subscription_tier || 'free',
+          business_presence: m.business_presence || 'physical',
+          is_app_sponsored: !!m.is_app_sponsored,
+          is_web_sponsored: !!m.is_web_sponsored,
+          is_fullpage_sponsored: !!m.is_fullpage_sponsored,
+          total_actions: total,
+          web_actions: m.web_actions || 0,
+          app_actions: m.app_actions || 0,
+          action_breakdown: {
+            website: m.website_clicks || 0,
+            order: m.order_clicks || 0,
+            map_directions: m.map_clicks || 0,
+            phone: m.phone_clicks || 0,
+            review_social: m.review_clicks || 0,
+            email: m.email_clicks || 0,
+            vip_takeover: m.takeover_clicks || 0
+          }
+        };
+      });
+
+      return send(res, 200, {
+        success: true,
+        period: {
+          startDate: startDateStr || null,
+          start_date: startDateStr || null,
+          endDate: endDateStr || end.toISOString().split('T')[0],
+          end_date: endDateStr || end.toISOString().split('T')[0]
+        },
+        data: {
+          summary: {
+            total_actions: networkTotalActions,
+            web_actions: networkWebActions,
+            app_actions: networkAppActions,
+            total_merchants_with_actions: merchantsWithActionsCount,
+            action_breakdown: networkActionBreakdown
+          },
+          merchants: formattedMerchants
+        }
+      });
+    }
+
     // ── PUT /api/v1/merchants/:id/profile ─────────────────────────
     const profileMatch = url.match(/\/api\/v1\/merchants\/([a-zA-Z0-9_-]+)\/profile/);
     if (method === 'PUT' && profileMatch) {
@@ -4591,6 +5509,8 @@ Working this way is harder and more expensive. The actives still have to earn th
                a.retention_bonuses_paid, a.source, a.created_at AS attributed_at,
                me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
                me.billing_status, me.billing_cycle, me.contact_name, me.application_status,
+               me.public_email, me.public_phone,
+               (SELECT email FROM "MerchantUser" WHERE merchant_id = me.id LIMIT 1) AS owner_email,
                me.stripe_subscription_id, me.stripe_payment_method_id, me.billing_starts_at_member_count, me.member_limit,
                me.is_presetup, me.is_claimed, me.presetup_claimed_at,
                (SELECT COUNT(*) FROM "MerchantMember" WHERE merchant_id = me.id) AS member_count
@@ -7326,7 +8246,7 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       // Get invoice history
       const invoices = await sql`
-        SELECT id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at
+        SELECT id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type
         FROM "Invoice"
         WHERE merchant_id = ${merchantId}
         ORDER BY created_at DESC
@@ -8776,7 +9696,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             sql`SELECT a.id AS attribution_id, a.commission_start_date, a.commission_end_date,
                        a.retention_bonuses_paid, COALESCE(a.signup_bonus_paid, false) AS signup_bonus_paid, a.source, a.created_at AS attributed_at,
                        me.id AS merchant_id, me.business_name, me.subscription_tier AS tier,
-                       me.billing_status, me.contact_name, me.stripe_subscription_id, me.stripe_payment_method_id, me.member_limit, me.billing_cycle,
+                       me.billing_status, me.contact_name, me.stripe_subscription_id, me.stripe_payment_method_id, me.member_limit, me.billing_cycle, me.is_presetup,
                        (SELECT COUNT(*) FROM "MerchantMember" WHERE merchant_id = me.id) AS member_count
                 FROM "ContractorMerchantAttribution" a
                 JOIN "Merchant" me ON me.id = a.merchant_id

@@ -186,8 +186,26 @@ async function run() {
       console.log(`  ✅ PASSED: ${camItems.length} consumer campaign items returned (CORS: ${camCors}).`);
     }
 
+    // 8. Check Task 11 public features toggle endpoint
+    console.log('\nTesting GET /api/v1/features/public...');
+    const featRes = await requestUrl('/api/v1/features/public', {
+      headers: { 'Origin': 'https://perkfinity.net' }
+    });
+    const featCors = featRes.headers['access-control-allow-origin'];
+
+    if (featRes.status !== 200) {
+      console.error(`  ❌ FAILED: Expected 200, got ${featRes.status}.`);
+      passed = false;
+    } else if (!featRes.data || featRes.data.success !== true) {
+      console.error('  ❌ FAILED: Response data invalid:', featRes.data);
+      passed = false;
+    } else if (!featCors || (featCors !== 'https://perkfinity.net' && featCors !== '*')) {
+      console.error(`  ❌ FAILED: Missing or incorrect CORS origin: ${featCors}`);
+      passed = false;
+    } else {
+      console.log(`  ✅ PASSED: Features public status returned (roi_merchants: ${featRes.data.roi_merchants_enabled}, roi_reps: ${featRes.data.roi_reps_enabled}, CORS: ${featCors}).`);
+    }
   } catch (err) {
-    console.error('❌ Network error during smoke test:', err.message);
     passed = false;
   }
 
