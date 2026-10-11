@@ -4835,6 +4835,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           m.id as merchant_id,
           m.business_name,
           m.subscription_tier,
+          m.is_presetup,
+          m.member_limit,
           COALESCE(m.business_presence, 'physical') as business_presence,
           CASE WHEN m.is_app_sponsored = true AND (m.app_sponsored_until IS NULL OR m.app_sponsored_until >= NOW()) THEN true ELSE false END as is_app_sponsored,
           CASE WHEN m.is_web_sponsored = true AND (m.web_sponsored_until IS NULL OR m.web_sponsored_until >= NOW()) THEN true ELSE false END as is_web_sponsored,
@@ -4856,7 +4858,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           AND c.created_at <= ${end}
         WHERE m.business_name != '[Deleted]'
           AND (m.account_blocked = false OR m.account_blocked IS NULL)
-        GROUP BY m.id, m.business_name, m.subscription_tier, m.business_presence, m.is_app_sponsored, m.app_sponsored_until, m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until
+        GROUP BY m.id, m.business_name, m.subscription_tier, m.is_presetup, m.member_limit, m.business_presence, m.is_app_sponsored, m.app_sponsored_until, m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until
         ORDER BY total_actions DESC, m.business_name ASC
       `;
 
@@ -4894,6 +4896,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           merchant_name: m.business_name || 'Store',
           business_name: m.business_name || 'Store',
           subscription_tier: m.subscription_tier || 'free',
+          is_presetup: !!m.is_presetup,
+          member_limit: m.member_limit || 50,
           business_presence: m.business_presence || 'physical',
           is_app_sponsored: !!m.is_app_sponsored,
           is_web_sponsored: !!m.is_web_sponsored,
