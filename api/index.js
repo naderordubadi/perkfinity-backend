@@ -4007,7 +4007,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                (SELECT COUNT(*) FROM "Redemption" r
                 WHERE r.campaign_id = c.id AND (r.status = 'redeemed' OR r.redeemed = true)) as redeemed_count,
                (SELECT COUNT(*) FROM "Redemption" r
-                WHERE r.campaign_id = c.id AND r.claimed_at IS NOT NULL) as claimed_count
+                WHERE r.campaign_id = c.id AND r.claimed_at IS NOT NULL AND r.redeemed IS NOT TRUE AND COALESCE(r.status, '') != 'redeemed') as claimed_count
         FROM "Campaign" c
         WHERE c.merchant_id = ${hMerchantId}
         ORDER BY c.created_at DESC
