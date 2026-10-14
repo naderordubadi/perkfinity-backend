@@ -6238,6 +6238,8 @@ Working this way is harder and more expensive. The actives still have to earn th
             m.business_name, 
             m.business_presence, 
             m.subscription_tier, 
+            m.is_presetup,
+            m.member_limit,
             m.billing_status,
             m.updated_at,
             CASE
