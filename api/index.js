@@ -6018,7 +6018,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           WHERE m.is_presetup = true
           ORDER BY m.created_at DESC
         `;
-        return send(res, 200, { success: true, data: rows });
+        const formattedRows = rows.map(m => formatMerchantImages(m, req));
+        return send(res, 200, { success: true, data: formattedRows });
       } catch (err) {
         console.error('Error fetching pre-setup merchants:', err);
         return send(res, 500, { success: false, error: 'Failed to fetch pre-setup merchants: ' + err.message });
@@ -6077,7 +6078,7 @@ Working this way is harder and more expensive. The actives still have to earn th
 
         const isSelfProxy = (u) => {
           if (!u || typeof u !== 'string') return false;
-          return u.includes('/api/v1/merchants/');
+          return u.includes('/api/v1/merchants/') || u.includes('__custom__');
         };
         const sanitizeImgUrl = (u) => {
           if (!u || typeof u !== 'string') return null;
