@@ -512,6 +512,8 @@ module.exports = async function handler(req, res) {
         `;
         // Add html_body if table already exists without it
         await sql`ALTER TABLE "AnnouncementLog" ADD COLUMN IF NOT EXISTS html_body TEXT`;
+        await sql`ALTER TABLE "AnnouncementLog" ADD COLUMN IF NOT EXISTS merchant_id TEXT`;
+        await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS spotlight_sent_at TIMESTAMPTZ`;
         global._announcementLogMigrated = true;
       } catch (migErr) { /* table may already exist */ }
     }
@@ -5666,7 +5668,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until,
           m.stripe_web_sponsor_subscription_id, m.stripe_app_sponsor_subscription_id,
           m.stripe_fullpage_sponsor_subscription_id, m.stripe_bundle_sponsor_subscription_id,
-          m.stripe_sponsor_subscription_id,
+          m.stripe_sponsor_subscription_id, m.spotlight_sent_at,
           (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) as public_code,
           (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.merchant_id = m.id) as member_count,
           (SELECT COUNT(*) FROM "Campaign" c WHERE c.merchant_id = m.id) as campaign_count,
@@ -6003,7 +6005,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until,
             m.stripe_web_sponsor_subscription_id, m.stripe_app_sponsor_subscription_id,
             m.stripe_fullpage_sponsor_subscription_id, m.stripe_bundle_sponsor_subscription_id,
-            m.stripe_sponsor_subscription_id,
+            m.stripe_sponsor_subscription_id, m.spotlight_sent_at,
             mu.email as temp_email,
             (SELECT q.public_code FROM "QrCode" q WHERE q.merchant_id = m.id AND q.status = 'active' LIMIT 1) as public_code,
             (SELECT COUNT(*)::int FROM "MerchantMember" mm WHERE mm.merchant_id = m.id) as member_count,
@@ -6823,11 +6825,25 @@ Working this way is harder and more expensive. The actives still have to earn th
         }
       }
 
+      // Resolve merchant ID if this is a spotlight announcement
+      let merchantId = data.merchant_id || null;
+      if (!merchantId && data.merchant_code) {
+        try {
+          const [mRow] = await sql`
+            SELECT id FROM "Merchant"
+            WHERE id = ${data.merchant_code} 
+               OR id IN (SELECT merchant_id FROM "QrCode" WHERE public_code = ${data.merchant_code})
+            LIMIT 1
+          `;
+          if (mRow) merchantId = mRow.id;
+        } catch (e) { /* ignore */ }
+      }
+
       // Log to AnnouncementLog
       const logStatus = isScheduled ? 'scheduled' : (failCount > 0 && sentCount === 0 ? 'failed' : failCount > 0 ? 'partial' : 'sent');
       try {
         await sql`
-          INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, html_body, scheduled_at)
+          INSERT INTO "AnnouncementLog" (subject, sender, audience_type, filters, recipient_count, external_count, has_attachments, status, html_body, scheduled_at, merchant_id)
           VALUES (
             ${subject},
             ${senderObj.email},
@@ -6838,11 +6854,25 @@ Working this way is harder and more expensive. The actives still have to earn th
             ${brevoAttachments.length > 0},
             ${logStatus},
             ${html_body},
-            ${scheduled_at ? new Date(scheduled_at) : null}
+            ${scheduled_at ? new Date(scheduled_at) : null},
+            ${merchantId}
           )
         `;
       } catch (logErr) {
         console.error('AnnouncementLog insert error:', logErr.message || logErr);
+      }
+
+      // If spotlight merchant was announced, update spotlight_sent_at on Merchant
+      if (merchantId && (logStatus === 'sent' || logStatus === 'scheduled')) {
+        try {
+          await sql`
+            UPDATE "Merchant"
+            SET "spotlight_sent_at" = NOW()
+            WHERE "id" = ${merchantId}
+          `;
+        } catch (mErr) {
+          console.error('Failed to update Merchant.spotlight_sent_at:', mErr.message);
+        }
       }
 
       return send(res, 200, {
