@@ -386,6 +386,41 @@ function getBackendBaseUrl(req) {
   return process.env.BACKEND_URL || 'https://perkfinity-backend.vercel.app';
 }
 
+async function uploadToBlobIfBase64(val, pathname) {
+  if (!val || typeof val !== 'string') return val;
+  const trimmed = val.trim();
+  const match = trimmed.match(/^data:([^;]+);base64,(.*)$/s);
+  if (!match) return val; // already a URL or empty or not base64
+
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) {
+    console.warn('⚠️ BLOB_READ_WRITE_TOKEN not configured, skipping blob upload');
+    return val;
+  }
+
+  try {
+    const mimeType = match[1].toLowerCase();
+    const buffer = Buffer.from(match[2], 'base64');
+    let ext = 'jpg';
+    if (mimeType.includes('png')) ext = 'png';
+    else if (mimeType.includes('webp')) ext = 'webp';
+    else if (mimeType.includes('svg')) ext = 'svg';
+    else if (mimeType.includes('gif')) ext = 'gif';
+
+    const { put } = require('@vercel/blob');
+    const blob = await put(`${pathname}.${ext}`, buffer, {
+      access: 'public',
+      contentType: mimeType,
+      token,
+      addRandomSuffix: true
+    });
+    return blob.url;
+  } catch (err) {
+    console.error('Failed to upload image to Vercel Blob:', err);
+    return val; // fallback to storing value safely
+  }
+}
+
 function formatMerchantImages(merchant, req) {
   if (!merchant || typeof merchant !== 'object') return merchant;
   const baseUrl = getBackendBaseUrl(req);
@@ -457,67 +492,6 @@ module.exports = async function handler(req, res) {
       return send(res, 500, { success: false, error: 'DATABASE_URL is not set in Vercel environment variables' });
     }
     const sql = neon(DATABASE_URL);
-
-    // ── One-time migration: campaign_type column ───────────────────
-    // NOTE: status column on Redemption already exists in production.
-    // Do NOT bulk-update statuses here — it runs on every Vercel cold start
-    // and would revert valid 'pending' rows back to 'created'.
-    if (!global._campaignTypeMigrated) {
-      try {
-        await sql`ALTER TABLE "Campaign" ADD COLUMN IF NOT EXISTS campaign_type TEXT DEFAULT 'perk'`;
-        await sql`UPDATE "Campaign" SET campaign_type='announcement' WHERE discount_percentage = -1 AND campaign_type IS DISTINCT FROM 'announcement'`;
-        global._campaignTypeMigrated = true;
-      } catch (migErr) { /* column may already exist or non-critical */ }
-    }
-
-    // ── One-time migration: add social login columns to User ──────
-    if (!global._userSocialMigrated) {
-      try {
-        await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS apple_sub TEXT UNIQUE`;
-        await sql`ALTER TABLE "User" ADD COLUMN IF NOT EXISTS google_sub TEXT UNIQUE`;
-        global._userSocialMigrated = true;
-      } catch (migErr) { /* columns may already exist */ }
-    }
-
-    // ── One-time migration: revenue_type column on Invoice ─────────
-    if (!global._invoiceRevenueTypeMigrated) {
-      try {
-        await sql`ALTER TABLE "Invoice" ADD COLUMN IF NOT EXISTS "revenue_type" TEXT DEFAULT 'platform'`;
-        // Backfill existing invoices based on pricing
-        await sql`UPDATE "Invoice" SET "revenue_type" = 'sponsorship' WHERE "amount_cents" IN (4999, 9999, 12999)`;
-        await sql`UPDATE "Invoice" SET "revenue_type" = 'pouf' WHERE "merchant_id" IN (SELECT "id" FROM "Merchant" WHERE "billing_cycle" = 'lifetime') OR "stripe_invoice_id" LIKE 'cs_%'`;
-        global._invoiceRevenueTypeMigrated = true;
-      } catch (migErr) { /* non-critical */ }
-    }
-
-
-    // ── One-time migration: AnnouncementLog table ─────────────────
-    if (!global._announcementLogMigrated) {
-      try {
-        await sql`
-          CREATE TABLE IF NOT EXISTS "AnnouncementLog" (
-            id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-            subject TEXT NOT NULL,
-            sender TEXT NOT NULL,
-            audience_type TEXT,
-            filters JSONB,
-            recipient_count INTEGER DEFAULT 0,
-            external_count INTEGER DEFAULT 0,
-            has_attachments BOOLEAN DEFAULT false,
-            status TEXT DEFAULT 'sent',
-            html_body TEXT,
-            scheduled_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-          )
-        `;
-        // Add html_body if table already exists without it
-        await sql`ALTER TABLE "AnnouncementLog" ADD COLUMN IF NOT EXISTS html_body TEXT`;
-        await sql`ALTER TABLE "AnnouncementLog" ADD COLUMN IF NOT EXISTS merchant_id TEXT`;
-        await sql`ALTER TABLE "Merchant" ADD COLUMN IF NOT EXISTS spotlight_sent_at TIMESTAMPTZ`;
-        global._announcementLogMigrated = true;
-      } catch (migErr) { /* table may already exist */ }
-    }
-
 
     // ── Health check ──────────────────────────────────────────────
     if (method === 'GET' && (url === '/' || url === '/health' || url.endsWith('/health'))) {
@@ -1160,13 +1134,18 @@ module.exports = async function handler(req, res) {
       }
 
       // Full field update + status change in one query
+      let updatedLogo = data.logo_url;
+      if (updatedLogo) {
+        updatedLogo = await uploadToBlobIfBase64(updatedLogo, `merchants/${merchantId}/logo`);
+      }
+
       await sql`
         UPDATE "Merchant" SET
           business_name      = COALESCE(${data.name || null}, business_name),
           website            = COALESCE(${data.website || null}, website),
           welcome_offer_text = COALESCE(${data.welcome_offer_text || null}, welcome_offer_text),
           business_category  = COALESCE(${data.category || null}, business_category),
-          logo_url           = CASE WHEN ${data.logo_url !== undefined} THEN ${data.logo_url || null} ELSE logo_url END,
+          logo_url           = CASE WHEN ${data.logo_url !== undefined} THEN ${updatedLogo || null} ELSE logo_url END,
           application_status = 'pending',
           updated_at         = NOW()
         WHERE id = ${merchantId}
@@ -3877,8 +3856,9 @@ Working this way is harder and more expensive. The actives still have to earn th
       // Allow null to support logo deletion
       if (data.logo_url === undefined) return send(res, 400, { success: false, error: 'Missing logo_url' });
 
-      const logoValue = data.logo_url || null;
-      await sql`UPDATE "Merchant" SET logo_url = ${logoValue} WHERE id = ${merchantId}`;
+      let logoValue = data.logo_url || null;
+      if (logoValue) logoValue = await uploadToBlobIfBase64(logoValue, `merchants/${merchantId}/logo`);
+      await sql`UPDATE "Merchant" SET logo_url = ${logoValue}, updated_at = NOW() WHERE id = ${merchantId}`;
       return send(res, 200, { success: true, data: { logo_url: logoValue } });
     }
 
@@ -3898,8 +3878,9 @@ Working this way is harder and more expensive. The actives still have to earn th
       const data = req.body || {};
       if (data.cover_photo_url === undefined) return send(res, 400, { success: false, error: 'Missing cover_photo_url' });
 
-      const coverValue = data.cover_photo_url || null;
-      await sql`UPDATE "Merchant" SET cover_photo_url = ${coverValue} WHERE id = ${merchantId}`;
+      let coverValue = data.cover_photo_url || null;
+      if (coverValue) coverValue = await uploadToBlobIfBase64(coverValue, `merchants/${merchantId}/cover`);
+      await sql`UPDATE "Merchant" SET cover_photo_url = ${coverValue}, updated_at = NOW() WHERE id = ${merchantId}`;
       return send(res, 200, { success: true, data: { cover_photo_url: coverValue } });
     }
 
@@ -5767,14 +5748,16 @@ Working this way is harder and more expensive. The actives still have to earn th
         };
 
         if (body.cover_photo_url !== undefined) {
-          const coverVal = sanitizeImg(body.cover_photo_url);
+          let coverVal = sanitizeImg(body.cover_photo_url);
           if (coverVal !== undefined) {
+            coverVal = await uploadToBlobIfBase64(coverVal, `merchants/${merchantId}/cover`);
             await sql`UPDATE "Merchant" SET cover_photo_url = ${coverVal}, updated_at = NOW() WHERE id = ${merchantId}`;
           }
         }
         if (body.logo_url !== undefined) {
-          const logoVal = sanitizeImg(body.logo_url);
+          let logoVal = sanitizeImg(body.logo_url);
           if (logoVal !== undefined) {
+            logoVal = await uploadToBlobIfBase64(logoVal, `merchants/${merchantId}/logo`);
             await sql`UPDATE "Merchant" SET logo_url = ${logoVal}, updated_at = NOW() WHERE id = ${merchantId}`;
           }
         }
@@ -6120,8 +6103,8 @@ Working this way is harder and more expensive. The actives still have to earn th
         const isWebSponsor = data.is_web_sponsored !== undefined ? !!data.is_web_sponsored : undefined;
         const isAppSponsor = data.is_app_sponsored !== undefined ? !!data.is_app_sponsored : undefined;
         const isFullpageSponsor = data.is_fullpage_sponsored !== undefined ? !!data.is_fullpage_sponsored : undefined;
-        const sanitizedLogo = sanitizeImgUrl(data.logo_url);
-        const sanitizedCover = sanitizeImgUrl(data.cover_photo_url);
+        const sanitizedLogo = await uploadToBlobIfBase64(sanitizeImgUrl(data.logo_url), `merchants/${merchantId}/logo`);
+        const sanitizedCover = await uploadToBlobIfBase64(sanitizeImgUrl(data.cover_photo_url), `merchants/${merchantId}/cover`);
 
         // 1. Update Merchant
         await sql`
