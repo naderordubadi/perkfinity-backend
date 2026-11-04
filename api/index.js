@@ -1931,10 +1931,12 @@ Working this way is harder and more expensive. The actives still have to earn th
       return send(res, 200, { success: true, count: formattedMerchants.length, data: formattedMerchants });
     }
 
-    // ── GET /api/v1/public/local-merchants — for /localperks page ─
+    // ── GET /api/v1/public/local-merchants — for /localperks, /store/:slug & /deals/:location ─
     if (method === 'GET' && url.startsWith('/api/v1/public/local-merchants')) {
       const qs = (req.url || '').split('?')[1] || '';
       const params = new URLSearchParams(qs);
+      const idParam = (params.get('id') || '').trim();
+      const slugParam = (params.get('slug') || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
       const q = (params.get('q') || '').trim();
       const cities = params.getAll('city').map(c => c.trim().toLowerCase()).filter(Boolean);
       const zips = params.getAll('zip').map(z => z.trim()).filter(Boolean);
@@ -1944,7 +1946,110 @@ Working this way is harder and more expensive. The actives still have to earn th
       let merchants;
       const like = '%' + q + '%';
 
-      if (q && cities.length > 0 && zips.length > 0) {
+      if (idParam) {
+        // Fast 1-row lookup for /store/:slug client-side hydration check (~1.2 KB transfer)
+        merchants = await sql`
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.address,l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.id = ${idParam}
+            AND m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
+          LIMIT 1`;
+      } else if (slugParam) {
+        // Targeted SSR lookup for /store/:slug: fetches the matched store + up to 4 nearby stores (~6 KB transfer)
+        const targetRows = await sql`
+          SELECT m.id,m.business_name,m.updated_at,
+                 CASE
+                   WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                   WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                   WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                   ELSE '__custom__'
+                 END AS logo_url,
+                 CASE
+                   WHEN m.cover_photo_url IS NULL OR m.cover_photo_url = '' THEN NULL
+                   WHEN m.cover_photo_url LIKE 'http://%' THEN REPLACE(m.cover_photo_url, 'http://', 'https://')
+                   WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
+                   ELSE '__custom__'
+                 END AS cover_photo_url,
+                 m.business_presence,m.business_category,
+                 m.is_fullpage_sponsored,m.fullpage_sponsored_until,
+                 CASE
+                   WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
+                   WHEN m.promo_banner_url LIKE 'http://%' THEN REPLACE(m.promo_banner_url, 'http://', 'https://')
+                   WHEN m.promo_banner_url LIKE 'https://%' THEN m.promo_banner_url
+                   ELSE '__custom__'
+                 END AS promo_banner_url,
+                 m.promo_description,
+                 m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
+                 COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                 l.address,l.city,l.state,l.postal_code,
+                 (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
+          FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND (m.application_status IS NULL OR m.application_status = 'approved')
+            AND m.business_name != '[Deleted]'
+            AND m.is_hidden = false
+            AND (
+              TRIM(BOTH '-' FROM REGEXP_REPLACE(LOWER(REGEXP_REPLACE(m.business_name, '[''’]', '', 'g')), '[^a-z0-9]+', '-', 'g')) = ${slugParam}
+              OR TRIM(BOTH '-' FROM REGEXP_REPLACE(LOWER(REGEXP_REPLACE(m.business_name, '[''’]', '', 'g')), '[^a-z0-9]+', '-', 'g')) LIKE ${slugParam + '%'}
+            )
+          ORDER BY LENGTH(m.business_name) ASC
+          LIMIT 1`;
+
+        if (targetRows.length > 0) {
+          const primary = targetRows[0];
+          const primaryCity = (primary.city || '').trim().toLowerCase();
+          const nearbyRows = await sql`
+            SELECT m.id,m.business_name,m.updated_at,
+                   CASE
+                     WHEN m.logo_url IS NULL OR m.logo_url = '' THEN NULL
+                     WHEN m.logo_url LIKE 'http://%' THEN REPLACE(m.logo_url, 'http://', 'https://')
+                     WHEN m.logo_url LIKE 'https://%' THEN m.logo_url
+                     ELSE '__custom__'
+                   END AS logo_url,
+                   m.business_presence,m.business_category,
+                   COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
+                   l.city,l.state,l.postal_code
+            FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
+            WHERE m.id != ${primary.id}
+              AND m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+              AND (m.application_status IS NULL OR m.application_status = 'approved')
+              AND m.business_name != '[Deleted]'
+              AND m.is_hidden = false
+            ORDER BY CASE WHEN LOWER(COALESCE(l.city, '')) = ${primaryCity} THEN 0 ELSE 1 END, m.business_name ASC
+            LIMIT 4`;
+          merchants = [primary, ...nearbyRows];
+        } else {
+          merchants = [];
+        }
+      } else if (q && cities.length > 0 && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
                  CASE
@@ -1978,7 +2083,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       } else if (q && cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2013,7 +2118,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities})
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       } else if (q && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2048,7 +2153,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2083,7 +2188,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       } else if (q) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2118,7 +2223,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like}
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       } else if (cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2153,7 +2258,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities})
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       } else if (zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2188,7 +2293,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       } else {
         // No filters — return all local/mobile merchants
         merchants = await sql`
@@ -2223,7 +2328,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
-          ORDER BY m.business_name ASC LIMIT 100`;
+          ORDER BY m.business_name ASC LIMIT 500`;
       }
 
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
