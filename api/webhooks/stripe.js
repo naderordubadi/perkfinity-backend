@@ -176,13 +176,17 @@ module.exports = async (req, res) => {
           }
         } else if (session.mode === 'payment' && session.metadata?.billing_cycle === 'lifetime') {
           const [merch] = await sql`SELECT promo_code, subscription_tier FROM "Merchant" WHERE id = ${merchantId} LIMIT 1`;
-          if (merch?.promo_code) {
-            await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchantId}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${merch.promo_code} AND type = 'pouf'`;
+          const effectivePromo = session.metadata?.promo_code || merch?.promo_code || null;
+          const effectiveTier = session.metadata?.to_tier || (merch?.subscription_tier === 'presetup_50' ? 'online_scale' : merch?.subscription_tier) || 'online_scale';
+          if (effectivePromo) {
+            await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchantId}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${effectivePromo} AND type = 'pouf'`;
           }
           await sql`
             UPDATE "Merchant"
             SET billing_status = 'active',
-                subscription_tier = COALESCE(${merch?.subscription_tier}, 'tier1'),
+                subscription_tier = ${effectiveTier},
+                member_limit = 999999,
+                promo_code = COALESCE(${effectivePromo}, promo_code),
                 billing_cycle = 'lifetime',
                 stripe_customer_id = ${customerId},
                 account_blocked = false,
@@ -193,7 +197,7 @@ module.exports = async (req, res) => {
 
           // Record the one-time POUF payment in the Invoice table
           await sql`
-            INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at)
+            INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
             VALUES (
               gen_random_uuid()::text,
               ${merchantId},
@@ -204,9 +208,10 @@ module.exports = async (req, res) => {
               NOW(),
               NOW(),
               NOW(),
-              NOW()
+              NOW(),
+              'pouf'
             )
-            ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW()
+            ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = 'pouf'
           `;
 
           // Start commission attribution

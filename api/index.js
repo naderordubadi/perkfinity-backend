@@ -8064,29 +8064,68 @@ Working this way is harder and more expensive. The actives still have to earn th
         || sub?.default_payment_method
         || null;
 
-      // Read billing_cycle from Stripe session metadata (set when checkout was created)
+      // Read billing_cycle and optional to_tier / promo_code from Stripe session metadata
       const confirmedBillingCycle = session.metadata?.billing_cycle || 'monthly';
+      const metaToTier = session.metadata?.to_tier || null;
+      const metaPromoCode = session.metadata?.promo_code || null;
+      const tierLimitMap = { tier1: 999999, online_starter: 500, online_growth: 2500, online_scale: 999999 };
 
-      const [merch] = await sql`SELECT promo_code, subscription_tier FROM "Merchant" WHERE id = ${merchant_id} LIMIT 1`;
+      const [merch] = await sql`SELECT promo_code, subscription_tier, member_limit FROM "Merchant" WHERE id = ${merchant_id} LIMIT 1`;
+      const effectivePromo = metaPromoCode || merch?.promo_code || null;
+      const effectiveTier = metaToTier || (merch?.subscription_tier === 'presetup_50' ? 'online_starter' : merch?.subscription_tier) || 'tier1';
+      const effectiveLimit = tierLimitMap[effectiveTier] || merch?.member_limit || null;
 
-      if (confirmedBillingCycle === 'lifetime' && merch?.promo_code) {
-        await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchant_id}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${merch.promo_code} AND type = 'pouf'`;
+      if (confirmedBillingCycle === 'lifetime' && effectivePromo) {
+        await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchant_id}, used_at = NOW(), use_count = use_count + 1 WHERE code = ${effectivePromo} AND type = 'pouf'`;
       }
 
       await sql`
         UPDATE "Merchant"
         SET billing_status        = 'active',
-            subscription_tier     = COALESCE(subscription_tier, 'tier1'),
+            subscription_tier     = ${effectiveTier},
+            member_limit          = COALESCE(${effectiveLimit}, member_limit),
+            promo_code            = COALESCE(${effectivePromo}, promo_code),
             billing_cycle         = ${confirmedBillingCycle},
             stripe_customer_id    = ${session.customer},
             stripe_subscription_id = ${sub?.id || null},
-            stripe_payment_method_id = ${paymentMethodId},
+            stripe_payment_method_id = COALESCE(${paymentMethodId}, stripe_payment_method_id),
             next_billing_date     = ${nextBilling},
             subscription_started_at = COALESCE(subscription_started_at, NOW()),
+            billing_starts_at_member_count = NULL,
+            member_cap_notified   = false,
+            cap_block_count       = 0,
             account_blocked       = false,
             updated_at            = NOW()
         WHERE id = ${merchant_id}
       `;
+
+      // Start commission clock for any attributed contractor rep if not already started
+      await sql`
+        UPDATE "ContractorMerchantAttribution"
+        SET commission_start_date = NOW(),
+            updated_at            = NOW()
+        WHERE merchant_id = ${merchant_id} AND commission_start_date IS NULL
+      `.catch(() => {});
+
+      if (confirmedBillingCycle === 'lifetime') {
+        await sql`
+          INSERT INTO "Invoice" (id, merchant_id, stripe_invoice_id, amount_cents, currency, status, period_start, period_end, paid_at, created_at, revenue_type)
+          VALUES (
+            gen_random_uuid()::text,
+            ${merchant_id},
+            COALESCE(${session.invoice}, ${session.id}),
+            ${session.amount_total ?? 0},
+            ${session.currency || 'usd'},
+            'paid',
+            NOW(),
+            NOW(),
+            NOW(),
+            NOW(),
+            'pouf'
+          )
+          ON CONFLICT (stripe_invoice_id) DO UPDATE SET status = 'paid', paid_at = NOW(), revenue_type = 'pouf'
+        `;
+      }
 
       return send(res, 200, { success: true });
     }
@@ -8819,31 +8858,23 @@ Working this way is harder and more expensive. The actives still have to earn th
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
       if (payload.merchantId !== merchantId) return send(res, 403, { success: false, error: 'Forbidden' });
 
-      const { target_tier } = req.body || {};
+      const { target_tier, billing_cycle, promo_code } = req.body || {};
       if (!target_tier) return send(res, 400, { success: false, error: 'target_tier is required' });
+      const requestedCycle = billing_cycle === 'annual' ? 'annual' : 'monthly';
+      const requestedPromo = (promo_code || '').trim().toUpperCase() || null;
 
       const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
       if (!STRIPE_KEY) return send(res, 500, { success: false, error: 'Stripe not configured' });
       const stripeClient = Stripe(STRIPE_KEY);
 
-      const tierPriceMap = {
-        tier1: process.env.STRIPE_TIER1_PRICE_ID,
-        online_starter: process.env.STRIPE_ONLINE_STARTER_PRICE_ID,
-        online_growth: process.env.STRIPE_ONLINE_GROWTH_PRICE_ID,
-        online_scale: process.env.STRIPE_ONLINE_SCALE_PRICE_ID,
-      };
       const tierLimitMap = {
         tier1: 999999, online_starter: 500, online_growth: 2500, online_scale: 999999,
       };
       // Upgrade direction validation (no downgrades)
       const upgradeOrder = ['online_starter', 'online_growth', 'online_scale'];
 
-      const targetPriceId = tierPriceMap[target_tier];
-      if (!targetPriceId) return send(res, 400, { success: false, error: `No Stripe price configured for target tier '${target_tier}'` });
-      const newLimit = tierLimitMap[target_tier];
-
       const [merchant] = await sql`
-        SELECT id, subscription_tier, billing_status, account_blocked,
+        SELECT id, subscription_tier, is_presetup, billing_status, account_blocked,
                stripe_customer_id, stripe_payment_method_id, stripe_subscription_id,
                billing_starts_at_member_count, billing_cycle
         FROM "Merchant" WHERE id = ${merchantId} LIMIT 1
@@ -8851,10 +8882,51 @@ Working this way is harder and more expensive. The actives still have to earn th
       if (!merchant) return send(res, 404, { success: false, error: 'Merchant not found' });
       if (merchant.account_blocked) return send(res, 400, { success: false, error: 'Account is blocked. Please reactivate first.' });
 
+      let isPoufUpgrade = false;
+      if (requestedPromo) {
+        const [ac] = await sql`
+          SELECT id, code, type, used FROM "AdminAccessCode"
+          WHERE UPPER(code) = ${requestedPromo} AND (expires_at IS NULL OR expires_at > NOW())
+          LIMIT 1
+        `;
+        if (!ac) return send(res, 400, { success: false, error: 'Invalid or expired promo code.' });
+        if (ac.type === 'free_for_life') {
+          if (ac.used) return send(res, 400, { success: false, error: 'This Free For Life code has already been used.' });
+          await sql`UPDATE "AdminAccessCode" SET used = true, used_by = ${merchantId}, used_at = NOW(), use_count = use_count + 1 WHERE id = ${ac.id}`;
+          await sql`
+            UPDATE "Merchant"
+            SET subscription_tier = 'free_for_life',
+                billing_status = 'active',
+                member_limit = 999999,
+                promo_code = ${ac.code},
+                member_cap_notified = false,
+                cap_block_count = 0,
+                billing_starts_at_member_count = NULL,
+                account_blocked = false,
+                updated_at = NOW()
+            WHERE id = ${merchantId}
+          `;
+          return send(res, 200, { success: true, upgraded_tier: 'free_for_life', message: 'Free For Life plan activated!' });
+        } else if (ac.type === 'pouf') {
+          if (ac.used) return send(res, 400, { success: false, error: 'This Pay Once Use Forever code has already been used.' });
+          if (target_tier !== 'online_scale' || requestedCycle !== 'annual') {
+            return send(res, 400, { success: false, error: 'POUF Lifetime codes are only valid on the Scale (Annual) plan.' });
+          }
+          isPoufUpgrade = true;
+          await sql`UPDATE "Merchant" SET promo_code = ${ac.code}, updated_at = NOW() WHERE id = ${merchantId}`;
+        } else {
+          return send(res, 400, { success: false, error: 'This promo code cannot be used on plan upgrades.' });
+        }
+      }
+
+      const targetPriceId = getPriceId(target_tier, isPoufUpgrade ? 'annual' : requestedCycle);
+      if (!targetPriceId) return send(res, 400, { success: false, error: `No Stripe price configured for target tier '${target_tier}' (${requestedCycle})` });
+      const newLimit = tierLimitMap[target_tier];
+
       const currentTier = merchant.subscription_tier;
       const hasActiveSubscription = !!merchant.stripe_subscription_id && merchant.billing_status === 'active';
       const isPromoPhase = !!merchant.billing_starts_at_member_count;
-      const isTrialTier = ['trial', 'free', 'free_for_life'].includes(currentTier) || merchant.is_presetup;
+      const isTrialTier = ['trial', 'free', 'free_for_life', 'presetup_50'].includes(currentTier) || merchant.is_presetup;
 
       // Validate upgrade direction for online tiers
       if (!isTrialTier && !isPromoPhase && hasActiveSubscription) {
@@ -8866,17 +8938,40 @@ Working this way is harder and more expensive. The actives still have to earn th
       }
 
       try {
-        // ── If no Stripe customer, no saved card, or no active subscription → open Stripe Checkout ──
-        if (!merchant.stripe_customer_id || !merchant.stripe_payment_method_id || !merchant.stripe_subscription_id || merchant.billing_cycle === 'lifetime') {
+        // ── If POUF upgrade, or no Stripe customer, no saved card, or no active subscription → open Stripe Checkout ──
+        if (isPoufUpgrade || !merchant.stripe_customer_id || !merchant.stripe_payment_method_id || !merchant.stripe_subscription_id || merchant.billing_cycle === 'lifetime') {
           const origin = req.headers.origin || 'https://perkfinity.net';
+          let lineItems = [{ price: targetPriceId, quantity: 1 }];
+          let mode = 'subscription';
+          let invoiceCreation = undefined;
+          if (isPoufUpgrade) {
+            const priceObj = await stripeClient.prices.retrieve(targetPriceId);
+            lineItems = [{
+              price_data: {
+                currency: priceObj.currency,
+                unit_amount: priceObj.unit_amount,
+                product_data: { name: 'Lifetime Access - Scale' }
+              },
+              quantity: 1
+            }];
+            mode = 'payment';
+            invoiceCreation = { enabled: true };
+          }
           const sessionParams = {
             payment_method_types: ['card'],
-            line_items: [{ price: targetPriceId, quantity: 1 }],
-            mode: 'subscription',
+            line_items: lineItems,
+            mode: mode,
             success_url: `${origin}/dashboard.html?tab=billing&upgrade_success=true&session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${origin}/dashboard.html?tab=billing&upgrade_cancelled=true`,
-            metadata: { merchant_id: merchantId, billing_cycle: 'monthly', trigger: 'manual_upgrade', to_tier: target_tier }
+            metadata: {
+              merchant_id: merchantId,
+              billing_cycle: isPoufUpgrade ? 'lifetime' : requestedCycle,
+              trigger: 'manual_upgrade',
+              to_tier: target_tier,
+              ...(requestedPromo ? { promo_code: requestedPromo } : {})
+            }
           };
+          if (invoiceCreation) sessionParams.invoice_creation = invoiceCreation;
           if (merchant.stripe_customer_id) {
             sessionParams.customer = merchant.stripe_customer_id;
           } else {
@@ -8892,12 +8987,13 @@ Working this way is harder and more expensive. The actives still have to earn th
             customer: merchant.stripe_customer_id,
             items: [{ price: targetPriceId }],
             default_payment_method: merchant.stripe_payment_method_id,
-            metadata: { merchant_id: merchantId, trigger: 'manual_upgrade', from_tier: currentTier, to_tier: target_tier },
+            metadata: { merchant_id: merchantId, trigger: 'manual_upgrade', from_tier: currentTier, to_tier: target_tier, billing_cycle: requestedCycle },
           });
 
           await sql`
             UPDATE "Merchant"
             SET subscription_tier              = ${target_tier},
+                billing_cycle                  = ${requestedCycle},
                 billing_status                 = 'active',
                 member_limit                   = ${newLimit},
                 member_cap_notified            = false,
@@ -8910,7 +9006,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                 updated_at                     = NOW()
             WHERE id = ${merchantId}
           `;
-          console.log(`[Upgrade] Merchant ${merchantId} upgraded from '${currentTier}' to '${target_tier}' — new subscription ${subscription.id}`);
+          console.log(`[Upgrade] Merchant ${merchantId} upgraded from '${currentTier}' to '${target_tier}' (${requestedCycle}) — new subscription ${subscription.id}`);
           return send(res, 200, { success: true, message: `Upgraded to ${target_tier}! Billing starts today.` });
         }
 
