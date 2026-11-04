@@ -2043,7 +2043,7 @@ Working this way is harder and more expensive. The actives still have to earn th
               AND (m.application_status IS NULL OR m.application_status = 'approved')
               AND m.business_name != '[Deleted]'
               AND m.is_hidden = false
-            ORDER BY CASE WHEN LOWER(COALESCE(l.city, '')) = ${primaryCity} THEN 0 ELSE 1 END, m.business_name ASC
+            ORDER BY CASE WHEN LOWER(COALESCE(l.city, '')) = ${primaryCity} THEN 0 ELSE 1 END, RANDOM()
             LIMIT 4`;
           merchants = [primary, ...nearbyRows];
         } else {
