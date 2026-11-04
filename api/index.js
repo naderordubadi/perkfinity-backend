@@ -649,7 +649,8 @@ module.exports = async function handler(req, res) {
         } else if (accessCode.type === 'extended_trial') {
           memberLimit = accessCode.member_limit || 100; extendedTrial = true;
         } else if (accessCode.type === 'pouf') {
-          if (data.billing_cycle !== 'annual') return send(res, 400, { success: false, error: 'POUF Lifetime codes require Annual billing. Please switch to Annual.' });
+          if (accessCode.used) return send(res, 400, { success: false, error: 'This promo code has already been used.' });
+          if (selectedTier !== 'online_scale' || data.billing_cycle !== 'annual') return send(res, 400, { success: false, error: 'POUF Lifetime codes are only valid on the Scale (Annual) plan.' });
         } else {
           return send(res, 400, { success: false, error: 'Unrecognized promo code type.' });
         }
@@ -971,8 +972,9 @@ module.exports = async function handler(req, res) {
           billingStartsAt = memberLimit;
           await sql`UPDATE "AdminAccessCode" SET use_count = use_count + 1, used_at = NOW() WHERE code = ${promoCode}`;
         } else if (accessCode.type === 'pouf') {
-          if (data.billing_cycle && data.billing_cycle !== 'annual') {
-            return send(res, 400, { success: false, error: 'POUF promo codes require an annual billing cycle.' });
+          if (accessCode.used) return send(res, 400, { success: false, error: 'This promo code has already been used.' });
+          if (data.tier !== 'online_scale' || data.billing_cycle !== 'annual') {
+            return send(res, 400, { success: false, error: 'POUF Lifetime codes are only valid on the Scale (Annual) plan.' });
           }
         } else {
           return send(res, 400, { success: false, error: 'Unrecognized promo code type.' });
@@ -7173,9 +7175,12 @@ Working this way is harder and more expensive. The actives still have to earn th
         LIMIT 1
       `;
       if (!ac) return send(res, 404, { success: false, error: 'Invalid or expired promo code.' });
-      // FFL codes are single-use — reject if already redeemed
+      // FFL and POUF codes are single-use — reject if already redeemed
       if (ac.type === 'free_for_life' && ac.used) {
         return send(res, 404, { success: false, error: 'This Free For Life code has already been used.' });
+      }
+      if (ac.type === 'pouf' && ac.used) {
+        return send(res, 404, { success: false, error: 'This Pay Once Use Forever code has already been used.' });
       }
       return send(res, 200, { success: true, data: { type: ac.type, member_limit: ac.member_limit, code: ac.code } });
     }
@@ -7315,7 +7320,10 @@ Working this way is harder and more expensive. The actives still have to earn th
           try {
             const stripeClient = Stripe(STRIPE_KEY);
             const priceId = getPriceId(merchant.subscription_tier, isPouf ? 'annual' : (merchant.billing_cycle || 'monthly'));
-            if (!priceId) {
+            if (isPouf && merchant.subscription_tier !== 'online_scale') {
+              billingWarning = `POUF Lifetime codes are only valid on the Scale plan (merchant is on '${merchant.subscription_tier}').`;
+              isPouf = false;
+            } else if (!priceId) {
               billingWarning = `No Stripe price ID configured for tier '${merchant.subscription_tier}'. Check STRIPE_*_PRICE_ID env vars.`;
             } else {
               if (isPouf) {
@@ -7832,8 +7840,8 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (merchant.promo_code) {
           const [ac] = await sql`SELECT type FROM "AdminAccessCode" WHERE code = ${merchant.promo_code} LIMIT 1`;
           if (ac && ac.type === 'pouf') {
-            if (finalCycle !== 'annual') {
-              return send(res, 400, { success: false, error: 'POUF Lifetime codes are only valid on Annual plans. Please select the Annual option to proceed.' });
+            if (tier !== 'online_scale' || finalCycle !== 'annual') {
+              return send(res, 400, { success: false, error: 'POUF Lifetime codes are only valid on the Scale (Annual) plan.' });
             }
             isPouf = true;
           }
@@ -7956,8 +7964,8 @@ Working this way is harder and more expensive. The actives still have to earn th
       if (merchant.promo_code) {
         const [ac] = await sql`SELECT type FROM "AdminAccessCode" WHERE code = ${merchant.promo_code} LIMIT 1`;
         if (ac && ac.type === 'pouf') {
-          if (billingCycle !== 'annual') {
-            return send(res, 400, { success: false, error: 'POUF Lifetime codes are only valid on Annual plans. Please select the Annual option to proceed.' });
+          if (merchant.subscription_tier !== 'online_scale' || billingCycle !== 'annual') {
+            return send(res, 400, { success: false, error: 'POUF Lifetime codes are only valid on the Scale (Annual) plan.' });
           }
           isPouf = true;
           checkoutMode = 'payment';
