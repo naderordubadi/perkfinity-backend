@@ -1814,13 +1814,13 @@ Working this way is harder and more expensive. The actives still have to earn th
           l.city,
           l.state,
           l.postal_code,
-          (SELECT c.title
+          COALESCE(NULLIF(m.welcome_offer_text, ''), (SELECT c.title
              FROM "Campaign" c
             WHERE c.merchant_id = m.id
               AND c.status = 'active'
               AND c.discount_percentage >= 0
             ORDER BY c.created_at ASC
-            LIMIT 1) AS welcome_perk,
+            LIMIT 1)) AS welcome_perk,
           (SELECT q.public_code
              FROM "QrCode" q
             WHERE q.merchant_id = m.id
@@ -1863,7 +1863,8 @@ Working this way is harder and more expensive. The actives still have to earn th
                    WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
                    ELSE '__custom__'
                  END AS cover_photo_url,
-                 m.website, m.welcome_offer_text,
+                 m.website,
+                 COALESCE(NULLIF(m.welcome_offer_text, ''), (SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until,
                  CASE
@@ -1901,7 +1902,8 @@ Working this way is harder and more expensive. The actives still have to earn th
                    WHEN m.cover_photo_url LIKE 'https://%' THEN m.cover_photo_url
                    ELSE '__custom__'
                  END AS cover_photo_url,
-                 m.website, m.welcome_offer_text,
+                 m.website,
+                 COALESCE(NULLIF(m.welcome_offer_text, ''), (SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
                  m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until,
                  CASE
