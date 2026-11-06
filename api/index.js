@@ -6852,9 +6852,10 @@ Working this way is harder and more expensive. The actives still have to earn th
         try {
           const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
           sendSmtpEmail.sender = senderObj;
-          // Use BCC for privacy — send to self, BCC all recipients
-          sendSmtpEmail.to = [senderObj];
-          sendSmtpEmail.bcc = batch.map(email => ({ email }));
+          // Use messageVersions so each recipient receives a direct To: header while keeping all recipients private
+          sendSmtpEmail.messageVersions = batch.map(email => ({
+            to: [{ email }]
+          }));
           sendSmtpEmail.subject = subject;
           sendSmtpEmail.htmlContent = html_body;
           if (brevoAttachments.length > 0) sendSmtpEmail.attachment = brevoAttachments;
