@@ -131,6 +131,69 @@ function generateWelcomePromoCode(businessName) {
   return 'HI' + cleanWord;
 }
 
+// ── IndexNow Automatic Search Notification ───────────────────
+const INDEXNOW_KEY = '4f8b2e9c7a1d6035b8e4c2a9f1d7063e';
+const INDEXNOW_KEY_LOCATION = `https://www.perkfinity.net/${INDEXNOW_KEY}.txt`;
+
+function slugifyForSeo(text) {
+  if (!text) return '';
+  return String(text).toLowerCase().trim()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+async function notifyIndexNowForMerchant(sql, merchantId, opts = {}) {
+  if (!merchantId) return;
+  if (process.env.NODE_ENV === 'test' || process.env.DISABLE_INDEXNOW === 'true') return;
+  if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') return;
+
+  try {
+    const [m] = await sql`
+      SELECT m.business_name, m.business_presence, m.is_hidden, m.account_blocked, m.application_status, l.city
+      FROM "Merchant" m
+      LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id AND l.is_active = true
+      WHERE m.id = ${merchantId}
+      LIMIT 1
+    `;
+    if (!m || !m.business_name || m.business_name === '[Deleted]') return;
+    if (!opts.allowHidden && (m.is_hidden || m.account_blocked || (m.application_status && m.application_status !== 'approved'))) {
+      return;
+    }
+
+    const storeSlug = slugifyForSeo(m.business_name);
+    if (!storeSlug) return;
+
+    const urlList = [`https://www.perkfinity.net/store/${storeSlug}`];
+    const isOnlineOnly = m.business_presence === 'online';
+    if (!isOnlineOnly) {
+      urlList.push('https://www.perkfinity.net/localperks');
+      urlList.push('https://www.perkfinity.net/deals/orange-county');
+      const citySlug = slugifyForSeo(m.city);
+      if (citySlug && citySlug !== 'orange-county' && !citySlug.endsWith('-county')) {
+        urlList.push(`https://www.perkfinity.net/deals/${citySlug}`);
+      }
+    }
+    if (isOnlineOnly || m.business_presence === 'hybrid') {
+      urlList.push('https://www.perkfinity.net/codes');
+    }
+
+    await fetch('https://api.indexnow.org/indexnow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({
+        host: 'www.perkfinity.net',
+        key: INDEXNOW_KEY,
+        keyLocation: INDEXNOW_KEY_LOCATION,
+        urlList: [...new Set(urlList)]
+      }),
+      signal: AbortSignal.timeout(1500)
+    });
+  } catch (err) {
+    console.warn('[IndexNow] Non-fatal ping warning:', err && err.message ? err.message : err);
+  }
+}
+
 // ── Stripe price ID maps ─────────────────────────────────────
 // Central helper so all billing paths (checkout, admin approval,
 // reactivate, auto-charge) resolve the correct Stripe price in one place.
@@ -1350,6 +1413,7 @@ module.exports = async function handler(req, res) {
         SET onboarding_complete = true, updated_at = NOW()
         WHERE id = ${merchantId}
       `;
+      await notifyIndexNowForMerchant(sql, merchantId);
       return send(res, 200, { success: true });
     }
 
@@ -1867,7 +1931,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  END AS cover_photo_url,
                  m.website,
                  COALESCE(NULLIF(m.welcome_offer_text, ''), (SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
+                 m.business_presence, m.business_category, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until,
                  CASE
                    WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
@@ -1906,7 +1970,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  END AS cover_photo_url,
                  m.website,
                  COALESCE(NULLIF(m.welcome_offer_text, ''), (SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 m.business_category, m.welcome_promo_code, m.public_phone, m.public_email,
+                 m.business_presence, m.business_category, m.public_phone, m.public_email,
                  m.is_fullpage_sponsored, m.fullpage_sponsored_until,
                  CASE
                    WHEN m.promo_banner_url IS NULL OR m.promo_banner_url = '' THEN NULL
@@ -1979,7 +2043,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.id = ${idParam}
-            AND m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+            AND m.business_presence IN ('physical','mobile','hybrid','online') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
@@ -2014,7 +2078,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                  l.address,l.city,l.state,l.postal_code,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
-          WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
+          WHERE m.business_presence IN ('physical','mobile','hybrid','online') AND m.account_blocked=false
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
@@ -2085,7 +2149,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       } else if (q && cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2120,7 +2184,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities})
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       } else if (q && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2155,7 +2219,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2190,7 +2254,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       } else if (q) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2225,7 +2289,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like}
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       } else if (cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2260,7 +2324,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities})
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       } else if (zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2295,7 +2359,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       } else {
         // No filters — return all local/mobile merchants
         merchants = await sql`
@@ -2330,7 +2394,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
-          ORDER BY m.business_name ASC LIMIT 500`;
+          ORDER BY m.business_name ASC LIMIT 2000`;
       }
 
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
@@ -2595,6 +2659,8 @@ Working this way is harder and more expensive. The actives still have to earn th
             updated_at = NOW()
         WHERE id = ${merchantId}
       `;
+
+      await notifyIndexNowForMerchant(sql, merchantId);
 
       // Generate fresh tokens
       const token = jwt.sign(
@@ -4024,6 +4090,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         await sql`UPDATE "Campaign" SET title = ${d.welcome_offer_text}, updated_at = NOW()
           WHERE merchant_id = ${merchantId} AND campaign_type = 'initial'`;
       }
+      await notifyIndexNowForMerchant(sql, merchantId);
       return send(res, 200, { success: true });
     }
 
@@ -5090,7 +5157,8 @@ Working this way is harder and more expensive. The actives still have to earn th
              public_phone = ${data.public_phone !== undefined ? (data.public_phone || null) : sql`public_phone`},
              public_email = ${data.public_email !== undefined ? (data.public_email ? data.public_email.toLowerCase() : null) : sql`public_email`},
              website = COALESCE(${data.website !== undefined ? data.website : null}, website),
-             welcome_offer_text = COALESCE(${newWelcomeOfferText}, welcome_offer_text)
+             welcome_offer_text = COALESCE(${newWelcomeOfferText}, welcome_offer_text),
+             updated_at = NOW()
            WHERE id = ${merchantId}
          `;
         // Update nullable URL fields separately (COALESCE would skip intentional clears)
@@ -5113,21 +5181,21 @@ Working this way is harder and more expensive. The actives still have to earn th
             else if (rLower.includes('trustpilot')) detectedPlatform = 'Trustpilot';
             else if (rLower.includes('bbb.org')) detectedPlatform = 'BBB';
           }
-          await sql`UPDATE "Merchant" SET review_url = ${newReviewUrl}, rating_platform = COALESCE(${detectedPlatform}, rating_platform) WHERE id = ${merchantId}`;
+          await sql`UPDATE "Merchant" SET review_url = ${newReviewUrl}, rating_platform = COALESCE(${detectedPlatform}, rating_platform), updated_at = NOW() WHERE id = ${merchantId}`;
         }
         if (newOrderUrl !== undefined) {
-          await sql`UPDATE "Merchant" SET order_url = ${newOrderUrl} WHERE id = ${merchantId}`;
+          await sql`UPDATE "Merchant" SET order_url = ${newOrderUrl}, updated_at = NOW() WHERE id = ${merchantId}`;
         }
         if (data.public_phone !== undefined) {
           const newPublicPhone = data.public_phone ? data.public_phone.trim() : null;
-          await sql`UPDATE "Merchant" SET public_phone = ${newPublicPhone} WHERE id = ${merchantId}`;
+          await sql`UPDATE "Merchant" SET public_phone = ${newPublicPhone}, updated_at = NOW() WHERE id = ${merchantId}`;
         }
         if (data.public_email !== undefined) {
           const newPublicEmail = data.public_email ? data.public_email.trim().toLowerCase() : null;
-          await sql`UPDATE "Merchant" SET public_email = ${newPublicEmail} WHERE id = ${merchantId}`;
+          await sql`UPDATE "Merchant" SET public_email = ${newPublicEmail}, updated_at = NOW() WHERE id = ${merchantId}`;
         }
         if (data.is_multi_location !== undefined) {
-          await sql`UPDATE "Merchant" SET is_multi_location = ${!!data.is_multi_location} WHERE id = ${merchantId}`;
+          await sql`UPDATE "Merchant" SET is_multi_location = ${!!data.is_multi_location}, updated_at = NOW() WHERE id = ${merchantId}`;
         }
         // Also sync the initial campaign title so the print sign stays up to date
         if (newWelcomeOfferText) {
@@ -5160,8 +5228,10 @@ Working this way is harder and more expensive. The actives still have to earn th
              postal_code = ${data.zip !== undefined ? (data.zip ? data.zip.trim() : null) : sql`postal_code`}
            WHERE merchant_id = ${merchantId}
         `;
+        await sql`UPDATE "Merchant" SET updated_at = NOW() WHERE id = ${merchantId}`;
       }
 
+      await notifyIndexNowForMerchant(sql, merchantId);
       return send(res, 200, { success: true, message: 'Profile updated successfully', new_business_name: data.business_name });
     }
 
@@ -5803,7 +5873,8 @@ Working this way is harder and more expensive. The actives still have to earn th
         if (typeof body.is_hidden !== 'boolean') {
           return send(res, 400, { success: false, error: 'is_hidden must be a boolean' });
         }
-        await sql`UPDATE "Merchant" SET is_hidden = ${body.is_hidden} WHERE id = ${merchantId}`;
+        await sql`UPDATE "Merchant" SET is_hidden = ${body.is_hidden}, updated_at = NOW() WHERE id = ${merchantId}`;
+        await notifyIndexNowForMerchant(sql, merchantId, { allowHidden: true });
         return send(res, 200, { success: true, message: 'Visibility updated' });
       } catch (err) {
         console.error('Toggle visibility error:', err);
@@ -5826,7 +5897,8 @@ Working this way is harder and more expensive. The actives still have to earn th
             is_app_sponsored = ${body.is_app_sponsored !== undefined ? body.is_app_sponsored : sql`is_app_sponsored`},
             app_sponsored_until = ${body.app_sponsored_until !== undefined ? (body.app_sponsored_until ? new Date(body.app_sponsored_until) : null) : sql`app_sponsored_until`},
             is_fullpage_sponsored = ${body.is_fullpage_sponsored !== undefined ? body.is_fullpage_sponsored : sql`is_fullpage_sponsored`},
-            fullpage_sponsored_until = ${body.fullpage_sponsored_until !== undefined ? (body.fullpage_sponsored_until ? new Date(body.fullpage_sponsored_until) : null) : sql`fullpage_sponsored_until`}
+            fullpage_sponsored_until = ${body.fullpage_sponsored_until !== undefined ? (body.fullpage_sponsored_until ? new Date(body.fullpage_sponsored_until) : null) : sql`fullpage_sponsored_until`},
+            updated_at = NOW()
           WHERE id = ${merchantId}
         `;
         return send(res, 200, { success: true, message: 'Sponsorship updated' });
@@ -5874,6 +5946,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           const promoDesc = body.promo_description ? body.promo_description.trim().slice(0, 1000) : null;
           await sql`UPDATE "Merchant" SET promo_description = ${promoDesc}, updated_at = NOW() WHERE id = ${merchantId}`;
         }
+        await notifyIndexNowForMerchant(sql, merchantId);
         return send(res, 200, { success: true, message: 'Creative updated successfully' });
       } catch (err) {
         console.error('Update creative error:', err);
@@ -6030,6 +6103,10 @@ Working this way is harder and more expensive. The actives still have to earn th
               ON CONFLICT (merchant_id) DO UPDATE SET contractor_id = ${ctr.id}, updated_at = NOW()
             `;
           }
+        }
+
+        if (!isHidden) {
+          await notifyIndexNowForMerchant(sql, merchant.id);
         }
 
         return send(res, 200, {
@@ -6291,6 +6368,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           }
         }
 
+        await notifyIndexNowForMerchant(sql, merchantId, { allowHidden: Boolean(data.is_hidden === true) });
         return send(res, 200, { success: true, message: 'Pre-setup merchant updated successfully' });
       } catch (err) {
         console.error('Error updating pre-setup merchant:', err);
@@ -7439,6 +7517,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           VALUES (gen_random_uuid()::text, ${merchantId}, 'approved', ${billingWarning || null}, NOW())`;
       } catch (histErr) { console.error('History record failed (approve):', histErr.message); }
 
+      await notifyIndexNowForMerchant(sql, merchantId);
+
       return send(res, 200, {
         success: true,
         message: 'Application approved',
@@ -7502,6 +7582,8 @@ Working this way is harder and more expensive. The actives still have to earn th
           await emailApi.sendTransacEmail(emailObj);
         }
       } catch (emailErr) { console.error('Demo approval email failed:', emailErr.message); }
+
+      await notifyIndexNowForMerchant(sql, merchantId);
 
       return send(res, 200, { success: true, message: 'Demo account approved securely' });
     }
