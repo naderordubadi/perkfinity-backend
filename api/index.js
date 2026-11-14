@@ -1900,7 +1900,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           AND m.account_blocked = false
           AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
-        ORDER BY m.business_name ASC
+        ORDER BY LOWER(m.business_name) ASC
       `;
 
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
@@ -1951,7 +1951,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_category = ${category}
-          ORDER BY m.business_name ASC
+          ORDER BY LOWER(m.business_name) ASC
         `;
       } else {
         merchants = await sql`
@@ -1989,7 +1989,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.account_blocked = false
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
-          ORDER BY m.business_name ASC
+          ORDER BY LOWER(m.business_name) ASC
         `;
       }
 
@@ -2149,7 +2149,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       } else if (q && cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2184,7 +2184,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND LOWER(l.city)=ANY(${cities})
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       } else if (q && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2219,7 +2219,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like} AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       } else if (cities.length > 0 && zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2254,7 +2254,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities}) AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       } else if (q) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2289,7 +2289,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND m.business_name ILIKE ${like}
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       } else if (cities.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2324,7 +2324,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND LOWER(l.city)=ANY(${cities})
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       } else if (zips.length > 0) {
         merchants = await sql`
           SELECT m.id,m.business_name,m.updated_at,
@@ -2359,7 +2359,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
             AND l.postal_code=ANY(${zips})
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       } else {
         // No filters — return all local/mobile merchants
         merchants = await sql`
@@ -2394,7 +2394,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND (m.application_status IS NULL OR m.application_status = 'approved')
             AND m.business_name != '[Deleted]'
             AND m.is_hidden = false
-          ORDER BY m.business_name ASC LIMIT 2000`;
+          ORDER BY LOWER(m.business_name) ASC LIMIT 2000`;
       }
 
       const formattedMerchants = merchants.map(m => formatMerchantImages(m, req));
