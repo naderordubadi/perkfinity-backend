@@ -4184,11 +4184,15 @@ Working this way is harder and more expensive. The actives still have to earn th
         return send(res, 400, { success: false, error: 'merchant_id and action_type are required' });
       }
 
-      // Bot filter
+      // Bot, crawler & link-preview unfurler filter
       const userAgent = req.headers['user-agent'] || '';
-      if (/bot|googlebot|crawler|spider|robot|crawling/i.test(userAgent)) {
+      if (/bot|googlebot|crawler|spider|robot|crawling|headless|lighthouse|pagespeed|slurp|mediapartners|facebookexternalhit|facebot|whatsapp|slackbot|twitterbot|discordbot|telegrambot|linkedinbot|pinterest|embedly|quora|outbrain|applebot|bingpreview|bytespider|gptbot|chatgpt|claudebot|anthropic|perplexity|ahrefs|semrush|mj12bot|dotbot|petalbot|yandex|baiduspider|duckduckbot|curl\/|wget\/|python-requests|go-http-client/i.test(userAgent)) {
         return send(res, 200, { success: true, ignored: true });
       }
+
+      const normalizedAction = action_type === 'map'
+        ? 'map_directions'
+        : (action_type === 'storefront_view' ? 'view' : action_type);
 
       // Anonymized IP hash
       const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
@@ -4204,7 +4208,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             ${user_id || null},
             ${platform || 'web'},
             ${source || 'web_localperks'},
-            ${action_type},
+            ${normalizedAction},
             ${target_url || null},
             ${ipHash},
             NOW()
@@ -4471,18 +4475,29 @@ Working this way is harder and more expensive. The actives still have to earn th
       const platformCounts = {
         ios: 0,
         android: 0,
+        app: 0,
         web: 0
+      };
+      const webSources = {
+        store_seo_pages: 0,
+        city_deal_hubs: 0,
+        web_directory: 0
       };
       let takeoverClicks = 0;
       let carouselClicks = 0;
 
       for (const row of clicks) {
-        if (row.action_type === 'view') {
+        const actType = row.action_type === 'map'
+          ? 'map_directions'
+          : (row.action_type === 'storefront_view' ? 'view' : row.action_type);
+        const src = String(row.source || '');
+
+        if (actType === 'view') {
           totalViews++;
         } else {
           totalActions++;
-          if (actionCounts[row.action_type] !== undefined) {
-            actionCounts[row.action_type]++;
+          if (actionCounts[actType] !== undefined) {
+            actionCounts[actType]++;
           }
         }
 
@@ -4490,13 +4505,37 @@ Working this way is harder and more expensive. The actives still have to earn th
           platformCounts[row.platform]++;
         }
 
-        if (row.action_type === 'vip_takeover' || row.source === 'web_vip_takeover' || row.source === 'app_vip_takeover') {
+        if (row.platform === 'web') {
+          if (src === 'web_store_page' || src === 'web_store_page_vip') {
+            webSources.store_seo_pages++;
+          } else if (src.startsWith('web_deals_city')) {
+            webSources.city_deal_hubs++;
+          } else {
+            webSources.web_directory++;
+          }
+        }
+
+        if (
+          actType === 'vip_takeover' ||
+          src === 'web_vip_takeover' ||
+          src === 'web_store_page_vip' ||
+          src === 'web_deals_city_vip' ||
+          src === 'app_vip_takeover'
+        ) {
           takeoverClicks++;
         }
-        if (row.source === 'web_sponsored' || row.source === 'app_sponsored' || row.action_type === 'carousel_click') {
+        if (
+          src === 'web_sponsored' ||
+          src === 'web_deals_city_sponsored' ||
+          src === 'app_sponsored' ||
+          actType === 'carousel_click'
+        ) {
           carouselClicks++;
         }
       }
+
+      const appChannelTotal = (platformCounts.ios || 0) + (platformCounts.android || 0) + (platformCounts.app || 0);
+      const webChannelTotal = platformCounts.web || 0;
 
       const isAppActive = !!(merchant.is_app_sponsored && (!merchant.app_sponsored_until || new Date(merchant.app_sponsored_until) >= new Date()));
       const isWebActive = !!(merchant.is_web_sponsored && (!merchant.web_sponsored_until || new Date(merchant.web_sponsored_until) >= new Date()));
@@ -4523,13 +4562,15 @@ Working this way is harder and more expensive. The actives still have to earn th
         },
         metrics: {
           total_reach: totalViews + totalActions,
+          total_views: totalViews,
           total_actions: totalActions,
           in_store_redemptions: redemptionsCountRow?.count || 0,
           in_store_members_joined: membersCountRow?.count || 0,
           monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
           channels: {
-            app: (platformCounts.ios || 0) + (platformCounts.android || 0),
-            web: platformCounts.web || 0
+            app: appChannelTotal,
+            web: webChannelTotal,
+            web_sources: webSources
           },
           actions_breakdown: actionCounts,
           sponsorship: {
@@ -4546,6 +4587,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         },
         summary: {
           totalReach: totalViews + totalActions,
+          totalViews: totalViews,
           totalActions: totalActions,
           inStoreRedemptions: redemptionsCountRow?.count || 0,
           inStoreMembersJoined: membersCountRow?.count || 0
@@ -4563,8 +4605,9 @@ Working this way is harder and more expensive. The actives still have to earn th
         },
         actionsBreakdown: actionCounts,
         channelBreakdown: {
-          app: (platformCounts.ios || 0) + (platformCounts.android || 0),
-          web: platformCounts.web || 0
+          app: appChannelTotal,
+          web: webChannelTotal,
+          web_sources: webSources
         },
         data: {
           merchant_name: merchant.business_name,
@@ -4573,13 +4616,15 @@ Working this way is harder and more expensive. The actives still have to earn th
           monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
           metrics: {
             total_reach: totalViews + totalActions,
+            total_views: totalViews,
             total_actions: totalActions,
             in_store_redemptions: redemptionsCountRow?.count || 0,
             in_store_members_joined: membersCountRow?.count || 0,
             monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
             channels: {
-              app: (platformCounts.ios || 0) + (platformCounts.android || 0),
-              web: platformCounts.web || 0
+              app: appChannelTotal,
+              web: webChannelTotal,
+              web_sources: webSources
             },
             actions_breakdown: actionCounts,
             sponsorship: {
@@ -4698,6 +4743,7 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       const [merchant] = await sql`
         SELECT m.id, m.business_name, m.subscription_tier, m.business_presence, m.public_email,
+               m.is_app_sponsored, m.is_web_sponsored, m.is_fullpage_sponsored,
                (SELECT email FROM "MerchantUser" WHERE merchant_id = m.id LIMIT 1) AS owner_email
         FROM "Merchant" m
         WHERE m.id = ${targetMerchantId}
@@ -4763,33 +4809,61 @@ Working this way is harder and more expensive. The actives still have to earn th
         email: 0,
         vip_takeover: 0
       };
-      const platformCounts = { app: 0, web: 0 };
+      const platformCounts = { ios: 0, android: 0, app: 0, web: 0 };
+      const webSources = { store_seo_pages: 0, city_deal_hubs: 0, web_directory: 0 };
 
       let takeoverClicks = 0;
       let carouselClicks = 0;
       for (const row of clicks) {
-        if (row.action_type === 'storefront_view') {
+        const actType = row.action_type === 'map'
+          ? 'map_directions'
+          : (row.action_type === 'storefront_view' ? 'view' : row.action_type);
+        const src = String(row.source || '');
+
+        if (actType === 'view') {
           totalViews++;
         } else {
           totalActions++;
-          if (actionCounts[row.action_type] !== undefined) {
-            actionCounts[row.action_type]++;
+          if (actionCounts[actType] !== undefined) {
+            actionCounts[actType]++;
           }
         }
         if (platformCounts[row.platform] !== undefined) {
           platformCounts[row.platform]++;
         }
-        if (row.action_type === 'vip_takeover' || row.source === 'web_vip_takeover' || row.source === 'app_vip_takeover') {
+        if (row.platform === 'web') {
+          if (src === 'web_store_page' || src === 'web_store_page_vip') {
+            webSources.store_seo_pages++;
+          } else if (src.startsWith('web_deals_city')) {
+            webSources.city_deal_hubs++;
+          } else {
+            webSources.web_directory++;
+          }
+        }
+        if (
+          actType === 'vip_takeover' ||
+          src === 'web_vip_takeover' ||
+          src === 'web_store_page_vip' ||
+          src === 'web_deals_city_vip' ||
+          src === 'app_vip_takeover'
+        ) {
           takeoverClicks++;
         }
-        if (row.source === 'web_sponsored' || row.source === 'app_sponsored' || row.action_type === 'carousel_click') {
+        if (
+          src === 'web_sponsored' ||
+          src === 'web_deals_city_sponsored' ||
+          src === 'app_sponsored' ||
+          actType === 'carousel_click'
+        ) {
           carouselClicks++;
         }
       }
 
+      const appChannelCount = (platformCounts.ios || 0) + (platformCounts.android || 0) + (platformCounts.app || 0);
+      const webChannelCount = platformCounts.web || 0;
       const totalReach = totalViews + totalActions;
-      const totalChannel = (platformCounts.app || 0) + (platformCounts.web || 0);
-      const appPct = totalChannel > 0 ? Math.round(((platformCounts.app || 0) / totalChannel) * 100) : 0;
+      const totalChannel = appChannelCount + webChannelCount;
+      const appPct = totalChannel > 0 ? Math.round((appChannelCount / totalChannel) * 100) : 0;
       const webPct = totalChannel > 0 ? (100 - appPct) : 0;
 
       const BREVO_KEY = process.env.BREVO_API_KEY;
@@ -4914,13 +4988,19 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px 20px;margin-bottom:28px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;font-weight:700;color:#64748b;">
-          <span>📱 Mobile App: ${(platformCounts.app || 0).toLocaleString()} (${appPct}%)</span>
-          <span>💻 Web &amp; Directory: ${(platformCounts.web || 0).toLocaleString()} (${webPct}%)</span>
+          <span>📱 Mobile App: ${appChannelCount.toLocaleString()} (${appPct}%)</span>
+          <span>💻 Web &amp; Search: ${webChannelCount.toLocaleString()} (${webPct}%)</span>
         </div>
         <div style="height:8px;background:#e2e8f0;border-radius:999px;overflow:hidden;display:flex;">
           <div style="width:${appPct}%;background:#5B3FA5;"></div>
           <div style="width:${webPct}%;background:#10b981;"></div>
         </div>
+        ${webChannelCount > 0 ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0;font-size:11.5px;color:#475569;font-weight:600;display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;">
+          <span>🔍 Store SEO Pages: <strong>${webSources.store_seo_pages.toLocaleString()}</strong></span>
+          <span>🏙️ City Deal Hubs: <strong>${webSources.city_deal_hubs.toLocaleString()}</strong></span>
+          <span>🌐 Directory &amp; Codes: <strong>${webSources.web_directory.toLocaleString()}</strong></span>
+        </div>` : ''}
       </div>
 
       <div style="border-top:1.5px solid #f1f5f9;padding-top:20px;margin-top:20px;">
@@ -5000,12 +5080,15 @@ Working this way is harder and more expensive. The actives still have to earn th
           CASE WHEN m.is_app_sponsored = true AND (m.app_sponsored_until IS NULL OR m.app_sponsored_until >= NOW()) THEN true ELSE false END as is_app_sponsored,
           CASE WHEN m.is_web_sponsored = true AND (m.web_sponsored_until IS NULL OR m.web_sponsored_until >= NOW()) THEN true ELSE false END as is_web_sponsored,
           CASE WHEN m.is_fullpage_sponsored = true AND (m.fullpage_sponsored_until IS NULL OR m.fullpage_sponsored_until >= NOW()) THEN true ELSE false END as is_fullpage_sponsored,
-          COUNT(CASE WHEN c.id IS NOT NULL AND c.action_type != 'view' THEN 1 END)::int as total_actions,
-          COUNT(CASE WHEN c.platform = 'web' AND c.action_type != 'view' THEN 1 END)::int as web_actions,
-          COUNT(CASE WHEN c.platform IN ('ios', 'android') AND c.action_type != 'view' THEN 1 END)::int as app_actions,
+          COUNT(CASE WHEN c.id IS NOT NULL AND c.action_type NOT IN ('view', 'storefront_view') THEN 1 END)::int as total_actions,
+          COUNT(CASE WHEN c.platform = 'web' AND c.action_type NOT IN ('view', 'storefront_view') THEN 1 END)::int as web_actions,
+          COUNT(CASE WHEN c.platform IN ('ios', 'android', 'app') AND c.action_type NOT IN ('view', 'storefront_view') THEN 1 END)::int as app_actions,
+          COUNT(CASE WHEN c.action_type IN ('view', 'storefront_view') THEN 1 END)::int as total_views,
+          COUNT(CASE WHEN c.source IN ('web_store_page', 'web_store_page_vip') THEN 1 END)::int as seo_store_reach,
+          COUNT(CASE WHEN c.source LIKE 'web_deals_city%' THEN 1 END)::int as seo_city_reach,
           COUNT(CASE WHEN c.action_type = 'website' THEN 1 END)::int as website_clicks,
           COUNT(CASE WHEN c.action_type = 'order' THEN 1 END)::int as order_clicks,
-          COUNT(CASE WHEN c.action_type = 'map_directions' THEN 1 END)::int as map_clicks,
+          COUNT(CASE WHEN c.action_type IN ('map_directions', 'map') THEN 1 END)::int as map_clicks,
           COUNT(CASE WHEN c.action_type = 'phone' THEN 1 END)::int as phone_clicks,
           COUNT(CASE WHEN c.action_type = 'review_social' THEN 1 END)::int as review_clicks,
           COUNT(CASE WHEN c.action_type = 'email' THEN 1 END)::int as email_clicks,
@@ -5018,13 +5101,17 @@ Working this way is harder and more expensive. The actives still have to earn th
         WHERE m.business_name != '[Deleted]'
           AND (m.account_blocked = false OR m.account_blocked IS NULL)
         GROUP BY m.id, m.business_name, m.subscription_tier, m.is_presetup, m.member_limit, m.business_presence, m.is_app_sponsored, m.app_sponsored_until, m.is_web_sponsored, m.web_sponsored_until, m.is_fullpage_sponsored, m.fullpage_sponsored_until
-        ORDER BY total_actions DESC, m.business_name ASC
+        ORDER BY total_actions DESC, total_views DESC, m.business_name ASC
       `;
 
       let networkTotalActions = 0;
       let networkWebActions = 0;
       let networkAppActions = 0;
+      let networkTotalViews = 0;
+      let networkSeoStoreReach = 0;
+      let networkSeoCityReach = 0;
       let merchantsWithActionsCount = 0;
+      let merchantsWithTrafficCount = 0;
       const networkActionBreakdown = {
         website: 0,
         order: 0,
@@ -5037,10 +5124,17 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       const formattedMerchants = summaryRows.map(m => {
         const total = m.total_actions || 0;
+        const views = m.total_views || 0;
+        const seoStore = m.seo_store_reach || 0;
+        const seoCity = m.seo_city_reach || 0;
         if (total > 0) merchantsWithActionsCount++;
+        if (total > 0 || views > 0) merchantsWithTrafficCount++;
         networkTotalActions += total;
         networkWebActions += (m.web_actions || 0);
         networkAppActions += (m.app_actions || 0);
+        networkTotalViews += views;
+        networkSeoStoreReach += seoStore;
+        networkSeoCityReach += seoCity;
 
         networkActionBreakdown.website += (m.website_clicks || 0);
         networkActionBreakdown.order += (m.order_clicks || 0);
@@ -5062,6 +5156,11 @@ Working this way is harder and more expensive. The actives still have to earn th
           is_web_sponsored: !!m.is_web_sponsored,
           is_fullpage_sponsored: !!m.is_fullpage_sponsored,
           total_actions: total,
+          total_views: views,
+          total_reach: total + views,
+          seo_store_reach: seoStore,
+          seo_city_reach: seoCity,
+          seo_total_reach: seoStore + seoCity,
           web_actions: m.web_actions || 0,
           app_actions: m.app_actions || 0,
           action_breakdown: {
@@ -5087,9 +5186,15 @@ Working this way is harder and more expensive. The actives still have to earn th
         data: {
           summary: {
             total_actions: networkTotalActions,
+            total_views: networkTotalViews,
+            total_reach: networkTotalActions + networkTotalViews,
             web_actions: networkWebActions,
             app_actions: networkAppActions,
+            seo_store_reach: networkSeoStoreReach,
+            seo_city_reach: networkSeoCityReach,
+            seo_total_reach: networkSeoStoreReach + networkSeoCityReach,
             total_merchants_with_actions: merchantsWithActionsCount,
+            total_merchants_with_traffic: merchantsWithTrafficCount,
             action_breakdown: networkActionBreakdown
           },
           merchants: formattedMerchants
