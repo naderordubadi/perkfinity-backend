@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const SibApiV3Sdk = require('sib-api-v3-sdk');
 const Stripe = require('stripe');
 const cheerio = require('cheerio');
+const { geocodeLocation, shouldRegeocodeLocation } = require('./lib/_geocode');
 
 // ── Firebase Admin Init ──────────────────────────────────────────
 const admin = require('firebase-admin');
@@ -742,16 +743,29 @@ module.exports = async function handler(req, res) {
         RETURNING id, merchant_id, email, role, status, created_at
       `;
 
-      // Insert location — conditional per presence type
+      // Insert location — conditional per presence type (auto-geocoded server-side)
       if (presence === 'physical') {
+        const geo = await geocodeLocation({
+          address: data.address,
+          city: data.city,
+          state: data.state,
+          postal_code: data.zip,
+          business_presence: 'physical'
+        });
         await sql`
-          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, latitude, longitude, geocode_precision, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', ${geo.latitude}, ${geo.longitude}, ${geo.geocode_precision}, true, ${now})
         `;
       } else if (presence === 'mobile') {
+        const geo = await geocodeLocation({
+          city: data.city,
+          state: data.state,
+          postal_code: data.zip,
+          business_presence: 'mobile'
+        });
         await sql`
-          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, latitude, longitude, geocode_precision, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', ${data.city}, ${data.state}, ${data.zip}, 'US', ${geo.latitude}, ${geo.longitude}, ${geo.geocode_precision}, true, ${now})
         `;
       } else {
         // online: stub location row so relations remain intact
@@ -914,10 +928,17 @@ module.exports = async function handler(req, res) {
 
       // Location row — real address for single-location hybrid; stub for online or multi-location hybrid
       if (isHybridApply && !isMultiLocation) {
-        // Single-location hybrid: store real address for localperks discovery
+        // Single-location hybrid: store real address + server-side coordinates for localperks discovery
+        const geo = await geocodeLocation({
+          address: data.address,
+          city: data.city,
+          state: data.state,
+          postal_code: data.zip,
+          business_presence: 'hybrid'
+        });
         await sql`
-          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, latitude, longitude, geocode_precision, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', ${geo.latitude}, ${geo.longitude}, ${geo.geocode_precision}, true, ${now})
         `;
       } else {
         // Online or multi-location hybrid: stub row (no physical address)
@@ -1092,11 +1113,24 @@ module.exports = async function handler(req, res) {
       `;
 
       if ((applyPresence === 'physical' || isHybridApply) && !isMultiLocation) {
-        await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', true, ${now})`;
+        const geo = await geocodeLocation({
+          address: data.address,
+          city: data.city,
+          state: data.state,
+          postal_code: data.zip,
+          business_presence: isHybridApply ? 'hybrid' : 'physical'
+        });
+        await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, latitude, longitude, geocode_precision, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${data.address}, ${data.suite || ''}, ${data.city}, ${data.state}, ${data.zip}, 'US', ${geo.latitude}, ${geo.longitude}, ${geo.geocode_precision}, true, ${now})`;
       } else if (rawPresence === 'mobile') {
-        await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', ${data.city || null}, ${data.state || 'CA'}, ${data.zip || null}, 'US', true, ${now})`;
+        const geo = await geocodeLocation({
+          city: data.city || null,
+          state: data.state || 'CA',
+          postal_code: data.zip || null,
+          business_presence: 'mobile'
+        });
+        await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, latitude, longitude, geocode_precision, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', ${data.city || null}, ${data.state || 'CA'}, ${data.zip || null}, 'US', ${geo.latitude}, ${geo.longitude}, ${geo.geocode_precision}, true, ${now})`;
       } else {
         await sql`INSERT INTO "MerchantLocation" (id, merchant_id, address, suite, city, state, postal_code, country, is_active, created_at)
           VALUES (gen_random_uuid()::text, ${merchant.id}, NULL, '', NULL, NULL, NULL, 'US', true, ${now})`;
@@ -2039,7 +2073,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.id = ${idParam}
@@ -2075,7 +2111,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid','online') AND m.account_blocked=false
@@ -2102,7 +2140,7 @@ Working this way is harder and more expensive. The actives still have to earn th
                    END AS logo_url,
                    m.business_presence,m.business_category,
                    COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                   l.city,l.state,l.postal_code
+                   l.id AS location_id,l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision
             FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
             WHERE m.id != ${primary.id}
               AND m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2141,7 +2179,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2176,7 +2216,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2211,7 +2253,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2246,7 +2290,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2281,7 +2327,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2316,7 +2364,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2351,7 +2401,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -2387,7 +2439,9 @@ Working this way is harder and more expensive. The actives still have to earn th
                  m.promo_description,
                  m.rating_score,m.rating_count,m.rating_platform,m.website,m.order_url,m.review_url,m.public_phone,m.public_email,
                  COALESCE(m.welcome_offer_text,(SELECT c.title FROM "Campaign" c WHERE c.merchant_id=m.id AND c.status='active' AND c.campaign_type='initial' ORDER BY c.created_at ASC LIMIT 1)) AS welcome_offer_text,
-                 l.address,l.city,l.state,l.postal_code,
+                 l.id AS location_id,
+                 CASE WHEN m.business_presence = 'mobile' THEN NULL ELSE l.address END AS address,
+                 l.city,l.state,l.postal_code,l.latitude,l.longitude,l.geocode_precision,
                  (SELECT q2.public_code FROM "QrCode" q2 WHERE q2.merchant_id=m.id AND q2.status='active' LIMIT 1) AS qr_public_code
           FROM "Merchant" m LEFT JOIN "MerchantLocation" l ON l.merchant_id=m.id AND l.is_active=true
           WHERE m.business_presence IN ('physical','mobile','hybrid') AND m.account_blocked=false
@@ -3126,11 +3180,16 @@ Working this way is harder and more expensive. The actives still have to earn th
         const ua = (req.headers['user-agent'] || '').toLowerCase();
         const platform = ua.includes('android') ? 'android' : (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') ? 'ios' : 'web');
         const hash = await bcrypt.hash(data.password, 12);
-        await sql`UPDATE "User" SET password_hash = ${hash}, last_active = NOW(), device_platform = COALESCE(device_platform, ${platform}) WHERE id = ${existing.id}`;
+        const [updatedExisting] = await sql`
+          UPDATE "User"
+          SET password_hash = ${hash}, last_active = NOW(), device_platform = COALESCE(device_platform, ${platform})
+          WHERE id = ${existing.id}
+          RETURNING id, email, full_name, phone_number, city, zip_code, gender, location_sharing_enabled, push_notifications_enabled
+        `;
         const JWT_SECRET = process.env.JWT_SECRET;
         const token = jwt.sign({ userId: existing.id, role: 'consumer' }, JWT_SECRET, { expiresIn: '180d' });
         await autoEnrollUser(sql, existing.id, data.qrCode);
-        return send(res, 200, { success: true, data: { user: { id: existing.id, email: data.email.toLowerCase() }, accessToken: token } });
+        return send(res, 200, { success: true, data: { user: updatedExisting || { id: existing.id, email: data.email.toLowerCase() }, accessToken: token } });
       }
 
       const ua = (req.headers['user-agent'] || '').toLowerCase();
@@ -3263,6 +3322,25 @@ Working this way is harder and more expensive. The actives still have to earn th
       return send(res, 200, { success: true, message: 'Your password has been successfully reset. You can now log into the app.' });
     }
 
+    // ── GET /api/v1/consumers/profile ─────────────────────────────
+    if (method === 'GET' && url.endsWith('/consumers/profile')) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) return send(res, 401, { success: false, error: 'Unauthorized' });
+
+      let payload;
+      try { payload = jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET); }
+      catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
+
+      const [user] = await sql`
+        SELECT id, email, full_name, phone_number, city, zip_code, gender, location_sharing_enabled, push_notifications_enabled
+        FROM "User"
+        WHERE id = ${payload.userId}
+        LIMIT 1
+      `;
+      if (!user) return send(res, 404, { success: false, error: 'User not found' });
+      return send(res, 200, { success: true, data: { user } });
+    }
+
     // ── PUT /api/v1/consumers/profile ─────────────────────────────
     if (method === 'PUT' && url.endsWith('/consumers/profile')) {
       const authHeader = req.headers.authorization;
@@ -3273,17 +3351,23 @@ Working this way is harder and more expensive. The actives still have to earn th
       catch (err) { return send(res, 401, { success: false, error: 'Invalid token' }); }
 
       const data = req.body || {};
+      const ALLOWED_GENDERS = ['Female', 'Male', 'Non-binary', 'Prefer not to answer'];
+      const normalizedGender = typeof data.gender === 'string' && ALLOWED_GENDERS.includes(data.gender.trim())
+        ? data.gender.trim()
+        : null;
+
       const [user] = await sql`
         UPDATE "User"
-        SET full_name = COALESCE(${data.full_name}, full_name),
-            phone_number = COALESCE(${data.phone_number}, phone_number),
-            city = COALESCE(${data.city}, city),
-            zip_code = COALESCE(${data.zip_code}, zip_code),
-            location_sharing_enabled = COALESCE(${data.location_sharing_enabled}, location_sharing_enabled),
-            push_notifications_enabled = COALESCE(${data.push_notifications_enabled}, push_notifications_enabled),
+        SET full_name = COALESCE(${data.full_name ?? null}, full_name),
+            phone_number = COALESCE(${data.phone_number ?? null}, phone_number),
+            city = COALESCE(${data.city ?? null}, city),
+            zip_code = COALESCE(${data.zip_code ?? null}, zip_code),
+            gender = COALESCE(${normalizedGender}, gender),
+            location_sharing_enabled = COALESCE(${data.location_sharing_enabled ?? null}, location_sharing_enabled),
+            push_notifications_enabled = COALESCE(${data.push_notifications_enabled ?? null}, push_notifications_enabled),
             last_active = NOW()
         WHERE id = ${payload.userId}
-        RETURNING id, email, full_name, phone_number, city, zip_code, location_sharing_enabled, push_notifications_enabled
+        RETURNING id, email, full_name, phone_number, city, zip_code, gender, location_sharing_enabled, push_notifications_enabled
       `;
       return send(res, 200, { success: true, data: { user } });
     }
@@ -3363,7 +3447,29 @@ Working this way is harder and more expensive. The actives still have to earn th
            m.rating_score,
            m.rating_count,
            m.rating_platform,
+           l.id as location_id,
+           l.city as city,
+           l.state as state,
            l.postal_code as zip_code,
+           l.latitude as latitude,
+           l.longitude as longitude,
+           l.geocode_precision as geocode_precision,
+           (SELECT COALESCE(json_agg(json_build_object(
+             'location_id', ml.id,
+             'city', ml.city,
+             'state', ml.state,
+             'postal_code', ml.postal_code,
+             'latitude', ml.latitude,
+             'longitude', ml.longitude,
+             'geocode_precision', ml.geocode_precision,
+             'store_address', CASE
+               WHEN m.business_presence = 'mobile' THEN concat_ws(', ', NULLIF(ml.city, ''), NULLIF(ml.state, ''))
+               ELSE concat_ws(', ', NULLIF(ml.address, ''), NULLIF(ml.city, ''), NULLIF(ml.state, ''))
+             END
+           )), '[]'::json)
+            FROM "MerchantLocation" ml
+            WHERE ml.merchant_id = m.id AND ml.is_active = true AND ml.latitude IS NOT NULL AND ml.longitude IS NOT NULL
+           ) as locations,
            q.public_code as qr_code,
            c.title as discount,
            CASE
@@ -3397,7 +3503,7 @@ Working this way is harder and more expensive. The actives still have to earn th
          WHERE c.status = 'active' AND m.status = 'active'
            AND m.is_hidden = false
            AND (c.end_at IS NULL OR c.end_at > NOW())
-         ORDER BY m.id, c.created_at ASC
+         ORDER BY m.id, (l.latitude IS NULL) ASC, c.created_at ASC
        `;
 
       const result = campaigns.map(c => formatMerchantImages({
@@ -3591,6 +3697,7 @@ Working this way is harder and more expensive. The actives still have to earn th
           phone_number = NULL,
           city = NULL,
           zip_code = NULL,
+          gender = NULL,
           password_hash = NULL,
           push_token = NULL,
           google_sub = NULL,
@@ -4109,7 +4216,7 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       const membersResult = await sql`
         SELECT
-          u.id as user_id, u.city, u.zip_code, u.full_name,
+          u.id as user_id, u.city, u.zip_code, u.gender, u.full_name,
           mm.join_source,
           COALESCE(
             json_agg(
@@ -4138,7 +4245,7 @@ Working this way is harder and more expensive. The actives still have to earn th
         LEFT JOIN "Redemption" r ON r.user_id = u.id
         LEFT JOIN "Campaign" c ON c.id = r.campaign_id AND c.merchant_id = mm.merchant_id
         WHERE mm.merchant_id = ${merchantId}
-        GROUP BY u.id, u.city, u.zip_code, u.full_name, mm.join_source
+        GROUP BY u.id, u.city, u.zip_code, u.gender, u.full_name, mm.join_source
       `;
 
       return send(res, 200, { success: true, data: membersResult });
@@ -4436,6 +4543,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       `;
 
       let membersCountRow = { count: 0 };
+      let memberGenderBreakdown = { Female: 0, Male: 0, 'Non-binary': 0, 'Prefer not to answer': 0, total: 0 };
       try {
         const [mRow] = await sql`
           SELECT COUNT(*)::int as count
@@ -4445,6 +4553,19 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND created_at <= ${end}
         `;
         if (mRow) membersCountRow = mRow;
+
+        const gRows = await sql`
+          SELECT COALESCE(NULLIF(TRIM(u.gender), ''), 'Prefer not to answer') AS gender_key, COUNT(*)::int AS cnt
+          FROM "MerchantMember" mm
+          JOIN "User" u ON u.id = mm.user_id
+          WHERE mm.merchant_id = ${targetMerchantId}
+          GROUP BY 1
+        `;
+        for (const gr of gRows) {
+          const k = memberGenderBreakdown[gr.gender_key] !== undefined ? gr.gender_key : 'Prefer not to answer';
+          memberGenderBreakdown[k] += Number(gr.cnt) || 0;
+          memberGenderBreakdown.total += Number(gr.cnt) || 0;
+        }
       } catch (e) {}
 
       let redemptionsCountRow = { count: 0 };
@@ -4609,11 +4730,17 @@ Working this way is harder and more expensive. The actives still have to earn th
           web: webChannelTotal,
           web_sources: webSources
         },
+        demographics: {
+          gender: memberGenderBreakdown
+        },
         data: {
           merchant_name: merchant.business_name,
           tier: tier,
           reporting_level: reportingLevel,
           monthly_roi_email_enabled: !!merchant.monthly_roi_email_enabled,
+          demographics: {
+            gender: memberGenderBreakdown
+          },
           metrics: {
             total_reach: totalViews + totalActions,
             total_views: totalViews,
@@ -4773,6 +4900,7 @@ Working this way is harder and more expensive. The actives still have to earn th
       `;
 
       let membersCountRow = { count: 0 };
+      let memberGenderBreakdown = { Female: 0, Male: 0, 'Non-binary': 0, 'Prefer not to answer': 0, total: 0 };
       try {
         const [mRow] = await sql`
           SELECT COUNT(*)::int as count
@@ -4782,6 +4910,19 @@ Working this way is harder and more expensive. The actives still have to earn th
             AND created_at <= ${end}
         `;
         if (mRow) membersCountRow = mRow;
+
+        const gRows = await sql`
+          SELECT COALESCE(NULLIF(TRIM(u.gender), ''), 'Prefer not to answer') AS gender_key, COUNT(*)::int AS cnt
+          FROM "MerchantMember" mm
+          JOIN "User" u ON u.id = mm.user_id
+          WHERE mm.merchant_id = ${targetMerchantId}
+          GROUP BY 1
+        `;
+        for (const gr of gRows) {
+          const k = memberGenderBreakdown[gr.gender_key] !== undefined ? gr.gender_key : 'Prefer not to answer';
+          memberGenderBreakdown[k] += Number(gr.cnt) || 0;
+          memberGenderBreakdown.total += Number(gr.cnt) || 0;
+        }
       } catch (e) {}
 
       let redemptionsCountRow = { count: 0 };
@@ -5323,14 +5464,50 @@ Working this way is harder and more expensive. The actives still have to earn th
 
       // Update Location Details (assuming 1 location for now per merchant, based on onboarding signup logic)
       if (data.address !== undefined || data.suite !== undefined || data.city !== undefined || data.state !== undefined || data.zip !== undefined) {
+        const [prevLoc] = await sql`
+          SELECT l.id, l.address, l.suite, l.city, l.state, l.postal_code, l.latitude, l.longitude, l.geocode_precision, m.business_presence
+          FROM "Merchant" m
+          LEFT JOIN "MerchantLocation" l ON l.merchant_id = m.id
+          WHERE m.id = ${merchantId}
+          LIMIT 1
+        `;
+        const curPresence = prevLoc?.business_presence || 'physical';
+        const nextAddress = data.address !== undefined ? (data.address ? data.address.trim() : null) : (prevLoc?.address ?? null);
+        const nextSuite = data.suite !== undefined ? (data.suite ? data.suite.trim() : null) : (prevLoc?.suite ?? null);
+        const nextCity = data.city !== undefined ? (data.city ? data.city.trim() : null) : (prevLoc?.city ?? null);
+        const nextState = data.state !== undefined ? (data.state ? data.state.trim().toUpperCase() : null) : (prevLoc?.state ?? null);
+        const nextZip = data.zip !== undefined ? (data.zip ? data.zip.trim() : null) : (prevLoc?.postal_code ?? null);
+
+        let nextLat = prevLoc?.latitude ?? null;
+        let nextLng = prevLoc?.longitude ?? null;
+        let nextPrec = prevLoc?.geocode_precision ?? null;
+
+        if (curPresence === 'online') {
+          nextLat = null; nextLng = null; nextPrec = null;
+        } else if (shouldRegeocodeLocation(prevLoc, { address: nextAddress, city: nextCity, state: nextState, postal_code: nextZip }, curPresence, curPresence)) {
+          const geo = await geocodeLocation({
+            address: nextAddress,
+            city: nextCity,
+            state: nextState,
+            postal_code: nextZip,
+            business_presence: curPresence
+          });
+          nextLat = geo.latitude;
+          nextLng = geo.longitude;
+          nextPrec = geo.geocode_precision;
+        }
+
         await sql`
            UPDATE "MerchantLocation" 
            SET 
-             address = ${data.address !== undefined ? (data.address ? data.address.trim() : null) : sql`address`},
-             suite = ${data.suite !== undefined ? (data.suite ? data.suite.trim() : null) : sql`suite`},
-             city = ${data.city !== undefined ? (data.city ? data.city.trim() : null) : sql`city`},
-             state = ${data.state !== undefined ? (data.state ? data.state.trim().toUpperCase() : null) : sql`state`},
-             postal_code = ${data.zip !== undefined ? (data.zip ? data.zip.trim() : null) : sql`postal_code`}
+             address = ${nextAddress},
+             suite = ${nextSuite},
+             city = ${nextCity},
+             state = ${nextState},
+             postal_code = ${nextZip},
+             latitude = ${nextLat},
+             longitude = ${nextLng},
+             geocode_precision = ${nextPrec}
            WHERE merchant_id = ${merchantId}
         `;
         await sql`UPDATE "Merchant" SET updated_at = NOW() WHERE id = ${merchantId}`;
@@ -6166,10 +6343,17 @@ Working this way is harder and more expensive. The actives still have to earn th
           RETURNING *
         `;
 
-        // 2. Create Location
+        // 2. Create Location (auto-geocoded server-side)
+        const presetupGeo = await geocodeLocation({
+          address: addressVal,
+          city: cityVal,
+          state: stateVal,
+          postal_code: postalCodeVal,
+          business_presence: 'hybrid'
+        });
         await sql`
-          INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, is_active, created_at)
-          VALUES (gen_random_uuid()::text, ${merchant.id}, ${addressVal}, ${cityVal}, ${stateVal}, ${postalCodeVal}, 'US', true, NOW())
+          INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, latitude, longitude, geocode_precision, is_active, created_at)
+          VALUES (gen_random_uuid()::text, ${merchant.id}, ${addressVal}, ${cityVal}, ${stateVal}, ${postalCodeVal}, 'US', ${presetupGeo.latitude}, ${presetupGeo.longitude}, ${presetupGeo.geocode_precision}, true, NOW())
         `;
 
         // 3. Create MerchantUser
@@ -6424,22 +6608,47 @@ Working this way is harder and more expensive. The actives still have to earn th
           WHERE id = ${merchantId}
         `;
 
-        // 2. Update Location
-        const [loc] = await sql`SELECT id FROM "MerchantLocation" WHERE merchant_id = ${merchantId} LIMIT 1`;
+        // 2. Update Location (only re-geocode when address/city/state/zip actually changed)
+        const [loc] = await sql`SELECT id, address, city, state, postal_code, latitude, longitude, geocode_precision FROM "MerchantLocation" WHERE merchant_id = ${merchantId} LIMIT 1`;
         if (loc) {
+          let nextLat = loc.latitude ?? null;
+          let nextLng = loc.longitude ?? null;
+          let nextPrec = loc.geocode_precision ?? null;
+          if (shouldRegeocodeLocation(loc, { address: addressVal, city: cityVal, state: stateVal, postal_code: postalCodeVal }, 'hybrid', 'hybrid')) {
+            const geo = await geocodeLocation({
+              address: addressVal,
+              city: cityVal,
+              state: stateVal,
+              postal_code: postalCodeVal,
+              business_presence: 'hybrid'
+            });
+            nextLat = geo.latitude;
+            nextLng = geo.longitude;
+            nextPrec = geo.geocode_precision;
+          }
           await sql`
             UPDATE "MerchantLocation" SET
               address = ${addressVal},
               city = ${cityVal},
               state = ${stateVal},
               postal_code = ${postalCodeVal},
+              latitude = ${nextLat},
+              longitude = ${nextLng},
+              geocode_precision = ${nextPrec},
               is_active = true
             WHERE id = ${loc.id}
           `;
         } else {
+          const geo = await geocodeLocation({
+            address: addressVal,
+            city: cityVal,
+            state: stateVal,
+            postal_code: postalCodeVal,
+            business_presence: 'hybrid'
+          });
           await sql`
-            INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, is_active, created_at)
-            VALUES (gen_random_uuid()::text, ${merchantId}, ${addressVal}, ${cityVal}, ${stateVal}, ${postalCodeVal}, 'US', true, NOW())
+            INSERT INTO "MerchantLocation" (id, merchant_id, address, city, state, postal_code, country, latitude, longitude, geocode_precision, is_active, created_at)
+            VALUES (gen_random_uuid()::text, ${merchantId}, ${addressVal}, ${cityVal}, ${stateVal}, ${postalCodeVal}, 'US', ${geo.latitude}, ${geo.longitude}, ${geo.geocode_precision}, true, NOW())
           `;
         }
 
@@ -6484,7 +6693,7 @@ Working this way is harder and more expensive. The actives still have to earn th
     // ── GET /api/v1/admin/members ────────────────────────────────
     if (method === 'GET' && url.endsWith('/admin/members')) {
       const members = await sql`
-        SELECT u.id, u.email, u.full_name, u.phone_number, u.city, u.zip_code, u.push_token, u.device_platform,
+        SELECT u.id, u.email, u.full_name, u.phone_number, u.city, u.zip_code, u.gender, u.push_token, u.device_platform,
           u.created_at,
           (SELECT COUNT(*) FROM "MerchantMember" ml WHERE ml.user_id = u.id) as merchant_count,
           (SELECT COUNT(*) FROM "Redemption" r WHERE r.user_id = u.id AND r.status = 'redeemed') as redemption_count,
@@ -6494,11 +6703,16 @@ Working this way is harder and more expensive. The actives still have to earn th
         ORDER BY u.created_at DESC
       `;
       const pushEnabled = members.filter(m => m.push_token).length;
+      const genderBreakdown = { Female: 0, Male: 0, 'Non-binary': 0, 'Prefer not to answer': 0 };
+      for (const m of members) {
+        const g = m.gender && genderBreakdown[m.gender] !== undefined ? m.gender : 'Prefer not to answer';
+        genderBreakdown[g]++;
+      }
       return send(res, 200, {
         success: true,
         data: {
           members,
-          stats: { total: members.length, push_enabled: pushEnabled }
+          stats: { total: members.length, push_enabled: pushEnabled, gender_breakdown: genderBreakdown }
         }
       });
     }
@@ -9348,7 +9562,7 @@ Working this way is harder and more expensive. The actives still have to earn th
             updated_at = NOW()
         WHERE id = ${merchantId}
       `;
-      await sql`UPDATE "MerchantLocation" SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL WHERE merchant_id = ${merchantId}`;
+      await sql`UPDATE "MerchantLocation" SET address = NULL, suite = NULL, city = NULL, state = NULL, postal_code = NULL, latitude = NULL, longitude = NULL, geocode_precision = NULL WHERE merchant_id = ${merchantId}`;
 
       // ── Expire all active campaigns for this deleted merchant ──
       await sql`UPDATE "Campaign" SET status = 'expired', updated_at = NOW() WHERE merchant_id = ${merchantId} AND status = 'active'`;

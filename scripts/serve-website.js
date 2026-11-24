@@ -53,6 +53,14 @@ const server = http.createServer((req, res) => {
     return sitemapHandler(req, res);
   }
 
+  if (reqPath === '/localperks' || reqPath === '/localperks.html') {
+    reqPath = '/localperks-view.html';
+  } else if (reqPath === '/codes' || reqPath === '/codes.html') {
+    reqPath = '/codes-view.html';
+  }
+  if (reqPath.startsWith('/join/') && reqPath !== '/join/index.html') {
+    reqPath = '/join/index.html';
+  }
   if (reqPath === '/' || reqPath.endsWith('/')) reqPath += 'index.html';
   const filePath = path.resolve(root, '.' + reqPath);
 
@@ -64,6 +72,18 @@ const server = http.createServer((req, res) => {
 
   fs.stat(filePath, (err, stats) => {
     if (err) {
+      // Mirror Vercel cleanUrls: true by falling back to .html
+      if (!path.extname(filePath)) {
+        const htmlCandidate = filePath + '.html';
+        return fs.stat(htmlCandidate, (errHtml, statsHtml) => {
+          if (!errHtml && statsHtml.isFile()) {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            return fs.createReadStream(htmlCandidate).pipe(res);
+          }
+          res.statusCode = 404;
+          return res.end('Not Found: ' + reqPath);
+        });
+      }
       res.statusCode = 404;
       return res.end('Not Found: ' + reqPath);
     }

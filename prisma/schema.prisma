@@ -12,16 +12,30 @@ datasource db {
 // ─── Public Schema ────────────────────────────────────────────────────────────
 
 model User {
-  id          String         @id @default(uuid())
-  email_enc   Bytes?
-  phone_enc   Bytes?
-  city        Bytes?
-  postal_code Bytes?
-  created_at  DateTime       @default(now())
-  last_active DateTime?
-  redemptions Redemption[]
-  activations Activation[]
-  events      Event[]
+  id                         String         @id @default(uuid())
+  email_enc                  Bytes?
+  phone_enc                  Bytes?
+  email                      String?
+  password_hash              String?
+  full_name                  String?
+  phone_number               String?
+  city                       String?
+  zip_code                   String?
+  gender                     String?
+  location_sharing_enabled   Boolean?       @default(false)
+  push_notifications_enabled Boolean?       @default(false)
+  apple_sub                  String?
+  google_sub                 String?
+  reset_token                String?
+  reset_expires_at           DateTime?
+  push_token                 String?
+  device_platform            String?
+  email_unsubscribed         Boolean?       @default(false)
+  created_at                 DateTime       @default(now())
+  last_active                DateTime?
+  redemptions                Redemption[]
+  activations                Activation[]
+  events                     Event[]
   // memberships MerchantMember[]
 
   @@schema("public")
@@ -112,22 +126,25 @@ model Merchant {
 }
 
 model MerchantLocation {
-  id            String     @id @default(uuid())
-  merchant_id   String
-  merchant      Merchant   @relation(fields: [merchant_id], references: [id])
-  location_name String?
-  address       String?
-  suite         String?
-  city          String?
-  state         String?
-  postal_code   String?
-  country       String     @default("US")
-  timezone      String?
-  is_active     Boolean    @default(true)
-  created_at    DateTime   @default(now())
-  qr_codes      QrCode[]
-  campaigns     Campaign[]
-  events        Event[]
+  id                String     @id @default(uuid())
+  merchant_id       String
+  merchant          Merchant   @relation(fields: [merchant_id], references: [id])
+  location_name     String?
+  address           String?
+  suite             String?
+  city              String?
+  state             String?
+  postal_code       String?
+  country           String     @default("US")
+  timezone          String?
+  latitude          Float?
+  longitude         Float?
+  geocode_precision String?
+  is_active         Boolean    @default(true)
+  created_at        DateTime   @default(now())
+  qr_codes          QrCode[]
+  campaigns         Campaign[]
+  events            Event[]
 
   @@schema("public")
 }
